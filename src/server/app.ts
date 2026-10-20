@@ -17,6 +17,18 @@ import {
   type CalendarRepository,
 } from './calendar.js';
 import { createNewsRouter } from './news.js';
+import {
+  createAlgorithmsRouter,
+  MemoryAlgorithmRepository,
+  type AlgorithmRepository,
+} from './algorithms.js';
+import {
+  createNotificationsRouter,
+  MemoryNotificationRepository,
+  NotificationService,
+  validAppOrigin,
+  type NotificationRepository,
+} from './notify.js';
 import { ownerGate } from './owner.js';
 import {
   createSnapshotRouter,
@@ -40,6 +52,12 @@ export type AppOptions = {
   calendarRepository?: CalendarRepository;
   snapshotRepository?: SnapshotRepository;
   loginThrottle?: LoginThrottle;
+  /** Algorithm models, change history, emergency-stop flag and cost settings (owner-only API). */
+  algorithmRepository?: AlgorithmRepository;
+  /** Stage 7a keeps live mode off. Only tests set this, to exercise the live-overlap rule. */
+  algorithmLiveEnabled?: boolean;
+  notificationRepository?: NotificationRepository;
+  notifications?: NotificationService;
   ai?: ReturnType<typeof aiFromEnvironment>;
 };
 const publicUser = (user: User) => ({ id: user.id, email: user.email, role: user.role });
@@ -89,6 +107,15 @@ export function createApp(options: AppOptions = {}) {
   const loginThrottle = options.loginThrottle ?? new MemoryLoginThrottle();
   const store = options.store ?? new MemoryStore();
   const calendarRepository = options.calendarRepository ?? new MemoryCalendarRepository();
+  const algorithmRepository = options.algorithmRepository ?? new MemoryAlgorithmRepository();
+  const notificationRepository =
+    options.notificationRepository ?? new MemoryNotificationRepository();
+  // The service needs an https (or 127.0.0.1) origin for its links; without one nothing is sent.
+  const notifications =
+    options.notifications ??
+    (validAppOrigin(origin)
+      ? new NotificationService({ repository: notificationRepository, appOrigin: origin })
+      : undefined);
   // Owner-only gates. Authentication has already run; both read the server-side session user.
   // Toss-backed data additionally needs the Toss client; owner-account data needs only the id.
   const ownerAccount = ownerGate(options.ownerUserId);
@@ -381,6 +408,25 @@ export function createApp(options: AppOptions = {}) {
     createCalendarRouter({
       repository: calendarRepository,
       ownerUserId: options.ownerUserId,
+    }),
+  );
+  // Owner-only (after authentication and the origin check above).
+  app.use('/api/notifications', ownerAccount);
+  app.use(
+    createNotificationsRouter({
+      repository: notificationRepository,
+      ownerUserId: options.ownerUserId ?? '',
+    }),
+  );
+  app.use(
+    createAlgorithmsRouter({
+      repository: algorithmRepository,
+      ownerUserId: options.ownerUserId,
+      candles: options.toss
+        ? (symbol, interval, count) => options.toss!.candles(symbol, interval, count)
+        : undefined,
+      notify: notifications ? (event) => notifications.notify(event) : undefined,
+      liveEnabled: options.algorithmLiveEnabled,
     }),
   );
   app.use('/api', (_req, res) => failure(res, 404, 'NOT_FOUND', '요청한 API를 찾을 수 없습니다.'));
