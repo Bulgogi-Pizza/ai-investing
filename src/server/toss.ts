@@ -186,7 +186,14 @@ export function parsePriceSymbols(value: unknown): string[] | null {
   if (typeof value !== 'string' || value.length > 2000) return null;
   const parts = value.split(',');
   if (parts.length > MAX_PRICE_SYMBOLS || parts.some((part) => !SYMBOL.test(part))) return null;
-  return [...new Set(parts)];
+  // Case-insensitive de-duplication keeps the first spelling; the provider is case-insensitive.
+  const seen = new Set<string>();
+  return parts.filter((part) => {
+    const key = part.toUpperCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 function nullableTimestamp(value: unknown) {
   if (value === null || value === undefined) return null;
@@ -434,7 +441,7 @@ export class TossClient {
       symbols.some((symbol) => !SYMBOL.test(symbol))
     )
       throw new ProviderError(400, 'INVALID_MARKET_QUERY', '종목 코드 목록을 확인하세요.');
-    const requested = [...new Set(symbols)];
+    const requested = parsePriceSymbols(symbols.join(','))!;
     const query = new URLSearchParams({ symbols: requested.join(',') });
     return this.cached(`prices:${query}`, async () => {
       const result = await this.get(`/api/v1/prices?${query}`);

@@ -244,6 +244,32 @@ describe('input validation', () => {
     }
     expect(calls).toEqual([]);
   });
+  it('validates candle queries for the owner', async () => {
+    const app = appWith();
+    const cookie = await login(app, 'owner@example.test');
+    for (const path of [
+      '/api/market/candles?symbol[]=005930',
+      '/api/market/candles?symbol=005930&symbol=AAPL',
+      '/api/market/candles?symbol=005930&interval=1d&interval=1m',
+      '/api/market/candles?symbol=005930&interval=5m',
+      '/api/market/candles?symbol=005930&count=0',
+      '/api/market/candles?symbol=005930&count=201',
+      '/api/market/candles?symbol=005930&count=-1',
+      '/api/market/candles?symbol=../x',
+    ]) {
+      const response = await request(app).get(path).set('Cookie', cookie);
+      expect(response.status, path).toBe(400);
+      expect(response.body.error.code).toBe('INVALID_MARKET_QUERY');
+    }
+    expect(calls).toEqual([]);
+  });
+  it('de-duplicates symbols case-insensitively and keeps the first spelling', async () => {
+    expect(parsePriceSymbols('aapl,AAPL,005930,Aapl')).toEqual(['aapl', '005930']);
+    const app = appWith();
+    const cookie = await login(app, 'owner@example.test');
+    await request(app).get('/api/market/prices?symbols=AAPL,aapl,005930').set('Cookie', cookie);
+    expect(calls).toContain('/api/v1/prices?symbols=AAPL%2C005930');
+  });
   it('parses symbol lists strictly', () => {
     expect(parsePriceSymbols('005930,AAPL,005930')).toEqual(['005930', 'AAPL']);
     expect(parsePriceSymbols('BRK.B,BF-B')).toEqual(['BRK.B', 'BF-B']);
@@ -272,6 +298,12 @@ describe('provider schema validation', () => {
     ['bad timestamp', { result: [{ ...prices.result[0], timestamp: 'yesterday' }] }],
     ['too many rows', { result: [prices.result[0], prices.result[1], prices.result[0]] }],
     ['duplicate rows', { result: [prices.result[0], prices.result[0]] }],
+    // The v1.2.24 spec lists lastPrice as a required string (only timestamp is nullable).
+    ['null lastPrice', { result: [{ ...prices.result[0], lastPrice: null }] }],
+    [
+      'case-variant duplicate',
+      { result: [prices.result[1], { ...prices.result[1], symbol: 'aapl' }] },
+    ],
   ];
   it.each(priceCases)('prices: %s -> 502 PROVIDER_SCHEMA_INVALID', async (_name, body) => {
     const { app, cookie } = await owner(only('/api/v1/prices', body));

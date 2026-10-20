@@ -268,6 +268,37 @@ describe('server authorization', () => {
         .status,
     ).toBe(400);
   });
+  it('rejects a valid strategy write from a non-owner and leaves the store unchanged', async () => {
+    const strategy = {
+      name: '비소유자 전략',
+      horizon: '5년',
+      benchmark: 'S&P 500',
+      riskTolerance: 'medium',
+      targetAllocations: [
+        { asset: 'stock', percentage: 60 },
+        { asset: 'bond', percentage: 40 },
+      ],
+      notes: '',
+    };
+    const admin = await login('admin@example.test');
+    const response = await request(app)
+      .put('/api/strategy')
+      .set('Origin', origin)
+      .set('Cookie', admin)
+      .send({ strategy });
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('OWNER_REQUIRED');
+    expect(await store.getStrategy(adminId)).toBeNull();
+    expect(await store.getStrategy(memberId)).toBeNull();
+    const owner = await login();
+    const saved = await request(app)
+      .put('/api/strategy')
+      .set('Origin', origin)
+      .set('Cookie', owner)
+      .send({ strategy });
+    expect(saved.status).toBe(200);
+    expect(await store.getStrategy(adminId)).toBeNull();
+  });
   it('gates calendar, news and strategy to the owner while admin user management stays admin-only', async () => {
     const calendarEvent = {
       id: 1,
