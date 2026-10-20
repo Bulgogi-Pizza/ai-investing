@@ -338,25 +338,6 @@ a {
   background: #b393e6;
   border: 1px solid white;
 }
-.demo-pill {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 8px;
-  letter-spacing: 0.7px;
-  background: #f1edf9;
-  color: #9b83c7;
-  border: 1px solid #ebe4f5;
-  padding: 5px 8px;
-  border-radius: 4px;
-  white-space: nowrap;
-}
-.demo-pill > span {
-  width: 4px;
-  height: 4px;
-  border-radius: 50%;
-  background: #aa91d4;
-}
 main {
   max-width: 1570px;
   padding: 0 33px;
@@ -401,15 +382,6 @@ main {
 }
 .negative {
   color: #648bbd;
-}
-.market-demo {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: #aab0bd;
-  font-size: 8px;
-  margin-left: auto;
-  padding-left: 15px;
 }
 .page-heading {
   padding: 29px 0 24px;
@@ -1370,9 +1342,6 @@ footer span {
     padding: 0 12px;
     gap: 6px;
   }
-  .market-item:nth-child(5) {
-    display: none;
-  }
   .sidebar {
     width: 190px;
     padding-left: 12px;
@@ -1499,12 +1468,6 @@ footer span {
   .bottom-grid {
     grid-template-columns: 1fr;
   }
-  .market-item:nth-child(4) {
-    display: none;
-  }
-  .market-demo {
-    font-size: 7px;
-  }
   .view-toggle button {
     padding: 6px 9px;
   }
@@ -1570,10 +1533,6 @@ footer span {
   .top-actions {
     gap: 7px;
   }
-  .topbar .demo-pill {
-    font-size: 7px;
-    padding: 4px;
-  }
   .topbar .icon-button {
     padding: 3px;
   }
@@ -1598,12 +1557,6 @@ footer span {
   .market-item small {
     font-size: 6px;
     margin-left: 5px;
-  }
-  .market-item:nth-child(3) {
-    border-right: 0;
-  }
-  .market-demo {
-    display: none;
   }
   .title-row h1 {
     font-size: 22px;
@@ -1944,26 +1897,12 @@ footer span {
     font-size: 8px;
     padding: 5px;
   }
-  .topbar .demo-pill {
-    font-size: 6px;
-  }
   .top-actions {
     gap: 4px;
   }
   .breadcrumb {
     gap: 3px;
   }
-}
-.chart-source-switch {
-  display: flex;
-  align-items: center;
-  gap: 7px;
-  flex-wrap: wrap;
-  margin-bottom: 14px;
-}
-.chart-source-switch > span {
-  font-size: 8px;
-  color: #9298a8;
 }
 .calendar-source-toolbar {
   display: flex;
@@ -2131,4 +2070,162 @@ footer span {
     font-size: 12px;
     overflow-wrap: anywhere;
   }
+}
+
+/* Live data states (shared) */
+.data-state {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  padding: 22px 24px;
+  margin-top: 15px;
+  border: 1px solid #e5dbf4;
+  border-radius: 10px;
+  background: #faf8fe;
+  color: #6d5aa8;
+  line-height: 1.7;
+}
+.data-state > svg {
+  flex: none;
+  margin-top: 2px;
+}
+.data-state h2 {
+  margin: 0 0 4px;
+  font-size: 15px;
+  color: #4d5165;
+}
+.data-state p {
+  margin: 0;
+  font-size: 13px;
+  color: #6f7586;
+}
+.data-state .button {
+  margin-top: 12px;
+}
+.data-state-error {
+  border-color: #f0d3d8;
+  background: #fdf5f6;
+  color: #b3566a;
+}
+.data-state-owner-only,
+.data-state-not-connected {
+  border-color: #dfe3f0;
+  background: #f6f7fb;
+  color: #5f6c92;
+}
+.data-state-compact {
+  margin-top: 0;
+  padding: 8px 12px;
+  gap: 8px;
+  align-items: center;
+}
+.data-state-compact h2 {
+  display: inline;
+  font-size: 12px;
+  margin-right: 8px;
+}
+.data-state-compact p {
+  display: inline;
+  font-size: 12px;
+}
+.data-state-compact .button {
+  margin: 0 0 0 10px;
+}
+.data-state-loading p {
+  color: #6d5aa8;
+}
+.market-strip-state {
+  padding: 12px 0;
+  border-bottom: 1px solid #e8eaf1;
+}
+.market-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  padding-left: 15px;
+  color: #8a90a0;
+  font-size: 11px;
+}
+.market-refresh {
+  display: inline-flex;
+  padding: 4px;
+  color: inherit;
+  border-radius: 4px;
+}
+.market-refresh:focus-visible {
+  outline: 2px solid #7963c7;
+}
+.watch-price {
+  font-size: 10px !important;
+  color: #5d6376;
+  margin-left: auto;
+  white-space: nowrap;
+}
+.login-screen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  padding: 24px 16px;
+  background: #f7f6fb;
+}
+.login-card {
+  width: 100%;
+  max-width: 420px;
+  padding: 32px 28px;
+  background: white;
+  border: 1px solid #e6e8f0;
+  border-radius: 14px;
+  box-shadow: 0 8px 30px rgba(110, 90, 170, 0.08);
+}
+.login-card .login-brand {
+  margin-bottom: 20px;
+  padding: 0;
+  font-size: 28px;
+}
+.login-card .login-brand .brand-symbol {
+  width: 40px;
+  min-width: 40px;
+  margin-right: 10px;
+}
+.login-card .login-brand .brand-dot {
+  display: inline;
+}
+.login-card h1 {
+  font-size: 20px;
+  margin: 12px 0 6px;
+}
+.login-card p {
+  font-size: 13px;
+  line-height: 1.7;
+  color: #6f7586;
+  margin: 0 0 16px;
+}
+.login-card form label {
+  display: block;
+  font-size: 12px;
+  margin-top: 14px;
+}
+.login-card form input {
+  display: block;
+  width: 100%;
+  margin-top: 6px;
+  padding: 11px 12px;
+  border: 1px solid #dfe2ec;
+  border-radius: 8px;
+  font-size: 14px;
+}
+.login-card form > .button {
+  width: 100%;
+  margin-top: 22px;
+  justify-content: center;
+}
+
+.market-item > span {
+  font-size: 11px;
+}
+.market-item > strong {
+  font-size: 13px;
 }

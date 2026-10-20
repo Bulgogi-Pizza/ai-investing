@@ -1,45 +1,14 @@
-import { useEffect, useState } from 'react';
-import {
-  ArrowRight,
-  Sparkles,
-  ShieldCheck,
-  Newspaper,
-  ChartNoAxesCombined,
-  Target,
-  ChevronRight,
-  FlaskConical,
-  Info,
-} from 'lucide-react';
-import {
-  assetKeys,
-  assetLabels,
-  analyzeStrategy,
-  defensiveScenario,
-  initialStrategy,
-  parseStoredStrategy,
-  type Strategy,
-} from '../lib/strategy';
-import { demoPrices, events, rsi } from '../lib/market';
+import { useState } from 'react';
+import { Sparkles, ShieldCheck, Newspaper, ChartNoAxesCombined, Target, Info } from 'lucide-react';
+import { assetLabels } from '../lib/strategy';
+import { DataState, LoadingState } from '../components/DataState';
+import { ApiError, useApiResource } from '../lib/api';
+import { formatKst } from '../lib/kst';
 import './investing.css';
 const periods = {
-  daily: {
-    label: '데일리',
-    horizon: '1 거래일',
-    title: '변동성에 대비하며, 원칙은 유지하세요',
-    text: '일간 변화가 투자 성향별 임계치를 넘는지 확인합니다. 신규 위험 노출을 늘리기 전 목표 비중과 현금 여력을 점검하는 규칙입니다.',
-  },
-  weekly: {
-    label: '주간',
-    horizon: '5 거래일',
-    title: '단기 신호보다 자산 배분을 점검하세요',
-    text: '한 주의 가격 움직임만으로 전략을 바꾸기보다 자산군 간 편중과 다음 주 일정에 대한 노출을 확인하는 시나리오입니다.',
-  },
-  monthly: {
-    label: '월간',
-    horizon: '1개월',
-    title: '장기 목표에 맞춰 천천히 균형을 찾으세요',
-    text: '투자 기간과 비교 지수를 다시 확인하고, 비용과 세금을 반영한 정기 리밸런싱 계획을 세우는 시나리오입니다.',
-  },
+  daily: { label: '데일리' },
+  weekly: { label: '주간' },
+  monthly: { label: '월간' },
 };
 type AiNarrative =
   | {
@@ -117,7 +86,7 @@ interface LiveInsight {
     holdings: { symbol: string; weightWithinStocksPercent: number }[];
   }[];
 }
-const kst = (date: string) => new Date(date).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' });
+const kst = formatKst;
 function LiveAnalysis({ insight }: { insight: LiveInsight }) {
   const { strategy, metrics, evidence, decision } = insight;
   return (
@@ -423,124 +392,56 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
     </div>
   );
 }
+export function parseInsight(body: unknown, period: string): LiveInsight {
+  const v = body as LiveInsight;
+  if (
+    v?.engine !== 'rules-v1' ||
+    v.dataMode !== 'live' ||
+    v.period !== period ||
+    !v.metrics ||
+    !v.decision ||
+    !v.strategy ||
+    !Array.isArray(v.evidence?.calendar?.events) ||
+    !Array.isArray(v.risks) ||
+    !Array.isArray(v.scenarios) ||
+    !Array.isArray(v.stockExposureByCurrency)
+  )
+    throw new ApiError(502, 'INVALID_RESPONSE', '분석 응답 형식을 확인하지 못했습니다.');
+  const ai = v.ai as Record<string, unknown> | undefined;
+  if (
+    ai?.status === 'ready' &&
+    (!ai.model ||
+      !Number.isFinite(Date.parse(String(ai.asOf))) ||
+      typeof ai.summary !== 'string' ||
+      typeof ai.counterScenario !== 'string' ||
+      typeof ai.confidenceExplanation !== 'string' ||
+      !Array.isArray(ai.actions) ||
+      !ai.actions.every((item: unknown) => typeof item === 'string') ||
+      !Array.isArray(ai.dataGaps) ||
+      !ai.dataGaps.every((item: unknown) => typeof item === 'string') ||
+      !Array.isArray(ai.sources) ||
+      !ai.sources.every(
+        (source: { id?: unknown; title?: unknown; url?: unknown }) =>
+          typeof source?.id === 'string' &&
+          typeof source.title === 'string' &&
+          (source.url === undefined || typeof source.url === 'string'),
+      ))
+  )
+    v.ai = {
+      status: 'unavailable',
+      type: 'llm',
+      provider: 'vertex',
+      message: 'AI 해석의 응답 형식을 확인하지 못했습니다.',
+    };
+  return v;
+}
 export default function Recommendations() {
   const [period, setPeriod] = useState<keyof typeof periods>('daily');
-  const [scenario, setScenario] = useState(false);
-  const [sourceMode, setSourceMode] = useState<'demo' | 'live'>('demo');
   const [symbol, setSymbol] = useState('005930');
-  const [live, setLive] = useState<LiveInsight | null>(null);
-  const [liveLoading, setLiveLoading] = useState(false);
-  const [liveError, setLiveError] = useState('');
-  const [retry, setRetry] = useState(0);
-  useEffect(() => {
-    setLive(null);
-    setLiveError('');
-    setLiveLoading(false);
-    if (sourceMode !== 'live') return;
-    const controller = new AbortController();
-    setLiveLoading(true);
-    async function loadLive() {
-      try {
-        const response = await fetch(
-          `/api/recommendations?period=${period}&symbol=${encodeURIComponent(symbol)}`,
-          { signal: controller.signal },
-        );
-        const body = await response.json();
-        if (!response.ok)
-          throw new Error(
-            typeof body.error?.message === 'string'
-              ? body.error.message.slice(0, 400)
-              : '내 데이터 분석을 불러오지 못했습니다.',
-          );
-        if (
-          body.engine !== 'rules-v1' ||
-          body.dataMode !== 'live' ||
-          body.period !== period ||
-          !body.metrics ||
-          !body.decision ||
-          !body.strategy ||
-          !Array.isArray(body.evidence?.calendar?.events) ||
-          !Array.isArray(body.risks) ||
-          !Array.isArray(body.scenarios) ||
-          !Array.isArray(body.stockExposureByCurrency)
-        )
-          throw new Error('분석 응답 형식을 확인하지 못했습니다.');
-        if (
-          body.ai?.status === 'ready' &&
-          (!body.ai.model ||
-            !Number.isFinite(Date.parse(body.ai.asOf)) ||
-            typeof body.ai.summary !== 'string' ||
-            typeof body.ai.counterScenario !== 'string' ||
-            typeof body.ai.confidenceExplanation !== 'string' ||
-            !Array.isArray(body.ai.actions) ||
-            !body.ai.actions.every((item: unknown) => typeof item === 'string') ||
-            !Array.isArray(body.ai.dataGaps) ||
-            !body.ai.dataGaps.every((item: unknown) => typeof item === 'string') ||
-            !Array.isArray(body.ai.sources) ||
-            !body.ai.sources.every(
-              (source: { id?: unknown; title?: unknown; url?: unknown }) =>
-                typeof source?.id === 'string' &&
-                typeof source.title === 'string' &&
-                (source.url === undefined || typeof source.url === 'string'),
-            ))
-        ) {
-          body.ai = {
-            status: 'unavailable',
-            type: 'llm',
-            provider: 'vertex',
-            message: 'AI 해석의 응답 형식을 확인하지 못했습니다.',
-          };
-        }
-        if (!controller.signal.aborted) setLive(body);
-      } catch (error) {
-        if (!controller.signal.aborted)
-          setLiveError(error instanceof Error ? error.message : '분석 요청에 실패했습니다.');
-      } finally {
-        if (!controller.signal.aborted) setLiveLoading(false);
-      }
-    }
-    void loadLive();
-    return () => controller.abort();
-  }, [sourceMode, period, symbol, retry]);
-  const [strategy, setStrategy] = useState<Strategy>(structuredClone(initialStrategy));
-  const [strategySource, setStrategySource] = useState('예시 전략 · 연결 확인 중');
-  useEffect(() => {
-    const controller = new AbortController();
-    async function load() {
-      try {
-        const auth = await fetch('/api/auth/me', { signal: controller.signal });
-        if (!auth.ok) {
-          setStrategySource('예시 전략 · 로그인하지 않음');
-          return;
-        }
-        const response = await fetch('/api/strategy', { signal: controller.signal });
-        if (!response.ok) throw new Error('strategy unavailable');
-        const parsed = parseStoredStrategy((await response.json()).strategy);
-        if (parsed) {
-          setStrategy(parsed);
-          setStrategySource('내 계정에 저장된 전략');
-        } else setStrategySource('예시 전략 · 저장된 유효 전략 없음');
-      } catch {
-        if (!controller.signal.aborted) setStrategySource('예시 전략 · 계정 전략을 불러오지 못함');
-      }
-    }
-    void load();
-    return () => controller.abort();
-  }, []);
-  const config = periods[period];
-  const analysis = analyzeStrategy(
-    demoPrices.map((item) => item.close),
-    strategy,
-    period,
+  const { state, retry } = useApiResource(
+    `/api/recommendations?period=${period}&symbol=${encodeURIComponent(symbol)}`,
+    (body) => parseInsight(body, period),
   );
-  const latestRsi = rsi(demoPrices.map((item) => item.close)).at(-1)!;
-  const relevantEvents = events.filter(
-    (item) =>
-      item.day >= 20 && item.day < 20 + (period === 'daily' ? 1 : period === 'weekly' ? 7 : 31),
-  );
-  const importantEvents = relevantEvents.filter((item) => item.importance === 3);
-
-  const adjusted = scenario ? defensiveScenario(strategy.targets) : strategy.targets;
   return (
     <div className="invest-page">
       <div className="invest-heading">
@@ -551,50 +452,27 @@ export default function Recommendations() {
           </h1>
           <p>뉴스와 차트, 투자 원칙을 하나의 관점으로.</p>
         </div>
-        <span className="invest-demo">
-          {sourceMode === 'demo'
-            ? 'AI 연결 대기 · 규칙 기반 예시'
-            : '내 데이터 · 규칙 분석 + 선택적 AI 해석'}
-        </span>
+        <span className="invest-pill">내 데이터 · 규칙 분석 + 선택적 AI 해석</span>
       </div>
       <div className="invest-source-controls">
-        <div className="invest-segment" aria-label="분석 데이터 선택">
-          <button
-            className={sourceMode === 'demo' ? 'active' : ''}
-            onClick={() => setSourceMode('demo')}
+        <label>
+          분석 종목
+          <select
+            aria-label="분석 종목"
+            value={symbol}
+            onChange={(event) => setSymbol(event.target.value)}
           >
-            합성 예시
-          </button>
-          <button
-            className={sourceMode === 'live' ? 'active' : ''}
-            onClick={() => setSourceMode('live')}
-          >
-            내 데이터 분석
-          </button>
-        </div>
-        {sourceMode === 'live' && (
-          <label>
-            분석 종목
-            <select
-              aria-label="분석 종목"
-              value={symbol}
-              onChange={(event) => setSymbol(event.target.value)}
-            >
-              <option value="005930">삼성전자 · 005930</option>
-              <option value="000660">SK하이닉스 · 000660</option>
-              <option value="AAPL">Apple · AAPL</option>
-            </select>
-          </label>
-        )}
+            <option value="005930">삼성전자 · 005930</option>
+            <option value="000660">SK하이닉스 · 000660</option>
+            <option value="AAPL">Apple · AAPL</option>
+          </select>
+        </label>
       </div>
       <div className="invest-connection">
         <ShieldCheck size={17} />
         <span>
-          {sourceMode === 'demo' ? (
-            <>시장 입력은 합성 데이터입니다. {strategySource} · 주문 없는 규칙 분석입니다.</>
-          ) : (
-            '내 계정의 저장 전략, 토스 가격 및 출처가 등록된 자료를 서버에서 분석합니다. 생성형 AI가 연결된 경우 근거를 포함한 해석을 별도 카드로 표시합니다.'
-          )}
+          내 계정의 저장 전략, 토스 가격 및 출처가 등록된 자료를 서버에서 분석합니다. 생성형 AI가
+          연결된 경우 근거를 포함한 해석을 별도 카드로 표시합니다. 소유자 계정 전용입니다.
         </span>
       </div>
       <div className="invest-recommend-toolbar">
@@ -603,226 +481,19 @@ export default function Recommendations() {
             <button
               className={key === period ? 'active' : ''}
               key={key}
-              onClick={() => {
-                setPeriod(key as keyof typeof periods);
-                setScenario(false);
-              }}
+              onClick={() => setPeriod(key as keyof typeof periods)}
             >
               {item.label}
             </button>
           ))}
         </div>
-        <span>
-          {sourceMode === 'demo'
-            ? '예시 데이터 기준: 2026.10.20 09:00 KST'
-            : '분석 기간과 종목을 바꾸면 다시 조회합니다.'}
-        </span>
+        <span>분석 기간과 종목을 바꾸면 다시 조회합니다.</span>
       </div>
-      {sourceMode === 'live' ? (
-        <>
-          {liveLoading && (
-            <section className="invest-card invest-live-state" role="status">
-              <Sparkles size={24} />
-              <h2>내 데이터를 분석하고 있습니다</h2>
-              <p>저장 전략, 가격 및 일정 근거를 확인하는 중입니다.</p>
-            </section>
-          )}
-          {liveError && (
-            <section className="invest-card invest-live-state" role="alert">
-              <Info size={24} />
-              <h2>분석을 제공할 수 없습니다</h2>
-              <p>{liveError}</p>
-              <button className="invest-primary" onClick={() => setRetry((value) => value + 1)}>
-                다시 시도
-              </button>
-              <small>실제 분석 실패 시 합성 추천으로 대체하지 않습니다.</small>
-            </section>
-          )}
-          {!liveLoading && !liveError && live && <LiveAnalysis insight={live} />}
-        </>
-      ) : (
-        <>
-          <section className="invest-insight-hero">
-            <div className="invest-insight-top">
-              <span>
-                <Sparkles size={16} /> {config.label} 전략 브리핑
-              </span>
-              <span>분석 기간 · {config.horizon}</span>
-            </div>
-            <h2>{analysis.action}</h2>
-            <p>
-              {config.text} {analysis.window}거래일 합성 시계열 변화{' '}
-              {analysis.change >= 0 ? '+' : ''}
-              {analysis.change.toFixed(2)}%, 목표 주식 {strategy.targets.stock}%를 함께 점검합니다.
-            </p>
-            <div className="invest-insight-tags">
-              <span>
-                {strategy.risk === 'conservative'
-                  ? '안정형'
-                  : strategy.risk === 'growth'
-                    ? '성장형'
-                    : '균형형'}{' '}
-                투자자
-              </span>
-              <span>{strategy.horizon}년 투자 기간</span>
-              <span>
-                {strategySource}: 주식 {strategy.targets.stock}%
-              </span>
-            </div>
-            <div className="invest-insight-disclaimer">
-              <Info size={15} /> 규칙: 기간 수익률과 성향별 임계치 {analysis.threshold}%를
-              비교합니다. 합성 차트 RSI {latestRsi.toFixed(1)} · 20일 평균 대비{' '}
-              {analysis.deviation.toFixed(2)}%.
-            </div>
-          </section>
-          <div className="invest-evidence-grid">
-            <section className="invest-card">
-              <div className="invest-evidence-icon">
-                <Newspaper size={22} />
-              </div>
-              <h3>뉴스 관점</h3>
-              <p>선택 기간의 중요 경제 일정 {importantEvents.length}건 점검</p>
-              <div className="invest-evidence-note">
-                합성 캘린더: {relevantEvents.length}건<br />
-                {importantEvents[0]?.title || relevantEvents[0]?.title || '해당 예시 일정 없음'} ·
-                외부 기사 미수집
-              </div>
-              <span className="invest-pill">가정 입력 · 뉴스 연결 대기</span>
-            </section>
-            <section className="invest-card">
-              <div className="invest-evidence-icon blue">
-                <ChartNoAxesCombined size={22} />
-              </div>
-              <h3>차트 관점</h3>
-              <p>
-                {analysis.window}거래일 변화 {analysis.change.toFixed(2)}%
-              </p>
-              <div className="invest-evidence-note">
-                합성 가격으로 RSI {latestRsi.toFixed(1)} 계산
-                <br />
-                20일 평균 {analysis.average.toFixed(0)} · 실제 종목 시세 아님
-              </div>
-              <span className="invest-pill">합성 가격 계산 · 실시간 미연결</span>
-            </section>
-            <section className="invest-card">
-              <div className="invest-evidence-icon green">
-                <Target size={22} />
-              </div>
-              <h3>내 전략 관점</h3>
-              <p>
-                주식 목표 {strategy.targets.stock}% · {strategy.benchmark}
-              </p>
-              <div className="invest-evidence-note">
-                {strategySource}
-                <br />
-                선호: {strategy.preferences.join(' · ') || '미지정'}
-              </div>
-              <span className="invest-pill">저장 출처에 따른 전략 계산</span>
-            </section>
-          </div>
-          <section className="invest-card">
-            <div className="invest-section-title">
-              <div>
-                <h2>
-                  <FlaskConical size={20} /> 방어 시나리오 살펴보기
-                </h2>
-                <p>계정에 저장하기 전에, 이 화면에서 배분의 차이를 확인하세요.</p>
-              </div>
-              <span className="invest-pill">시뮬레이션 전용</span>
-            </div>
-            <div className="invest-scenario">
-              <div>
-                <h3>
-                  {scenario
-                    ? '주식 5%p를 채권과 현금으로 이동'
-                    : '금리·변동성 위험이 커진다고 가정하면?'}
-                </h3>
-                <p>
-                  선택된 전략에서 주식을 최대 5%p 줄이고, 채권 3%p와 현금 2%p를 더합니다. 시장
-                  방향을 예측하지 않으며, 채권도 금리 상승 시 손실이 날 수 있습니다.
-                </p>
-                <button className="invest-primary" onClick={() => setScenario(!scenario)}>
-                  {scenario ? '기본 예시로 되돌리기' : '배분 시나리오 적용'}
-                  <ArrowRight size={16} />
-                </button>
-              </div>
-              <div className="invest-scenario-bars">
-                {assetKeys.map((key) => (
-                  <div key={key}>
-                    <span>{assetLabels[key]}</span>
-                    <div>
-                      <i style={{ width: `${adjusted[key]}%` }} />
-                    </div>
-                    <strong>
-                      {strategy.targets[key]}% <ChevronRight size={13} /> {adjusted[key]}%
-                    </strong>
-                  </div>
-                ))}
-              </div>
-            </div>
-            <p className="invest-scenario-status" role="status">
-              {scenario
-                ? '시나리오 적용됨 · 이 화면의 예시 배분만 변경했습니다. 실제 전략 저장이나 매매는 수행하지 않습니다.'
-                : '가정 배분은 버튼을 눌러 비교할 수 있습니다.'}
-            </p>
-          </section>
-          <div className="invest-detail-grid">
-            <section className="invest-card">
-              <h2>판단의 전제와 위험</h2>
-              <ul className="invest-risk-list">
-                <li>
-                  <strong>기간</strong>
-                  <span>
-                    {config.horizon} 관찰용 · 기본 투자 기간 {strategy.horizon}년 투자 기간
-                  </span>
-                </li>
-                <li>
-                  <strong>가정</strong>
-                  <span>합성 차트·캘린더와 {strategySource}, 세금·수수료·환율 변동 제외</span>
-                </li>
-                <li>
-                  <strong>불확실성</strong>
-                  <span>예측 신뢰도 산정 불가 · 실시간 입력 및 검증된 모델 없음</span>
-                </li>
-                <li>
-                  <strong>대안</strong>
-                  <span>목표 비중 유지 또는 신규 납입으로 점진적 비중 조정</span>
-                </li>
-              </ul>
-            </section>
-            <section className="invest-card">
-              <h2>데이터 출처</h2>
-              <div className="invest-lineage">
-                <div>
-                  <i />
-                  <span>
-                    <strong>전략 출처</strong>
-                    <small>{strategySource} · 계좌 잔고는 분석에 사용하지 않음</small>
-                  </span>
-                </div>
-                <div>
-                  <i />
-                  <span>
-                    <strong>전략 규칙</strong>
-                    <small>비중 차이 계산 및 방어 배분 함수 · 로컬 결정 규칙</small>
-                  </span>
-                </div>
-                <div>
-                  <i />
-                  <span>
-                    <strong>시장·AI 모델 연결</strong>
-                    <small>합성 가격/일정으로 계산 · 실뉴스·실시세·LLM 미연결</small>
-                  </span>
-                </div>
-              </div>
-            </section>
-          </div>
-          <p className="invest-footnote">
-            <Info size={15} /> 투자 판단의 참고용 인터페이스 예시입니다. 실시간 추천은 데이터
-            제공사와 AI 연결, 출처 검증 후 활성화됩니다. 주문 실행 기능은 제공하지 않습니다.
-          </p>
-        </>
+      {(state.status === 'loading' || state.status === 'idle') && (
+        <LoadingState label="내 데이터를 분석하는 중입니다. 저장 전략, 가격 및 일정 근거를 확인합니다." />
       )}
+      {state.status === 'issue' && <DataState issue={state.issue} onRetry={retry} />}
+      {state.status === 'ready' && <LiveAnalysis insight={state.data} />}
     </div>
   );
 }
