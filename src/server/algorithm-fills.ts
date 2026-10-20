@@ -150,3 +150,77 @@ export class PaperAlgorithmFills implements AlgorithmFillSource {
       }));
   }
 }
+
+/** Minimal read of live orders the chart markers need (the trading store satisfies it). */
+type LiveOrderReader = {
+  listOrdersBySymbol(
+    symbol: string,
+    limit: number,
+  ): Promise<
+    {
+      clientOrderId: string;
+      algorithmId: string;
+      market: 'KR' | 'US';
+      symbol: string;
+      side: 'buy' | 'sell';
+      status: string;
+      price: string;
+      filledQuantity: number;
+      averageFilledPrice?: number | null;
+      dateKey: string;
+      updatedAt: string;
+    }[]
+  >;
+};
+
+/**
+ * Stage 7f real fills (`liveOrders`) as chart markers, labelled `live` (실제). Only quantity that
+ * actually filled counts: an order that was accepted but not filled (or fully cancelled) is not a
+ * fill, a partial fill shows its filled quantity. `date` is the KST reservation date, which is the
+ * session date of both markets because orders go out right after the open (before midnight KST).
+ */
+export class LiveAlgorithmFills implements AlgorithmFillSource {
+  readonly connected = true;
+  constructor(
+    private orders: LiveOrderReader,
+    private algorithms: AlgorithmNameReader,
+    private limit = 200,
+  ) {}
+  async listFills(symbol: string, from: string, to: string): Promise<AlgorithmFill[]> {
+    const [orders, algorithms] = await Promise.all([
+      this.orders.listOrdersBySymbol(symbol.toUpperCase(), this.limit),
+      this.algorithms.list(),
+    ]);
+    const names = new Map(algorithms.map((a) => [a.id, a.name]));
+    return orders
+      .filter((o) => o.filledQuantity > 0 && o.dateKey >= from && o.dateKey <= to)
+      .map((o) => ({
+        id: o.clientOrderId,
+        algorithmId: o.algorithmId,
+        algorithmName: names.get(o.algorithmId) ?? '(삭제된 알고리즘)',
+        symbol: o.symbol,
+        side: o.side,
+        mode: 'live' as const,
+        date: o.dateKey,
+        filledAt: o.updatedAt,
+        price: String(o.averageFilledPrice ?? o.price),
+        quantity: String(o.filledQuantity),
+        currency: o.market === 'US' ? ('USD' as const) : ('KRW' as const),
+      }));
+  }
+}
+
+/**
+ * Paper (가상) and live (실제) fills in one source. A source that fails drops out on its own: the
+ * other still draws, and the chart simply misses the failed kind rather than showing nothing.
+ */
+export class CombinedAlgorithmFills implements AlgorithmFillSource {
+  readonly connected = true;
+  constructor(private sources: AlgorithmFillSource[]) {}
+  async listFills(symbol: string, from: string, to: string): Promise<AlgorithmFill[]> {
+    const parts = await Promise.allSettled(
+      this.sources.map((source) => source.listFills(symbol, from, to)),
+    );
+    return parts.flatMap((part) => (part.status === 'fulfilled' ? part.value : []));
+  }
+}

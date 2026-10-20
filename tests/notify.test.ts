@@ -140,12 +140,103 @@ describe('알림 메시지 정리', () => {
       ],
       [{ kind: 'setting-risk-increase', change: 'budget-raised' }, '운용 금액 한도 상향'],
       [{ kind: 'setting-risk-increase', change: 'emergency-stop-released' }, '긴급 정지 해제'],
+      [
+        {
+          kind: 'algorithm-auto-stop',
+          mode: 'live',
+          algorithmName: 'A',
+          reason: 'order-permission',
+        },
+        '주문 권한 문제',
+      ],
+      [
+        {
+          kind: 'algorithm-auto-stop',
+          mode: 'live',
+          algorithmName: 'A',
+          reason: 'first-order-rejected',
+        },
+        '첫 실전 주문이 증권사에 거부됨',
+      ],
+      [
+        {
+          kind: 'live-order-unconfirmed',
+          mode: 'live',
+          symbol: '005930',
+          side: 'buy',
+          algorithmName: 'A',
+        },
+        '접수 여부 미확인',
+      ],
     ];
     for (const [event, expected] of cases)
       expect(formatNotification(event, origin).message).toContain(expected);
     expect(formatNotification({ kind: 'morning-brief' }, origin).message).toContain(
       `화면: ${origin}/calendar`,
     );
+  });
+  it('위험을 늘리는 설정 변경은 종류마다 고유한 문구를 쓴다', () => {
+    const changes = [
+      ['live-enabled', '실전 매매 켜기'],
+      ['budget-raised', '운용 금액 한도 상향'],
+      ['emergency-stop-released', '긴급 정지 해제'],
+      ['algorithm-stop-released', '알고리즘 자동 정지 해제'],
+      ['max-orders-raised', '하루 최대 주문 횟수 상향'],
+      ['min-holding-lowered', '최소 보유 기간 단축'],
+      ['loss-stop-loosened', '누적 손실 정지 기준 완화'],
+      ['liquidity-lowered', '최소 거래대금 기준 하향'],
+    ] as const;
+    const seen = new Set<string>();
+    for (const [change, text] of changes) {
+      const { message } = formatNotification({ kind: 'setting-risk-increase', change }, origin);
+      expect(message).toContain(`[위험 증가 설정 변경] ${text}`);
+      expect(message).toContain('긴급 정지를 누르세요');
+      expect(message).not.toContain('확인 필요');
+      seen.add(message);
+    }
+    expect(seen.size).toBe(changes.length);
+    // An unknown change never leaks its value: a neutral phrase instead.
+    const unknown = formatNotification(
+      { kind: 'setting-risk-increase', change: 'drop@example.com' as never },
+      origin,
+    ).message;
+    expect(unknown).toContain('설정 변경');
+    expect(unknown).not.toContain('example');
+  });
+  it('접수 여부 미확인 알림은 실제 주문임을 밝히고 금액·수량·계좌·원문 없이 종목·방향·이름만 담는다', () => {
+    const { message, mode, kind } = formatNotification(
+      {
+        kind: 'live-order-unconfirmed',
+        mode: 'live',
+        symbol: '005930',
+        side: 'sell',
+        algorithmName: '모멘텀 A',
+      },
+      origin,
+    );
+    expect(kind).toBe('live-order-unconfirmed');
+    expect(mode).toBe('live');
+    expect(message).toContain('[실전 주문·실제 체결] 주문 접수 여부 미확인');
+    expect(message).toContain('종목: 005930');
+    expect(message).toContain('방향: 매도');
+    expect(message).toContain('알고리즘: 모멘텀 A');
+    expect(message).toContain(`화면: ${origin}/algorithms`);
+    expect(message).not.toMatch(/\d{4,}원|수량|계좌/);
+    // The fields are optional: a bare event still formats.
+    const bare = formatNotification({ kind: 'live-order-unconfirmed', mode: 'live' }, origin);
+    expect(bare.message).toContain('주문 접수 여부 미확인');
+    expect(bare.message).not.toContain('종목:');
+    // Hostile text in the optional fields is sanitized like every other field.
+    const hostile = formatNotification(
+      {
+        kind: 'live-order-unconfirmed',
+        mode: 'live',
+        symbol: 'https://evil.example.com' as never,
+        algorithmName: 'a@b.com token_abcdefghijklmnopqrstuvwxyz0123',
+      },
+      origin,
+    ).message;
+    expect(hostile).not.toMatch(/evil|@|token_abcdefghijklmnopqrstuvwxyz/);
   });
   it('앱 origin이 아니면 거부한다', () => {
     expect(() => formatNotification(fillEvent, 'https://evil.example/path')).toThrow();

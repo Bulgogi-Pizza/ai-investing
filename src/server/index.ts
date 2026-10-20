@@ -10,7 +10,13 @@ import { createApp } from './app.js';
 import { FirestoreAlgorithmRepository, MemoryAlgorithmRepository } from './algorithms.js';
 import { algorithmAiEnabled } from './algorithm-ai.js';
 import { FirestorePaperRepository, MemoryPaperRepository } from './paper.js';
-import { PaperAlgorithmFills } from './algorithm-fills.js';
+import {
+  CombinedAlgorithmFills,
+  LiveAlgorithmFills,
+  PaperAlgorithmFills,
+} from './algorithm-fills.js';
+import { FirestoreTradingStore } from './trading/firestore-store.js';
+import { MemoryTradingStore } from './trading/stores.js';
 import {
   FirestoreNotificationRepository,
   MemoryNotificationRepository,
@@ -53,6 +59,9 @@ const algorithmRepository = production
   ? new FirestoreAlgorithmRepository()
   : new MemoryAlgorithmRepository();
 const paperRepository = production ? new FirestorePaperRepository() : new MemoryPaperRepository();
+// Live orders, stops and job status. The screen only reads them (and releases an algorithm stop); the
+// live job is the only writer of orders.
+const tradingStore = production ? new FirestoreTradingStore() : new MemoryTradingStore();
 const app = createApp({
   store,
   production,
@@ -71,8 +80,12 @@ const app = createApp({
   ownerUserId: process.env.TOSS_OWNER_USER_ID,
   algorithmRepository,
   paperRepository,
-  // Chart ▲▼ markers: stage 7c virtual fills (live fills join in stage 7f).
-  algorithmFills: new PaperAlgorithmFills(paperRepository, algorithmRepository),
+  tradingStore,
+  // Chart ▲▼ markers: paper (가상) fills and live (실제) fills in one source.
+  algorithmFills: new CombinedAlgorithmFills([
+    new PaperAlgorithmFills(paperRepository, algorithmRepository),
+    new LiveAlgorithmFills(tradingStore, algorithmRepository),
+  ]),
   algorithmAiEnabled: algorithmAiEnabled(),
   notificationRepository,
   notifications,
