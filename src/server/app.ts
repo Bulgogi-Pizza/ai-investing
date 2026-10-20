@@ -18,6 +18,11 @@ import {
 } from './calendar.js';
 import { createNewsRouter } from './news.js';
 import { ownerGate } from './owner.js';
+import {
+  createSnapshotRouter,
+  MemorySnapshotRepository,
+  type SnapshotRepository,
+} from './snapshots.js';
 import type { aiFromEnvironment } from './ai.js';
 import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
@@ -33,6 +38,7 @@ export type AppOptions = {
   /** Same TOSS_OWNER_USER_ID the Toss client is bound to. Missing => owner routes fail closed. */
   ownerUserId?: string;
   calendarRepository?: CalendarRepository;
+  snapshotRepository?: SnapshotRepository;
   loginThrottle?: LoginThrottle;
   ai?: ReturnType<typeof aiFromEnvironment>;
 };
@@ -362,6 +368,13 @@ export function createApp(options: AppOptions = {}) {
       });
       res.json(options.ai ? await options.ai.enrich(rules, res.locals.user.id) : rules);
     },
+  );
+  // Daily snapshot status and target list: owner-only, mounted after authentication.
+  app.use(
+    createSnapshotRouter({
+      repository: options.snapshotRepository ?? new MemorySnapshotRepository(),
+      ownerUserId: options.ownerUserId,
+    }),
   );
   app.use(createNewsRouter({ repository: calendarRepository, ownerUserId: options.ownerUserId }));
   app.use(

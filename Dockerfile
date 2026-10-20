@@ -13,6 +13,7 @@ COPY package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY src/server ./src/server
+COPY src/jobs ./src/jobs
 COPY scripts/admin-user.ts ./scripts/admin-user.ts
 USER node
 EXPOSE 8080

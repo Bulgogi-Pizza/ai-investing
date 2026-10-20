@@ -4,7 +4,7 @@
 
 확인일: 2026-10-20 KST. [미 연준 RSS 안내](https://www.federalreserve.gov/feeds/feeds.htm)가 제공하는 [All Press Releases](https://www.federalreserve.gov/feeds/press_all.xml)와 [한국은행 공식 RSS 안내](https://www.bok.or.kr/static/view/popup/rss_popup.html)에 명시된 [보도자료 전체 RSS](https://www.bok.or.kr/portal/bbs/B0000552/news.rss?menuNo=200690)를 고정 허용 출처로 사용한다. 실제 공개 XML을 읽기 전용으로 확인했고 동일 파서로 연준20건·한국은행100건을 정규화했다. 제공 건수는 확인 시점의 피드 스냅샷이며 상시 보장하지 않는다.
 
-RSS의 제목·원문 링크·게시시각만 원천 데이터로 사용한다. 기사 본문·첨부·RSS description·guid·channel 본문을 저장하거나 재배포하지 않는다. 항목에서 파생된 KST 게시일시, 출처, 규칙 태그와 분류 한계 안내만 경제 일정 레코드에 함께 저장한다. 원문 기사는 방문·크롤링하지 않는다. 두 기관의 최근 보도자료이므로 일반 언론 뉴스, 전체 금융 시장 또는 모든 국가를 포괄하지 않는다. 자동 예약 수집은 구성하지 않았다.
+RSS의 제목·원문 링크·게시시각만 원천 데이터로 사용한다. 기사 본문·첨부·RSS description·guid·channel 본문을 저장하거나 재배포하지 않는다. 항목에서 파생된 KST 게시일시, 출처, 규칙 태그와 분류 한계 안내만 경제 일정 레코드에 함께 저장한다. 원문 기사는 방문·크롤링하지 않는다. 두 기관의 최근 보도자료이므로 일반 언론 뉴스, 전체 금융 시장 또는 모든 국가를 포괄하지 않는다. 일일 스냅샷 작업(4단계, [jobs.md](../operations/jobs.md))이 KR 마감 후 실행마다 같은 수집을 호출한다. 운영 적용 전에는 자동 수집이 없다.
 
 ## API 및 운영
 

@@ -40,6 +40,10 @@ GitHub 저장소의 Actions Variables에 다음 비밀이 아닌 값을 설정�
 
 장기 JSON 서비스 계정 키는 만들지 않는다. WIF는 repo 이름/불변 숫자 ID/main 브랜치/배포 workflow_ref/production 환경/workflow_run 이벤트를 함께 제한한다. 일반 workflow에서는 reusable workflow 전용 job_workflow_ref를 쓰지 않는다. 근거: https://docs.github.com/en/actions/reference/security/oidc . 레지스트리 writer는 해당 Artifact Registry 저장소에만 부여한다. 배포 계정 run.admin 권한은 서비스 IAM 초기 설정 때문에 필요하며 전용 프로젝트에 한정한다. 런타임은 datastore.user만 가진다.
 
+## 예약 작업
+
+Terraform `jobs.tf`가 작업용 서비스 계정과 Cloud Scheduler 트리거를 만들고, `Deploy GCP`가 서비스 배포 뒤에 Cloud Run Job을 같은 이미지 digest로 배포한다. 적용 순서, 수동 실행, IAM은 [예약 작업](jobs.md)을 따른다.
+
 ## 최초 서비스 URL 확정
 
 Cloud Run URL이 아직 없으면 로컬에서 첫 검증 이미지를 Artifact Registry로 push하고 배포한다. APP_ORIGIN은 최초에 `https://bootstrap.invalid`로 두면 로그인/변경 요청이 차단된 안전한 상태로 서버가 시작된다. `gcloud run services describe ... --format='value(status.url)'`로 URL을 얻고 APP_ORIGIN을 해당 URL로 수정한 뒤 GitHub 환경 변수에도 저장한다. 실제 계정은 이 작업 이후 생성한다. 도메인 사용 시 APP_ORIGIN도 함께 갱신한다.

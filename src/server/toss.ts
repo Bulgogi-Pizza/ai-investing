@@ -206,6 +206,260 @@ function timestamp(value: unknown) {
   if (!Number.isFinite(Date.parse(result))) throw invalid();
   return result;
 }
+// ---- Snapshot adapters (stage 4). Official spec v1.2.24, checked 2026-10-21 KST. ----
+// Only documented fields are read; any other shape fails with PROVIDER_SCHEMA_INVALID.
+export const PROVIDER_FORBIDDEN = 'PROVIDER_FORBIDDEN';
+const DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/;
+const KR_SYMBOL = /^[A-Za-z0-9]{6}$/;
+function dateOnly(value: unknown) {
+  const result = text(value, 10);
+  if (!DATE_ONLY.test(result) || !Number.isFinite(Date.parse(result + 'T00:00:00Z')))
+    throw invalid();
+  return result;
+}
+function optionalDecimal(value: unknown) {
+  return value === null || value === undefined ? null : decimal(value);
+}
+export type MarketCode = 'KR' | 'US';
+export type MarketSessionWindow = { startTime: string; endTime: string };
+export type MarketDay = { date: string; regularMarket: MarketSessionWindow | null };
+export type MarketCalendar = {
+  source: string;
+  asOf: string;
+  market: MarketCode;
+  requestedDate: string;
+  previousBusinessDay: MarketDay;
+  today: MarketDay;
+  nextBusinessDay: MarketDay;
+};
+function sessionWindow(value: unknown): MarketSessionWindow | null {
+  if (value === null || value === undefined) return null;
+  const s = record(value);
+  const startTime = timestamp(s.startTime);
+  const endTime = timestamp(s.endTime);
+  if (Date.parse(endTime) <= Date.parse(startTime)) throw invalid();
+  return { startTime, endTime };
+}
+/** KR: integrated (KRX+NXT) union regular session, null when both are closed. US: regularMarket. */
+export function normalizeMarketDay(market: MarketCode, value: unknown): MarketDay {
+  const day = record(value);
+  const date = dateOnly(day.date);
+  if (market === 'US') return { date, regularMarket: sessionWindow(day.regularMarket) };
+  const integrated =
+    day.integrated === null || day.integrated === undefined ? null : record(day.integrated);
+  return { date, regularMarket: integrated ? sessionWindow(integrated.regularMarket) : null };
+}
+export type Flow = { buyVolume: string; sellVolume: string; netBuyVolume: string };
+function flow(value: unknown): Flow {
+  const f = record(value);
+  return {
+    buyVolume: decimal(f.buyVolume),
+    sellVolume: decimal(f.sellVolume),
+    netBuyVolume: decimal(f.netBuyVolume),
+  };
+}
+function nullableFlow(value: unknown): Flow | null {
+  return value === null || value === undefined ? null : flow(value);
+}
+const INSTITUTION_BREAKDOWN = [
+  'financialInvestment',
+  'insurance',
+  'trust',
+  'privateEquityFund',
+  'bank',
+  'otherFinancialInstitution',
+  'pensionFund',
+] as const;
+export type InvestorTradingRecord = {
+  date: string;
+  updatedAt: string;
+  individual: Flow | null;
+  foreigner: Flow;
+  institution: Flow & { breakdown: Record<(typeof INSTITUTION_BREAKDOWN)[number], Flow> | null };
+  otherCorporation: Flow | null;
+  foreignerHolding: { holdingQuantity: string; limitQuantity: string; holdingRate: string } | null;
+  cfd: {
+    buyBalanceQuantity: string;
+    buyBalanceRate: string;
+    sellBalanceQuantity: string;
+    sellBalanceRate: string;
+  } | null;
+};
+export function normalizeInvestorTradingRecord(value: unknown): InvestorTradingRecord {
+  const r = record(value);
+  const institution = record(r.institution);
+  let breakdown: InvestorTradingRecord['institution']['breakdown'] = null;
+  if (institution.breakdown !== null && institution.breakdown !== undefined) {
+    const b = record(institution.breakdown);
+    breakdown = Object.fromEntries(
+      INSTITUTION_BREAKDOWN.map((key) => [key, flow(b[key])]),
+    ) as NonNullable<InvestorTradingRecord['institution']['breakdown']>;
+  }
+  let foreignerHolding: InvestorTradingRecord['foreignerHolding'] = null;
+  if (r.foreignerHolding !== null && r.foreignerHolding !== undefined) {
+    const h = record(r.foreignerHolding);
+    foreignerHolding = {
+      holdingQuantity: decimal(h.holdingQuantity),
+      limitQuantity: decimal(h.limitQuantity),
+      holdingRate: decimal(h.holdingRate),
+    };
+  }
+  let cfd: InvestorTradingRecord['cfd'] = null;
+  if (r.cfd !== null && r.cfd !== undefined) {
+    const c = record(r.cfd);
+    cfd = {
+      buyBalanceQuantity: decimal(c.buyBalanceQuantity),
+      buyBalanceRate: decimal(c.buyBalanceRate),
+      sellBalanceQuantity: decimal(c.sellBalanceQuantity),
+      sellBalanceRate: decimal(c.sellBalanceRate),
+    };
+  }
+  return {
+    date: dateOnly(r.date),
+    updatedAt: timestamp(r.updatedAt),
+    individual: nullableFlow(r.individual),
+    foreigner: flow(r.foreigner),
+    institution: { ...flow(institution), breakdown },
+    otherCorporation: nullableFlow(r.otherCorporation),
+    foreignerHolding,
+    cfd,
+  };
+}
+export type ProgramTradeRecord = { date: string; arbitrage: Flow; nonArbitrage: Flow };
+export function normalizeProgramTradeRecord(value: unknown): ProgramTradeRecord {
+  const r = record(value);
+  return {
+    date: dateOnly(r.date),
+    arbitrage: flow(r.arbitrage),
+    nonArbitrage: flow(r.nonArbitrage),
+  };
+}
+export type ShortSellingRecord = {
+  date: string;
+  updatedAt: string;
+  shortSellingVolume: string;
+  shortSellingAmount: string;
+  shortSellingVolumeRate: string | null;
+  shortSellingAmountRate: string | null;
+};
+export function normalizeShortSellingRecord(value: unknown): ShortSellingRecord {
+  const r = record(value);
+  return {
+    date: dateOnly(r.date),
+    updatedAt: timestamp(r.updatedAt),
+    shortSellingVolume: decimal(r.shortSellingVolume),
+    shortSellingAmount: decimal(r.shortSellingAmount),
+    shortSellingVolumeRate: optionalDecimal(r.shortSellingVolumeRate),
+    shortSellingAmountRate: optionalDecimal(r.shortSellingAmountRate),
+  };
+}
+export type CreditSide = {
+  newQuantity: string;
+  returnQuantity: string;
+  balanceQuantity: string;
+  balanceRate: string;
+  tradingRate: string;
+};
+function creditSide(value: unknown): CreditSide | null {
+  if (value === null || value === undefined) return null;
+  const c = record(value);
+  return {
+    newQuantity: decimal(c.newQuantity),
+    returnQuantity: decimal(c.returnQuantity),
+    balanceQuantity: decimal(c.balanceQuantity),
+    balanceRate: decimal(c.balanceRate),
+    tradingRate: decimal(c.tradingRate),
+  };
+}
+export type CreditTradeRecord = {
+  date: string;
+  updatedAt: string;
+  marginLoan: CreditSide | null;
+  stockLoan: CreditSide | null;
+};
+export function normalizeCreditTradeRecord(value: unknown): CreditTradeRecord {
+  const r = record(value);
+  return {
+    date: dateOnly(r.date),
+    updatedAt: timestamp(r.updatedAt),
+    marginLoan: creditSide(r.marginLoan),
+    stockLoan: creditSide(r.stockLoan),
+  };
+}
+export type DailyCandle = {
+  timestamp: string;
+  /** Local trade date: the date part of the provider timestamp (1d bars are fixed at local midnight). */
+  date: string;
+  open: string;
+  high: string;
+  low: string;
+  close: string;
+  volume: string;
+};
+export type StockDailyCandle = DailyCandle & { currency: 'KRW' | 'USD' };
+function dailyBar(value: unknown): DailyCandle {
+  const c = record(value);
+  const stamp = timestamp(c.timestamp);
+  return {
+    timestamp: stamp,
+    date: dateOnly(stamp.slice(0, 10)),
+    open: decimal(c.openPrice),
+    high: decimal(c.highPrice),
+    low: decimal(c.lowPrice),
+    close: decimal(c.closePrice),
+    volume: decimal(c.volume),
+  };
+}
+export type CandlePage<T extends DailyCandle> = {
+  /** Newest first, exactly as the provider orders them. */
+  candles: T[];
+  nextBefore: string | null;
+};
+export type PagedCandles<T extends DailyCandle> = {
+  /** Newest first, de-duplicated by timestamp. */
+  candles: T[];
+  pages: number;
+  /** EXHAUSTED and REACHED_DATE are complete; the others stopped early and say why. */
+  stopReason: 'EXHAUSTED' | 'REACHED_DATE' | 'MAX_PAGES' | 'EMPTY_PAGE' | 'CURSOR_STALLED';
+  complete: boolean;
+};
+export const MAX_CANDLE_PAGES = 20;
+/** Pure paging loop (before/nextBefore) so every stop condition is testable without HTTP. */
+export async function collectCandlePages<T extends DailyCandle>(
+  fetchPage: (before: string | undefined) => Promise<CandlePage<T>>,
+  options: { maxPages?: number; stopAtDate?: string; maxCandles?: number } = {},
+): Promise<PagedCandles<T>> {
+  const maxPages = Math.min(Math.max(options.maxPages ?? 5, 1), MAX_CANDLE_PAGES);
+  const maxCandles = options.maxCandles ?? 5000;
+  const seen = new Map<string, T>();
+  let before: string | undefined;
+  let pages = 0;
+  const finish = (stopReason: PagedCandles<T>['stopReason']): PagedCandles<T> => ({
+    candles: [...seen.values()].sort((a, b) => Date.parse(b.timestamp) - Date.parse(a.timestamp)),
+    pages,
+    stopReason,
+    complete: stopReason === 'EXHAUSTED' || stopReason === 'REACHED_DATE',
+  });
+  while (pages < maxPages) {
+    const page = await fetchPage(before);
+    pages++;
+    if (page.candles.length === 0)
+      return finish(page.nextBefore === null ? 'EXHAUSTED' : 'EMPTY_PAGE');
+    const sizeBefore = seen.size;
+    for (const candle of page.candles) seen.set(candle.timestamp, candle);
+    // A page that adds nothing new means the cursor is not advancing.
+    if (seen.size === sizeBefore) return finish('CURSOR_STALLED');
+    if (options.stopAtDate && page.candles.some((candle) => candle.date <= options.stopAtDate!))
+      return finish('REACHED_DATE');
+    if (page.nextBefore === null) return finish('EXHAUSTED');
+    // before is inclusive: the next cursor must be strictly older than the one just used.
+    if (before !== undefined && Date.parse(page.nextBefore) >= Date.parse(before))
+      return finish('CURSOR_STALLED');
+    if (seen.size >= maxCandles) return finish('MAX_PAGES');
+    before = page.nextBefore;
+  }
+  return finish('MAX_PAGES');
+}
 export class TossClient {
   private cooldownUntil = 0;
   private reads = new Map<string, { expiresAt: number; value: unknown }>();
@@ -223,7 +477,11 @@ export class TossClient {
     )
       throw new Error('Invalid Toss configuration');
   }
-  private async request(path: string, init: RequestInit = {}) {
+  private async request(
+    path: string,
+    init: RequestInit = {},
+    options: { forbiddenCode?: string } = {},
+  ) {
     if (this.cooldownUntil > Date.now())
       throw new ProviderError(
         503,
@@ -259,6 +517,14 @@ export class TossClient {
           404,
           'PROVIDER_NOT_FOUND',
           '제공자에 해당 종목 또는 지표 데이터가 없습니다.',
+        );
+      // Stock Info endpoints define 403 "insufficient permission" separately from bad credentials
+      // or a non-allowlisted IP, so callers can record "no permission" instead of failing.
+      if (response.status === 403 && options.forbiddenCode)
+        throw new ProviderError(
+          503,
+          options.forbiddenCode,
+          '토스 Open API 권한이 없는 데이터입니다. 키 권한 범위를 확인하세요.',
         );
       throw new ProviderError(
         503,
@@ -313,14 +579,18 @@ export class TossClient {
       return { value: result.access_token, expiresAt: Date.now() + result.expires_in * 1000 };
     });
   }
-  private async get(path: string, account = false) {
+  private async get(path: string, account = false, options: { forbiddenCode?: string } = {}) {
     return (
-      await this.request(path, {
-        headers: {
-          Authorization: `Bearer ${await this.bearer()}`,
-          ...(account ? { 'X-Tossinvest-Account': this.config.accountSeq } : {}),
+      await this.request(
+        path,
+        {
+          headers: {
+            Authorization: `Bearer ${await this.bearer()}`,
+            ...(account ? { 'X-Tossinvest-Account': this.config.accountSeq } : {}),
+          },
         },
-      })
+        options,
+      )
     ).result;
   }
   private async cached<T>(key: string, read: () => Promise<T>): Promise<T> {
@@ -468,6 +738,172 @@ export class TossClient {
       });
       return { source: 'Toss Securities OpenAPI', asOf: new Date().toISOString(), prices };
     });
+  }
+  /** GET /api/v1/market-calendar/{KR|US}?date= (Market Info, MARKET_INFO). Times are KST ISO strings. */
+  async marketCalendar(market: MarketCode, date: string): Promise<MarketCalendar> {
+    if (!['KR', 'US'].includes(market) || !DATE_ONLY.test(date))
+      throw new ProviderError(400, 'INVALID_MARKET_QUERY', '시장과 날짜를 확인하세요.');
+    return this.cached(`market-calendar:${market}:${date}`, async () => {
+      const result = record(
+        await this.get(`/api/v1/market-calendar/${market}?${new URLSearchParams({ date })}`),
+      );
+      return {
+        source: 'Toss Securities OpenAPI',
+        asOf: new Date().toISOString(),
+        market,
+        requestedDate: date,
+        previousBusinessDay: normalizeMarketDay(market, result.previousBusinessDay),
+        today: normalizeMarketDay(market, result.today),
+        nextBusinessDay: normalizeMarketDay(market, result.nextBusinessDay),
+      };
+    });
+  }
+  /** One page of GET /api/v1/candles (interval 1d, adjusted). Not cached; newest bar first. */
+  async dailyCandlePage(
+    symbol: string,
+    options: { count?: number; before?: string } = {},
+  ): Promise<CandlePage<StockDailyCandle>> {
+    const count = options.count ?? 200;
+    if (
+      !SYMBOL.test(symbol) ||
+      !Number.isInteger(count) ||
+      count < 1 ||
+      count > 200 ||
+      (options.before !== undefined && !Number.isFinite(Date.parse(options.before)))
+    )
+      throw new ProviderError(
+        400,
+        'INVALID_MARKET_QUERY',
+        '종목·조회 개수·기준 시각을 확인하세요.',
+      );
+    const query = new URLSearchParams({
+      symbol,
+      interval: '1d',
+      count: String(count),
+      adjusted: 'true',
+    });
+    if (options.before !== undefined) query.set('before', options.before);
+    const result = record(await this.get(`/api/v1/candles?${query}`));
+    if (!Array.isArray(result.candles) || result.candles.length > 200) throw invalid();
+    return {
+      candles: result.candles.map((value) => {
+        const bar = dailyBar(value);
+        const currency = record(value).currency;
+        if (currency !== 'KRW' && currency !== 'USD') throw invalid();
+        return { ...bar, currency };
+      }),
+      nextBefore: nullableTimestamp(result.nextBefore),
+    };
+  }
+  /** Daily bars across `before`/`nextBefore` pages with explicit stop conditions (max pages etc.). */
+  dailyCandles(
+    symbol: string,
+    options: {
+      maxPages?: number;
+      pageSize?: number;
+      stopAtDate?: string;
+      maxCandles?: number;
+    } = {},
+  ) {
+    return collectCandlePages(
+      (before) => this.dailyCandlePage(symbol, { count: options.pageSize ?? 200, before }),
+      options,
+    );
+  }
+  /** One page of GET /api/v1/market-indicators/{symbol}/candles (MARKET_INDICATOR_CHART), 1d only. */
+  async marketIndicatorCandlePage(
+    symbol: string,
+    options: { count?: number; before?: string } = {},
+  ): Promise<CandlePage<DailyCandle>> {
+    const count = options.count ?? 200;
+    if (
+      !MARKET_INDICATOR_CATALOG.some((item) => item.symbol === symbol) ||
+      !Number.isInteger(count) ||
+      count < 1 ||
+      count > 200 ||
+      (options.before !== undefined && !Number.isFinite(Date.parse(options.before)))
+    )
+      throw new ProviderError(
+        400,
+        'INVALID_MARKET_QUERY',
+        '지표·조회 개수·기준 시각을 확인하세요.',
+      );
+    const query = new URLSearchParams({ interval: '1d', count: String(count) });
+    if (options.before !== undefined) query.set('before', options.before);
+    const result = record(await this.get(`/api/v1/market-indicators/${symbol}/candles?${query}`));
+    if (!Array.isArray(result.candles) || result.candles.length > 200) throw invalid();
+    return {
+      candles: result.candles.map(dailyBar),
+      nextBefore: nullableTimestamp(result.nextBefore),
+    };
+  }
+  marketIndicatorDailyCandles(
+    symbol: string,
+    options: {
+      maxPages?: number;
+      pageSize?: number;
+      stopAtDate?: string;
+      maxCandles?: number;
+    } = {},
+  ) {
+    return collectCandlePages(
+      (before) =>
+        this.marketIndicatorCandlePage(symbol, { count: options.pageSize ?? 200, before }),
+      options,
+    );
+  }
+  // KR supply/demand series (Stock Info, STOCK_TRADING_TREND). 403 means "no permission".
+  private async tradingSeries<T extends { date: string }>(
+    path: 'investor-trading' | 'program-trades' | 'short-selling' | 'credit-trades',
+    symbol: string,
+    options: { count?: number; until?: string },
+    normalize: (value: unknown) => T,
+  ) {
+    const count = options.count ?? 5;
+    if (
+      !KR_SYMBOL.test(symbol) ||
+      !Number.isInteger(count) ||
+      count < 1 ||
+      count > 100 ||
+      (options.until !== undefined && !DATE_ONLY.test(options.until))
+    )
+      throw new ProviderError(
+        400,
+        'INVALID_MARKET_QUERY',
+        '국내 종목 코드·조회 수·기준일을 확인하세요.',
+      );
+    const query = new URLSearchParams({ count: String(count) });
+    if (options.until !== undefined) query.set('until', options.until);
+    const result = record(
+      await this.get(`/api/v1/stocks/${symbol}/${path}?${query}`, false, {
+        forbiddenCode: PROVIDER_FORBIDDEN,
+      }),
+    );
+    if (!Array.isArray(result.records) || result.records.length > 100) throw invalid();
+    const records = result.records.map(normalize);
+    return {
+      source: 'Toss Securities OpenAPI',
+      asOf: new Date().toISOString(),
+      symbol,
+      /** Newest first. */
+      records,
+      nextUntil:
+        result.nextUntil === null || result.nextUntil === undefined
+          ? null
+          : dateOnly(result.nextUntil),
+    };
+  }
+  investorTrading(symbol: string, options: { count?: number; until?: string } = {}) {
+    return this.tradingSeries('investor-trading', symbol, options, normalizeInvestorTradingRecord);
+  }
+  programTrades(symbol: string, options: { count?: number; until?: string } = {}) {
+    return this.tradingSeries('program-trades', symbol, options, normalizeProgramTradeRecord);
+  }
+  shortSelling(symbol: string, options: { count?: number; until?: string } = {}) {
+    return this.tradingSeries('short-selling', symbol, options, normalizeShortSellingRecord);
+  }
+  creditTrades(symbol: string, options: { count?: number; until?: string } = {}) {
+    return this.tradingSeries('credit-trades', symbol, options, normalizeCreditTradeRecord);
   }
   async marketIndicators() {
     const query = new URLSearchParams({
