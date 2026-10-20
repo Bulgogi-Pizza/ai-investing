@@ -13,8 +13,14 @@ export class ApiError extends Error {
 /** Valid response whose content cannot be shown (for example an empty candle list). */
 export class NoDataError extends Error {}
 
-export type DataIssueKind = 'not-connected' | 'owner-only' | 'no-data' | 'error';
-export type DataIssue = { kind: DataIssueKind; message: string; retryable: boolean };
+export type DataIssueKind = 'not-connected' | 'owner-only' | 'permission' | 'no-data' | 'error';
+export type DataIssue = {
+  kind: DataIssueKind;
+  message: string;
+  retryable: boolean;
+  /** Server error code when the issue came from the API (lets a screen word the state precisely). */
+  code?: string;
+};
 
 export const AUTH_REQUIRED_EVENT = 'folio:auth-required';
 /** A private request got 401 mid-session: tell the app shell to return to the login screen. */
@@ -23,13 +29,41 @@ export function signalAuthRequired(status: number, code?: unknown) {
     window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
 }
 export async function apiGet(url: string, signal?: AbortSignal): Promise<unknown> {
+  return apiRequest('GET', url, undefined, signal);
+}
+/** Same error handling as apiGet for writes. A 204 answer resolves to an empty object. */
+export async function apiSend(
+  method: 'POST' | 'PUT' | 'DELETE',
+  url: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return apiRequest(method, url, body, signal);
+}
+async function apiRequest(
+  method: string,
+  url: string,
+  requestBody: unknown,
+  signal?: AbortSignal,
+): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(url, { signal });
+    response = await fetch(
+      url,
+      method === 'GET'
+        ? { signal }
+        : {
+            method,
+            signal,
+            headers: requestBody === undefined ? undefined : { 'Content-Type': 'application/json' },
+            body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
+          },
+    );
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new ApiError(0, 'NETWORK_ERROR', '서버에 연결할 수 없습니다. 네트워크를 확인해 주세요.');
   }
+  if (response.status === 204) return {};
   let body: unknown = null;
   try {
     body = await response.json();
@@ -65,7 +99,13 @@ export function issueOf(error: unknown): DataIssue {
     return { kind: 'no-data', message: error.message, retryable: true };
   if (error instanceof ApiError) {
     if (error.code === 'TOSS_INTEGRATION_UNAVAILABLE')
-      return { kind: 'not-connected', message: error.message, retryable: true };
+      return { kind: 'not-connected', message: error.message, retryable: true, code: error.code };
+    // Fundamentals providers (DART / SEC EDGAR) that the server has no key for.
+    if (error.code === 'DART_UNAVAILABLE' || error.code === 'SEC_UNAVAILABLE')
+      return { kind: 'not-connected', message: error.message, retryable: true, code: error.code };
+    // The Toss Open API key is valid but lacks permission for this data group (HTTP 403).
+    if (error.code === 'TOSS_PERMISSION_DENIED')
+      return { kind: 'permission', message: error.message, retryable: false, code: error.code };
     if (error.code === 'AUTH_REQUIRED')
       return {
         kind: 'error',
@@ -74,12 +114,13 @@ export function issueOf(error: unknown): DataIssue {
       };
     if (error.code === 'OWNER_REQUIRED')
       return { kind: 'owner-only', message: error.message, retryable: false };
-    if (error.code === 'PROVIDER_NOT_FOUND')
-      return { kind: 'no-data', message: error.message, retryable: true };
+    if (error.code === 'PROVIDER_NOT_FOUND' || error.code === 'FUNDAMENTALS_NOT_FOUND')
+      return { kind: 'no-data', message: error.message, retryable: true, code: error.code };
     return {
       kind: 'error',
       message: error.message,
       retryable: ![400, 401, 403, 409].includes(error.status),
+      code: error.code,
     };
   }
   return {

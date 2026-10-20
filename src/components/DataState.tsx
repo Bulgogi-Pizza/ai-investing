@@ -1,4 +1,4 @@
-import { Loader, Lock, SearchX, TriangleAlert, Unplug } from 'lucide-react';
+import { Loader, Lock, ShieldOff, SearchX, TriangleAlert, Unplug } from 'lucide-react';
 import type { DataIssue } from '../lib/api';
 
 const copy = {
@@ -12,6 +12,12 @@ const copy = {
     icon: Lock,
     title: '소유자 계정 전용 기능입니다',
     text: '이 화면의 실데이터는 토스 계좌를 연결한 소유자 계정에만 제공됩니다. 현재 계정에는 표시할 데이터가 없습니다.',
+    role: 'status',
+  },
+  permission: {
+    icon: ShieldOff,
+    title: '토스 권한 없음',
+    text: '토스 Open API 키에 이 데이터를 조회할 권한이 없습니다. 토스증권 Open API 권한 설정을 확인하세요. 값을 대신 만들어 보여 주지 않습니다.',
     role: 'status',
   },
   'no-data': {
@@ -33,17 +39,27 @@ export function DataState({
   issue,
   onRetry,
   title,
+  scope,
   compact = false,
 }: {
   issue: DataIssue;
   onRetry?: () => void;
+  /** Replaces the heading entirely. */
   title?: string;
+  /** Names the part of the screen the state belongs to; shown before the standard heading. */
+  scope?: string;
   compact?: boolean;
 }) {
   const item = copy[issue.kind];
   const Icon = item.icon;
   // Server messages are already sanitized Korean text; fixed copy is the default for the rest.
-  const detail = issue.kind === 'error' || issue.kind === 'no-data' ? issue.message : item.text;
+  // Not-connected without the Toss code comes from another provider (DART, SEC): use its message.
+  const otherProvider =
+    issue.kind === 'not-connected' && issue.code && issue.code !== 'TOSS_INTEGRATION_UNAVAILABLE';
+  const detail =
+    issue.kind === 'error' || issue.kind === 'no-data' || otherProvider ? issue.message : item.text;
+  const standard = otherProvider ? '데이터 제공자가 연결되지 않았습니다' : item.title;
+  const heading = title ?? (scope ? `${scope} · ${standard}` : standard);
   return (
     <section
       className={`data-state data-state-${issue.kind}${compact ? ' data-state-compact' : ''}`}
@@ -52,7 +68,7 @@ export function DataState({
     >
       <Icon size={compact ? 16 : 26} aria-hidden="true" />
       <div>
-        <h2>{title ?? item.title}</h2>
+        <h2>{heading}</h2>
         <p>{detail}</p>
         {issue.kind === 'error' && onRetry && issue.retryable && (
           <button className="button small" onClick={onRetry}>

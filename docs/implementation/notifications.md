@@ -68,10 +68,16 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md)의 "알림" 절과
 
 `tests/notify.test.ts` 26개. 외부 통신 없이 주입 transport만 쓴다. 정리 규칙(이메일·외부 URL·긴 숫자·토큰·제어문자·전각 숫자), 모의·실전 문구 구분, 모든 알림 종류, 고정 URL·POST·JSON 본문(문서화된 파라미터만)·`redirect:'error'`, 설정 형식 검증, 오류에 토큰·URL·응답 본문이 없음, 429·형식 오류·과대 응답·리다이렉트·연결 실패·시간 초과 분류, 먼저 기록 순서, 실패·미설정·저장소 장애 시 던지지 않음, 라우터 401·403·limit 검증·503을 검사한다. 실제 텔레그램 호출과 실제 Firestore 저장은 검증하지 않았다.
 
+## 연결 상태 (7a, 2026-10-21)
+
+- 연결됨: `createApp`이 `createNotificationsRouter`를 인증·동일 출처 확인과 `ownerGate` 뒤에 설치한다(`GET /api/notifications`). `index.ts`가 운영에서는 `FirestoreNotificationRepository`, 그 밖에는 메모리 저장소와 `notifierFromEnvironment()`, `APP_ORIGIN`으로 `NotificationService`를 만들어 주입한다. 앱 origin이 https(또는 127.0.0.1)가 아니면 서비스를 만들지 않고 알림은 전송되지 않는다(운영은 `createApp`이 먼저 거부).
+- 호출처: 알고리즘 API가 긴급 정지 해제(`emergency-stop-released`)와 운용 금액 상향(`budget-raised`)에서 `setting-risk-increase`를 보낸다. 응답에 `notification` 결과(`sent`·`failed`·`disabled`)를 실어 화면이 정확히 안내한다. 실전 켜기(`live-enabled`)는 7f에서 연결한다.
+- 화면: 내 자산 > 알고리즘 탭의 "최근 알림"(상태 배지, 모의·가상/실전·실제 라벨, 실패 이유, 화면 링크 줄은 숨김). 텔레그램 링크의 `/algorithms` 경로는 앱이 그 탭을 바로 연다.
+- 테스트: `tests/algorithms-api.test.ts`(해제 시 알림 기록과 텔레그램 호출, 실패·미설정이 변경을 막지 않음, 금액이 메시지에 없음, 목록 소유자 전용), `tests/algorithms.spec.ts`(알림 목록 상태 배지·라벨).
+
 ## 아직 연결하지 않은 것
 
-- `src/server/app.ts`·`index.ts`에서 라우터 설치(인증·동일 출처 이후)와 `FirestoreNotificationRepository` 주입, `notifierFromEnvironment()`로 서비스 생성. 알림을 호출할 쪽(알고리즘·아침 작업·설정 변경 API)도 아직 없다.
 - Secret Manager 비밀(`investing-telegram-bot-token`, `investing-telegram-chat-id`)과 서비스·작업의 비밀 참조, 환경변수 `TELEGRAM_BOT_TOKEN`·`TELEGRAM_CHAT_ID` 연결, Firestore `notifications.ttlAt` TTL 정책 — 계획 2단계(Terraform).
-- 화면의 최근 알림 목록 UI(알고리즘 화면).
+- 체결·자동 정지·주문 거부·데이터 오류·작업 실패·아침 브리핑을 호출하는 쪽(7c~7f, 6b).
 - `.env.example`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 빈 항목 추가.
 - 실제 봇으로 한 번 보내 보는 운영 확인과 그 기록.

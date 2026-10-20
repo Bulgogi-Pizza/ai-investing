@@ -2108,6 +2108,7 @@ footer span {
   color: #b3566a;
 }
 .data-state-owner-only,
+.data-state-permission,
 .data-state-not-connected {
   border-color: #dfe3f0;
   background: #f6f7fb;

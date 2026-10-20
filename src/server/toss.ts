@@ -8,6 +8,8 @@ export class ProviderError extends Error {
     public code: string,
     message: string,
     public retryAfter?: number,
+    /** HTTP status the provider sent when it refused the call (401/403); never provider text. */
+    public upstreamStatus?: number,
   ) {
     super(message);
   }
@@ -460,6 +462,32 @@ export async function collectCandlePages<T extends DailyCandle>(
   }
   return finish('MAX_PAGES');
 }
+export type CandlesResult = {
+  source: string;
+  asOf: string;
+  symbol: string;
+  interval: string;
+  adjusted: boolean;
+  candles: {
+    timestamp: string;
+    open: string;
+    high: string;
+    low: string;
+    close: string;
+    volume: string;
+    currency: string;
+  }[];
+  /** Cursor for the next (older) page; null on the last page. Pass it back as `before`. */
+  nextBefore?: string | null;
+};
+/** ISO-8601 date-time with a zone designator, as the candles `before` cursor must be. */
+export function validBefore(value: string): boolean {
+  return (
+    value.length <= 40 &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?(Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value))
+  );
+}
 export class TossClient {
   private cooldownUntil = 0;
   private reads = new Map<string, { expiresAt: number; value: unknown }>();
@@ -532,6 +560,8 @@ export class TossClient {
           ? 'PROVIDER_ACCESS_DENIED'
           : 'PROVIDER_UNAVAILABLE',
         '제공자 인증·허용 IP·서비스 상태를 확인하세요.',
+        undefined,
+        response.status === 401 || response.status === 403 ? response.status : undefined,
       );
     }
     try {
@@ -592,6 +622,26 @@ export class TossClient {
         options,
       )
     ).result;
+  }
+  /**
+   * Authenticated GET for server modules that normalize their own responses (toss-analysis.ts).
+   * Returns the provider `result` payload untouched. A 403 on the data call (not on the token
+   * call) means the Open API key lacks permission for that group: it is reported separately as
+   * TOSS_PERMISSION_DENIED so the screen can say so instead of "service error".
+   */
+  async readJson(path: string): Promise<unknown> {
+    const authorization = `Bearer ${await this.bearer()}`;
+    try {
+      return (await this.request(path, { headers: { Authorization: authorization } })).result;
+    } catch (error) {
+      if (error instanceof ProviderError && error.upstreamStatus === 403)
+        throw new ProviderError(
+          403,
+          'TOSS_PERMISSION_DENIED',
+          '토스 Open API 키에 이 데이터를 조회할 권한이 없습니다. 토스증권 Open API 권한 설정을 확인하세요.',
+        );
+      throw error;
+    }
   }
   private async cached<T>(key: string, read: () => Promise<T>): Promise<T> {
     const cached = this.reads.get(key);
@@ -663,17 +713,20 @@ export class TossClient {
       return normalizeHoldings(await this.get('/api/v1/holdings', true));
     });
   }
-  async candles(symbol: string, interval: string, count: number) {
+  async candles(symbol: string, interval: string, count: number, before?: string) {
     if (
       !/^[A-Za-z0-9.\-]{1,30}$/.test(symbol) ||
       !['1m', '1d'].includes(interval) ||
       !Number.isInteger(count) ||
       count < 1 ||
-      count > 200
+      count > 200 ||
+      (before !== undefined && !validBefore(before))
     )
       throw new ProviderError(400, 'INVALID_MARKET_QUERY', '종목·주기·조회 개수를 확인하세요.');
     const query = new URLSearchParams({ symbol, interval, count: String(count), adjusted: 'true' });
-    return this.cached(`candles:${query}`, async () => {
+    // Spec: `before` is the inclusive upper bound; pass the previous page's nextBefore unchanged.
+    if (before !== undefined) query.set('before', before);
+    return this.cached(`candles:${query}`, async (): Promise<CandlesResult> => {
       const result = record(await this.get(`/api/v1/candles?${query}`));
       if (!Array.isArray(result.candles) || result.candles.length > 200) throw invalid();
       const candles = result.candles.map((value) => {
@@ -701,6 +754,7 @@ export class TossClient {
         interval,
         adjusted: true,
         candles: candles.reverse(),
+        nextBefore: nullableTimestamp(result.nextBefore),
       };
     });
   }

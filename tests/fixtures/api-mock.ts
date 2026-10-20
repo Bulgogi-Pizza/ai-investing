@@ -1,4 +1,5 @@
 import type { Page, Route } from '@playwright/test';
+import { analysisReply, candlePage, quotes } from './analysis-mock';
 
 /**
  * Synthetic API for browser tests. Every number, name and event here is invented test data;
@@ -67,30 +68,8 @@ export function event(
     factualObservedAt: '2026-10-20T00:00:00Z',
   };
 }
-export function candlesFor(symbol: string) {
-  const usd = symbol === 'AAPL';
-  const start = Date.UTC(2026, 6, 12);
-  const candles = Array.from({ length: 100 }, (_, i) => {
-    const close = usd ? 180 + i * 0.5 + (i % 7) : 60000 + i * 100 + (i % 7) * 300;
-    const fixed = usd && i === 99 ? '234.76' : String(usd ? close.toFixed(2) : close);
-    return {
-      timestamp: new Date(start + i * 86400000).toISOString(),
-      open: fixed,
-      high: fixed,
-      low: fixed,
-      close: fixed,
-      volume: '1000',
-      currency: usd ? 'USD' : 'KRW',
-    };
-  });
-  return {
-    source: 'Test quote provider',
-    asOf: '2026-10-20T00:00:00Z',
-    symbol,
-    interval: '1d',
-    adjusted: true,
-    candles,
-  };
+export function candlesFor(symbol: string, before: string | null = null) {
+  return candlePage(symbol, before);
 }
 export const portfolioBody = {
   source: 'Toss Securities OpenAPI',
@@ -161,10 +140,6 @@ export const indicatorsBody = {
     validUntil: '2026-10-20T09:31:00+09:00',
   },
 };
-const pricesAll = [
-  { symbol: '005930', lastPrice: '71234', currency: 'KRW', timestamp: '2026-10-20T09:30:00+09:00' },
-  { symbol: 'AAPL', lastPrice: '234.76', currency: 'USD', timestamp: '2026-10-20T22:30:00+09:00' },
-];
 export const liveInsight = {
   engine: 'rules-v1',
   dataMode: 'live',
@@ -283,8 +258,10 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
       '/api/market/indicators',
       '/api/portfolio',
       '/api/recommendations',
+      '/api/fundamentals',
     ];
-    if (!marketPaths.includes(path))
+    const isAnalysis = path.startsWith('/api/analysis/');
+    if (!marketPaths.includes(path) && !isAnalysis)
       return json(errorBody('NOT_FOUND', '요청한 API를 찾을 수 없습니다.'), 404);
     if (market === 'not-connected')
       return json(
@@ -304,15 +281,25 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
     const empty = market === 'empty';
     if (path === '/api/market/candles') {
       const symbol = url.searchParams.get('symbol') ?? '';
-      return json(empty ? { ...candlesFor(symbol), candles: [] } : candlesFor(symbol));
+      const page = candlesFor(symbol, url.searchParams.get('before'));
+      return json(empty ? { ...page, candles: [] } : page);
     }
     if (path === '/api/market/prices') {
       const wanted = (url.searchParams.get('symbols') ?? '').split(',');
       return json({
         source: 'Toss Securities OpenAPI',
         asOf: '2026-10-20T01:00:00Z',
-        prices: empty ? [] : pricesAll.filter((p) => wanted.includes(p.symbol)),
+        prices: empty
+          ? []
+          : wanted.filter((s) => quotes[s]).map((symbol) => ({ symbol, ...quotes[symbol] })),
       });
+    }
+    if (path === '/api/fundamentals' || isAnalysis) {
+      if (empty && path !== '/api/analysis/sector-peers')
+        return json(errorBody('PROVIDER_NOT_FOUND', '제공자에 해당 종목 데이터가 없습니다.'), 404);
+      const reply = analysisReply(path, url.searchParams);
+      if (!reply) return json(errorBody('NOT_FOUND', '요청한 API를 찾을 수 없습니다.'), 404);
+      return json(reply.body, reply.status);
     }
     if (path === '/api/market/indicators') return json(indicatorsBody);
     if (path === '/api/portfolio')

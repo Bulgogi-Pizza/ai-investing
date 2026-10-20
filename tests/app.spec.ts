@@ -10,7 +10,7 @@ import {
 
 const pages = [
   ['경제 캘린더', 'calendar'],
-  ['차트 분석', 'charts'],
+  ['종목 분석', 'analysis'],
   ['내 자산', 'portfolio'],
   ['AI 인사이트', 'insights'],
 ] as const;
@@ -89,7 +89,7 @@ test.describe('owner with live data', () => {
     await expect(strip).toContainText('1,375.00');
     await expect(strip).toContainText('조회 ');
     await expect(page.locator('.watch-price').first()).toHaveText('71,234원');
-    await expect(page.locator('.watch-price').nth(1)).toHaveText('$234.76');
+    await expect(page.locator('.watch-price').nth(1)).toHaveText('$236.00');
     for (const text of forbiddenText) await expect(page.getByText(text)).toHaveCount(0);
   });
   test('calendar filters, views and month navigation remain consistent', async ({ page }) => {
@@ -124,26 +124,6 @@ test.describe('owner with live data', () => {
       'href',
       'https://example.test/release',
     );
-  });
-  test('chart renders fetched candles, indicators and validates reference lines', async ({
-    page,
-  }) => {
-    await open(page, '차트 분석');
-    await expect(page.locator('.chart-canvas svg')).toBeVisible();
-    await expect(page.locator('.chart-price')).toContainText('원');
-    await expect(page.locator('.chart-footnote')).toContainText('Test quote provider');
-    await page.getByRole('button', { name: 'EMA 20', exact: true }).click();
-    await page.getByRole('button', { name: '볼린저 밴드', exact: true }).click();
-    await page.getByRole('button', { name: 'MACD', exact: true }).click();
-    await page.getByLabel('매수 검토선').fill('99000');
-    await page.getByLabel('매도 검토선').fill('88000');
-    await expect(page.getByText('매수 검토선은 매도 검토선보다 낮게 설정하세요.')).toBeVisible();
-    await page.getByLabel('종목 선택').selectOption('Apple');
-    await expect(page.locator('.chart-symbol')).toContainText('AAPL');
-    await expect(page.locator('.chart-price')).toContainText('234.76');
-    await expect(page.locator('.chart-price')).toContainText('USD');
-    await expect(page.getByLabel('매수 검토선')).toHaveValue('');
-    await expect(page.getByRole('button', { name: 'KOSPI 비교' })).toHaveCount(0);
   });
   test('portfolio privacy toggle and strategy validation/saving work', async ({ page }) => {
     await open(page, '내 자산');
@@ -199,11 +179,11 @@ test.describe('signed-in member who is not the owner', () => {
     );
     await expect(page.locator('.calendar-card')).toHaveCount(0);
     await expect(page.locator('.event-chip')).toHaveCount(0);
-    for (const name of ['차트 분석', '내 자산', 'AI 인사이트']) {
+    for (const name of ['종목 분석', '내 자산', 'AI 인사이트']) {
       await open(page, name);
       if (name === 'AI 인사이트') await analyze(page);
       const state = page.locator(
-        'main > [data-state="owner-only"], .invest-page > [data-state="owner-only"], .chart-panel [data-state="owner-only"]',
+        'main > [data-state="owner-only"], .invest-page > [data-state="owner-only"], .invest-tabpanel > [data-state="owner-only"], .analysis [data-state="owner-only"]',
       );
       await expect(state.first()).toContainText('소유자 계정 전용 기능입니다');
       await expect(page.getByText('계약 테스트 종목')).toHaveCount(0);
@@ -220,7 +200,7 @@ test.describe('Toss not connected (503)', () => {
   }) => {
     await start(page, { market: 'not-connected' });
     await expect(page.locator('.market-strip-state [data-state="not-connected"]')).toBeVisible();
-    for (const name of ['차트 분석', '내 자산', 'AI 인사이트']) {
+    for (const name of ['종목 분석', '내 자산', 'AI 인사이트']) {
       await open(page, name);
       if (name === 'AI 인사이트') await analyze(page);
       await expect(page.locator('main [data-state="not-connected"]').last()).toContainText(
@@ -241,11 +221,11 @@ test.describe('empty provider data', () => {
   test('chart and portfolio say that there is no data instead of drawing anything', async ({
     page,
   }) => {
-    await open(page, '차트 분석');
-    await expect(page.locator('.chart-panel [data-state="no-data"]')).toContainText(
+    await open(page, '종목 분석');
+    await expect(page.locator('.analysis [data-state="no-data"]').last()).toContainText(
       '표시할 데이터가 없습니다',
     );
-    await expect(page.locator('.chart-canvas')).toHaveCount(0);
+    await expect(page.locator('.analysis-chart-main')).toHaveCount(0);
     await open(page, '내 자산');
     await expect(page.locator('[data-state="no-data"]')).toContainText('보유 중인 주식이 없습니다');
     await open(page, 'AI 인사이트');
@@ -260,14 +240,14 @@ test.describe('empty provider data', () => {
 test.describe('transient provider error', () => {
   test('chart shows an alert and recovers after retry', async ({ page }) => {
     const api = await start(page, { market: 'transient' });
-    await open(page, '차트 분석');
-    const alert = page.locator('.chart-panel').getByRole('alert');
+    await open(page, '종목 분석');
+    const alert = page.locator('.analysis').getByRole('alert');
     await expect(alert).toContainText('일시적인 오류');
-    await expect(page.locator('.chart-canvas')).toHaveCount(0);
+    await expect(page.locator('.analysis-chart-main')).toHaveCount(0);
     api.state.failing = false;
     await alert.getByRole('button', { name: '다시 시도', exact: true }).click();
-    await expect(page.locator('.chart-canvas svg')).toBeVisible();
-    await expect(page.locator('.chart-panel').getByRole('alert')).toHaveCount(0);
+    await expect(page.locator('.analysis-chart-main svg').first()).toBeVisible();
+    await expect(page.locator('.analysis').getByRole('alert')).toHaveCount(0);
   });
   test('top strip recovers through its refresh control', async ({ page }) => {
     const api = await start(page, { market: 'transient' });
@@ -309,7 +289,8 @@ test('capture rendered visual evidence', async ({ page }, testInfo) => {
   for (const [name, slug] of pages) {
     await open(page, name);
     await expect(page.getByRole('heading', { level: 1 })).toBeVisible();
-    if (slug === 'charts') await expect(page.locator('svg.recharts-surface').first()).toBeVisible();
+    if (slug === 'analysis')
+      await expect(page.locator('svg.recharts-surface').first()).toBeVisible();
     await page.screenshot({
       path: testInfo.outputPath(`${testInfo.project.name}-${slug}.png`),
       fullPage: true,

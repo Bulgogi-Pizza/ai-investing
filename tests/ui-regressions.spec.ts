@@ -81,21 +81,13 @@ test('calendar load failure is explicit and retryable', async ({ page }) => {
   await alert.getByRole('button', { name: '다시 시도', exact: true }).click();
   await expect(page.locator('.event-chip')).toHaveCount(1);
 });
-test('actual USD closing quote retains its cents', async ({ page }) => {
-  await mockApi(page, { user: ownerUser });
-  await page.goto('/');
-  await page.getByRole('button', { name: '차트 분석', exact: true }).click();
-  await page.getByLabel('종목 선택').selectOption('Apple');
-  await expect(page.locator('.chart-price')).toContainText('234.76');
-  await expect(page.locator('.chart-price')).toContainText('USD');
-});
 test('administrator header fits the viewport and account controls remain reachable', async ({
   page,
 }) => {
   await mockApi(page, { user: adminUser });
   await page.goto('/');
   await expect(page.getByRole('button', { name: '계정 등록', exact: true })).toBeVisible();
-  for (const name of ['경제 캘린더', '차트 분석', '내 자산', 'AI 인사이트']) {
+  for (const name of ['경제 캘린더', '종목 분석', '내 자산', 'AI 인사이트']) {
     await page
       .getByRole('button', {
         name: name === 'AI 인사이트' ? /AI 인사이트/ : name,

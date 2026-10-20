@@ -20,16 +20,16 @@ import {
 import Portfolio from './features/portfolio';
 import Recommendations from './features/recommendations';
 import CalendarPage from './features/calendar/CalendarPage';
-import ChartsPage from './features/charts/ChartsPage';
+import AnalysisPage from './features/analysis/AnalysisPage';
 import LoginScreen, { type SessionUser } from './features/LoginScreen';
 import MarketStrip from './features/MarketStrip';
 import { DataState, LoadingState } from './components/DataState';
 import { ApiError, AUTH_REQUIRED_EVENT, useApiResource } from './lib/api';
 
-type Page = 'calendar' | 'charts' | 'portfolio' | 'ai';
+type Page = 'calendar' | 'analysis' | 'portfolio' | 'ai';
 const nav = [
   { id: 'calendar', label: '경제 캘린더', icon: CalendarDays },
-  { id: 'charts', label: '차트 분석', icon: ChartNoAxesCombined },
+  { id: 'analysis', label: '종목 분석', icon: ChartNoAxesCombined },
   { id: 'portfolio', label: '내 자산', icon: Wallet },
   { id: 'ai', label: 'AI 인사이트', icon: Sparkles },
 ] as const;
@@ -118,8 +118,11 @@ export default function App() {
 
 function Workspace({ user, onLoggedOut }: { user: SessionUser; onLoggedOut: () => void }) {
   const searchRef = useRef<HTMLInputElement>(null);
-  const [page, setPage] = useState<Page>('calendar');
-  const [initialSymbol, setInitialSymbol] = useState('삼성전자');
+  // Telegram alerts link to /algorithms: open 내 자산 > 알고리즘 for that path.
+  const [page, setPage] = useState<Page>(() =>
+    window.location.pathname === '/algorithms' ? 'portfolio' : 'calendar',
+  );
+  const [initialSymbol, setInitialSymbol] = useState('005930');
   const [sessionError, setSessionError] = useState('');
   const [accounts, setAccounts] = useState<
     { id: string; email: string; role: string; active: boolean }[]
@@ -240,8 +243,8 @@ function Workspace({ user, onLoggedOut }: { user: SessionUser; onLoggedOut: () =
               key={item.symbol}
               className="watch-item"
               onClick={() => {
-                setInitialSymbol(item.label);
-                setPage('charts');
+                setInitialSymbol(item.symbol);
+                setPage('analysis');
               }}
             >
               <span className={`stock-icon ${item.tone}`}>{item.icon}</span>
@@ -264,7 +267,7 @@ function Workspace({ user, onLoggedOut }: { user: SessionUser; onLoggedOut: () =
             </button>
           );
         })}
-        <button className="watch-add" onClick={() => setPage('charts')}>
+        <button className="watch-add" onClick={() => setPage('analysis')}>
           <Plus size={15} /> 관심종목 관리
         </button>
         <div className="sidebar-bottom">
@@ -356,8 +359,8 @@ function Workspace({ user, onLoggedOut }: { user: SessionUser; onLoggedOut: () =
           )}
           {page === 'calendar' ? (
             <CalendarPage search={search} isAdmin={user.role === 'admin'} />
-          ) : page === 'charts' ? (
-            <ChartsPage key={initialSymbol} initialSymbol={initialSymbol} />
+          ) : page === 'analysis' ? (
+            <AnalysisPage key={initialSymbol} initialSymbol={initialSymbol} />
           ) : page === 'portfolio' ? (
             <Portfolio />
           ) : (

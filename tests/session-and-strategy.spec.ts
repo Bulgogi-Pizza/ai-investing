@@ -114,7 +114,7 @@ test.describe('session expiry', () => {
         json: { error: { code: 'AUTH_REQUIRED', message: '로그인이 필요합니다.' } },
       }),
     );
-    await open(page, '차트 분석');
+    await open(page, '종목 분석');
     await expect(page.getByRole('region', { name: '나의 투자 공간에 로그인' })).toBeVisible();
     await expect(page.locator('.sidebar')).toHaveCount(0);
   });

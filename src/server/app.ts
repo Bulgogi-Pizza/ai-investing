@@ -17,6 +17,21 @@ import {
   type CalendarRepository,
 } from './calendar.js';
 import { createNewsRouter } from './news.js';
+import {
+  createAlgorithmsRouter,
+  MemoryAlgorithmRepository,
+  type AlgorithmRepository,
+} from './algorithms.js';
+import {
+  createNotificationsRouter,
+  MemoryNotificationRepository,
+  NotificationService,
+  validAppOrigin,
+  type NotificationRepository,
+} from './notify.js';
+import { createAnalysisRouter } from './analysis.js';
+import { createFundamentalsRouter } from './fundamentals/index.js';
+import type { FundamentalsRouterOptions } from './fundamentals/router.js';
 import { ownerGate } from './owner.js';
 import {
   createSnapshotRouter,
@@ -26,7 +41,8 @@ import {
 import type { aiFromEnvironment } from './ai.js';
 import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
-import { ProviderError, parsePriceSymbols, type TossClient } from './toss.js';
+import { TossAnalysis } from './toss-analysis.js';
+import { ProviderError, parsePriceSymbols, validBefore, type TossClient } from './toss.js';
 import { MemoryStore, type Store, type Strategy, type User } from './store.js';
 
 export type AppOptions = {
@@ -37,9 +53,18 @@ export type AppOptions = {
   toss?: TossClient;
   /** Same TOSS_OWNER_USER_ID the Toss client is bound to. Missing => owner routes fail closed. */
   ownerUserId?: string;
+  /** DART / SEC EDGAR adapters from the environment; a missing one answers 503 for its market. */
+  dart?: FundamentalsRouterOptions['dart'];
+  sec?: FundamentalsRouterOptions['sec'];
   calendarRepository?: CalendarRepository;
   snapshotRepository?: SnapshotRepository;
   loginThrottle?: LoginThrottle;
+  /** Algorithm models, change history, emergency-stop flag and cost settings (owner-only API). */
+  algorithmRepository?: AlgorithmRepository;
+  /** Stage 7a keeps live mode off. Only tests set this, to exercise the live-overlap rule. */
+  algorithmLiveEnabled?: boolean;
+  notificationRepository?: NotificationRepository;
+  notifications?: NotificationService;
   ai?: ReturnType<typeof aiFromEnvironment>;
 };
 const publicUser = (user: User) => ({ id: user.id, email: user.email, role: user.role });
@@ -89,6 +114,15 @@ export function createApp(options: AppOptions = {}) {
   const loginThrottle = options.loginThrottle ?? new MemoryLoginThrottle();
   const store = options.store ?? new MemoryStore();
   const calendarRepository = options.calendarRepository ?? new MemoryCalendarRepository();
+  const algorithmRepository = options.algorithmRepository ?? new MemoryAlgorithmRepository();
+  const notificationRepository =
+    options.notificationRepository ?? new MemoryNotificationRepository();
+  // The service needs an https (or 127.0.0.1) origin for its links; without one nothing is sent.
+  const notifications =
+    options.notifications ??
+    (validAppOrigin(origin)
+      ? new NotificationService({ repository: notificationRepository, appOrigin: origin })
+      : undefined);
   // Owner-only gates. Authentication has already run; both read the server-side session user.
   // Toss-backed data additionally needs the Toss client; owner-account data needs only the id.
   const ownerAccount = ownerGate(options.ownerUserId);
@@ -312,7 +346,9 @@ export function createApp(options: AppOptions = {}) {
       typeof req.query.symbol !== 'string' ||
       (req.query.interval !== undefined && typeof req.query.interval !== 'string') ||
       (req.query.count !== undefined &&
-        (typeof req.query.count !== 'string' || !/^\d{1,3}$/.test(req.query.count)))
+        (typeof req.query.count !== 'string' || !/^\d{1,3}$/.test(req.query.count))) ||
+      (req.query.before !== undefined &&
+        (typeof req.query.before !== 'string' || !validBefore(req.query.before)))
     ) {
       failure(res, 400, 'INVALID_MARKET_QUERY', '잘못된 조회 조건입니다.');
       return;
@@ -322,6 +358,7 @@ export function createApp(options: AppOptions = {}) {
         req.query.symbol,
         req.query.interval ?? '1d',
         req.query.count === undefined ? 100 : Number(req.query.count),
+        req.query.before,
       ),
     );
   });
@@ -376,11 +413,45 @@ export function createApp(options: AppOptions = {}) {
       ownerUserId: options.ownerUserId,
     }),
   );
+  app.use(
+    createAnalysisRouter({
+      analysis: options.toss ? new TossAnalysis(options.toss) : undefined,
+      gate: requireOwner,
+    }),
+  );
+  // Owner-only: 503 when the owner is unknown, 403 for others; the router re-checks the owner.
+  app.use('/api/fundamentals', ownerAccount);
+  app.use(
+    createFundamentalsRouter({
+      dart: options.dart,
+      sec: options.sec,
+      ownerUserId: options.ownerUserId ?? '',
+    }),
+  );
   app.use(createNewsRouter({ repository: calendarRepository, ownerUserId: options.ownerUserId }));
   app.use(
     createCalendarRouter({
       repository: calendarRepository,
       ownerUserId: options.ownerUserId,
+    }),
+  );
+  // Owner-only (after authentication and the origin check above).
+  app.use('/api/notifications', ownerAccount);
+  app.use(
+    createNotificationsRouter({
+      repository: notificationRepository,
+      ownerUserId: options.ownerUserId ?? '',
+    }),
+  );
+  app.use(
+    createAlgorithmsRouter({
+      repository: algorithmRepository,
+      ownerUserId: options.ownerUserId,
+      candles: options.toss
+        ? (symbol, interval, count) => options.toss!.candles(symbol, interval, count)
+        : undefined,
+      notify: notifications ? (event) => notifications.notify(event) : undefined,
+      liveEnabled: options.algorithmLiveEnabled,
     }),
   );
   app.use('/api', (_req, res) => failure(res, 404, 'NOT_FOUND', '요청한 API를 찾을 수 없습니다.'));

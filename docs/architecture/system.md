@@ -9,7 +9,7 @@ src/
   components/       재사용 UI
   features/         기능별 화면
     calendar/       경제 캘린더 · CalendarPage.tsx
-    charts/         차트 분석 · ChartsPage.tsx
+    analysis/       종목 분석 · AnalysisPage.tsx (요약·지표 차트·분석 탭)
     portfolio.tsx   자산 화면
     recommendations.tsx 추천 화면
   jobs/             예약 작업(Cloud Run Job 진입점·장 운영 판단), 일일 스냅샷
