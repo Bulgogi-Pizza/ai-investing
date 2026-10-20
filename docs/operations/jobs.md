@@ -156,3 +156,52 @@ gcloud run jobs execute investing-morning-calendar --region=asia-northeast3 \
 - `gcloud run jobs deploy --set-secrets`가 배포 계정에 비밀 접근 권한 없이 되는지(서비스 계정의 접근만 검사한다고 알려져 있으나 실제 배포에서 확인).
 - 배포 워크플로의 `jq` 식(서비스 JSON에서 비밀 버전 추출)은 로컬에서 실행하지 못했다. 첫 실행 로그의 경고 여부로 확인한다.
 - 토스 호출 한도의 실제 값과 `PROVIDER_FORBIDDEN`의 실제 응답은 실호출로 확인한다.
+
+## 모의 운용 작업 (algo-paper)
+
+7c에서 같은 틀 위에 추가한 두 번째 작업이다. 판단·저장·안전장치 의미는 [알고리즘 7c](../implementation/algorithm.md#7c-모의-운용-작업-구현-2026-10-21-운영-적용-전)에 있다. 이 작업은 가상 기록만 만들고 **주문을 내지 않는다**. 상태: 합성 테스트와 `terraform validate`까지 완료, 운영 적용 전.
+
+```
+Cloud Scheduler 2개 ──POST jobs:run (overrides: ALGO_MARKET=KR|US)──▶ Cloud Run Job investing-algo-paper
+  investing-algo-paper-kr  09:05 KST 월~금                              investing-jobs SA(스냅샷 작업과 같은 계정), 같은 이미지 digest
+  investing-algo-paper-us  22:35·23:35 KST 월~금                         고정 출구 IP → 토스(캘린더·일봉·현재가)
+                                                                         Firestore: algorithmRuns, paperLedgers, paperTrades, notifications
+```
+
+- 진입점 `node --import tsx src/jobs/algo-paper.ts`. 시장은 실행마다 `ALGO_MARKET`(Scheduler가 덮어쓴다)으로 받는다. 값이 없으면 설정 오류로 종료 `2`.
+- 어느 슬롯이 유효한지는 작업이 장 운영 캘린더로 정한다(개장 후 20분 이내). 미국 서머타임에는 22:35, 아닐 때는 23:35만 실제로 돈다. 휴장일은 하루 한 번 `skipped`로 기록한다. 같은 시장·날짜는 `algorithmRuns/{market}_{date}`로 한 번만 돈다.
+- 종료 코드: `0` 정상(할 일 없음·건너뜀 포함), `3` 일부 알고리즘 실패, `1` 전부 실패·캘린더 오류·기록 오류, `2` 설정 오류. `3`·`1`이면 텔레그램 `job-failure`를 보낸다. `--max-retries=0`이고 Scheduler 재시도는 호출 실패만 2회 한다.
+- 환경 변수(배포 워크플로가 설정): `NODE_ENV=production`, `GOOGLE_CLOUD_PROJECT`, `APP_ORIGIN`(알림 링크), `ALGO_AI_ENABLED=false`. 수동 실행에서만 쓰는 값: `ALGO_PAPER_SLIPPAGE_BPS`(0~500, 기본 10), `ALGO_OPEN_WINDOW_MINUTES`(1~120, 기본 20; 쓰면 기록의 `trigger`가 `manual`).
+- 비밀: 토스 4개(스냅샷 작업과 같은 숫자 버전)와, 서비스에 숫자 버전으로 연결되어 있을 때만 `TELEGRAM_BOT_TOKEN`·`TELEGRAM_CHAT_ID`. 텔레그램이 없으면 알림은 화면 목록에 `disabled`로만 남고 판단은 그대로 돈다. Terraform이 `investing-jobs`에 텔레그램 비밀 두 개의 비밀 단위 `secretAccessor`를 준다(`infra/gcp/jobs-algo.tf`).
+
+### Terraform (`infra/gcp/jobs-algo.tf`, 변수 `algo_schedules_enabled`, 기본 `false` = 일시 정지)
+
+기대하는 `plan`은 **추가만** 5개다: `google_secret_manager_secret_iam_member.jobs_telegram`(2개: 봇 토큰, chat ID), `google_cloud_scheduler_job.algo_paper_kr`, `google_cloud_scheduler_job.algo_paper_us`(둘 다 `paused=true`). Cloud Run Job 자체와 `run.invoker` 바인딩은 배포 워크플로가 만든다. 기존 리소스의 교체·삭제가 있으면 적용하지 않는다. 일정: KR `5 9 * * 1-5`, US `35 22,23 * * 1-5`(Asia/Seoul).
+
+### 배포 (`deploy.yml`의 `Deploy paper algorithm job` 단계)
+
+스냅샷 단계 뒤에, 서비스를 실제로 배포한 실행에서만 돈다. 같은 digest·`investing-jobs` 계정·VPC(`vpc-egress=all-traffic`)·토스 비밀의 숫자 버전(`jq`)을 쓰고 `--command=node --args=--import,tsx,src/jobs/algo-paper.ts`, `--max-retries=0 --task-timeout=900s --cpu=1 --memory=512Mi`, 환경 변수에 `ALGO_AI_ENABLED=false`를 명시한다. 토스 비밀 네 개가 숫자 버전으로 없으면 경고만 하고 건너뛴다. 이어서 `investing-scheduler`에 이 job 하나의 `run.invoker`를 부여한다. 런타임 이미지에는 이제 `src/lib`도 들어간다(`Dockerfile`; 알고리즘 엔진을 서버와 이 작업이 공유한다). CI 컨테이너 검사도 `algo-paper.ts`와 `src/lib/algo/paper.ts`의 존재를 확인한다.
+
+### 감독이 적용하는 순서
+
+1. `node scripts/gcp.mjs plan`으로 위의 추가 5개만 있는지 확인하고 `apply`한다.
+2. 이 PR을 병합한다. CI를 통과한 SHA가 배포되며 job이 생긴다(이미 병합된 뒤라면 `Deploy GCP`를 다시 실행).
+3. `gcloud run jobs describe investing-algo-paper`(개인 계정·프로젝트 명시)로 서비스 계정, VPC, 비밀 버전, `ALGO_AI_ENABLED=false`를 눈으로 확인한다.
+4. **수동 실행 한 번**: 모의 알고리즘을 하나 만들어 모드를 "모의"로 저장하고, 개장 직후 거래일에 아래처럼 실행한다. 개장 창 밖이면 `OUTSIDE_OPEN_WINDOW`로 아무것도 하지 않는다(창을 넓히려면 `ALGO_OPEN_WINDOW_MINUTES`).
+
+```sh
+gcloud run jobs execute investing-algo-paper --region=asia-northeast3 \
+  --account=<개인 계정> --project=<개인 프로젝트> \
+  --update-env-vars=ALGO_MARKET=KR,ALGO_OPEN_WINDOW_MINUTES=120 --wait
+```
+
+5. 결과 확인: 정제된 로그, 화면의 "모의 운용" 구역, `algorithmRuns/KR_<날짜>` 문서. 실제 `/prices`의 `timestamp`가 신선도(60초) 판정에 맞는지, 일봉이 직전 거래일까지 오는지 먼저 확인한다(알고리즘 문서의 "확인하지 못한 것").
+6. `terraform.tfvars`에 `algo_schedules_enabled = true`를 넣고 `plan`(Scheduler 두 개의 `paused`만 바뀌어야 한다)·`apply`로 켠다. 영업일마다 모의 판단이 쌓이는지 이틀 이상 지켜본다.
+
+### AI형 켜기 (비용 승인 뒤에만)
+
+`ALGO_AI_ENABLED`는 정확히 문자열 `true`일 때만 켜진다. 사용자가 월 비용을 승인하면: Vertex 접근 권한(`investing-jobs`에 `aiplatform.user`)과 모델 가격·생각 토큰 설정을 확인하고, 배포 단계의 `ALGO_AI_ENABLED=false`를 `true`로 바꿔 병합한다. 하루 호출은 기능별 12회로 제한된다(`aiUsage/algorithm_{KST날짜}`). 그 전에는 AI형이 "AI 비용 승인 대기"로 건너뛰어진다.
+
+### 비용 메모
+
+Scheduler 작업이 4개가 되어 무료 3개를 넘는다(초과분 작업당 월 약 $0.10, 가격표 재확인 필요). Cloud Run Job은 하루 2회(국내 1, 미국 1) 몇 분, 일봉 500개 조회는 종목당 3쪽이라 알고리즘 수 × 종목 수 × 약 3회 호출을 0.25초 간격으로 보낸다. 토스 호출 한도의 실제 값은 아직 모른다(실호출 확인 대상).

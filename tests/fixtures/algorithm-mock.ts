@@ -45,6 +45,9 @@ export type AlgoMockOptions = {
   /** Notification outcome the release request reports. */
   releaseOutcome?: { status: 'sent' | 'failed' | 'disabled'; failureCode?: string };
   saveError?: { status: number; code: string; message: string };
+  /** Body of GET /api/algorithms/:id/paper; default is an algorithm without any paper record. */
+  paper?: (algorithm: AlgoRecord) => unknown;
+  paperError?: { status: number; code: string; message: string };
 };
 
 const now = '2026-10-20T03:00:00.000Z';
@@ -206,6 +209,129 @@ export function backtestBody() {
   };
 }
 
+/** Synthetic paper (virtual) record: every number is invented test data. */
+export function paperBody(algorithm: AlgoRecord, patch: Record<string, unknown> = {}) {
+  const equityCurve = Array.from({ length: 12 }, (_, i) => ({
+    date: `2026-10-${String(i + 1).padStart(2, '0')}`,
+    equity: 10_000_000 + i * 9_000 - (i > 8 ? 60_000 : 0),
+  }));
+  return {
+    virtual: true,
+    generatedAt: now,
+    algorithm: {
+      id: algorithm.id,
+      name: algorithm.name,
+      mode: algorithm.mode,
+      method: algorithm.method,
+      market: algorithm.market,
+      currency: algorithm.currency,
+      targetsChangedAt: algorithm.targetsChangedAt,
+    },
+    ai: algorithm.method === 'ai' ? { enabled: false, message: 'AI 비용 승인 대기' } : null,
+    ledger: {
+      status: 'running',
+      startedOn: '2026-10-01',
+      stoppedOn: null,
+      stoppedReason: null,
+      budget: 10_000_000,
+      cash: 3_200_000,
+      lastRunDate: '2026-10-12',
+      positions: [
+        {
+          symbol: '005930',
+          quantity: 90,
+          entryDate: '2026-10-05',
+          entryPrice: 75_500,
+          markPrice: 78_000,
+          unrealizedPnl: 225_000,
+          unrealizedReturn: 0.0331,
+        },
+      ],
+    },
+    metrics: {
+      since: '2026-10-01',
+      days: 12,
+      equity: 10_048_000,
+      totalReturn: 0.0061,
+      netReturn: 0.0048,
+      costs: {
+        commission: 13_600,
+        transactionTax: 0,
+        capitalGainsTax: 0,
+        total: 13_600,
+        slippage: 6_800,
+      },
+      maxDrawdown: 0.0062,
+      volatility: 0.0912,
+      fills: 3,
+      roundTrips: 1,
+      winRate: 1,
+      realizedPnl: 41_000,
+      unrealizedPnl: 225_000,
+    },
+    equityCurve,
+    trades: [
+      {
+        id: `${algorithm.id}_2026-10-05_001`,
+        date: '2026-10-05',
+        symbol: '005930',
+        side: 'buy',
+        quantity: 90,
+        price: 75_500,
+        notional: 6_795_000,
+        costs: { commission: 6_795, tax: 0, slippage: 3_400 },
+        score: 0.62,
+        reasons: ['종합 점수가 매수 기준 이상', '종합 점수 0.62'],
+        createdAt: '2026-10-05T00:05:01.000Z',
+      },
+    ],
+    runs: [
+      {
+        id: 'KR_2026-10-12',
+        date: '2026-10-12',
+        market: 'KR',
+        status: 'complete',
+        startedAt: '2026-10-12T00:05:00.000Z',
+        result: {
+          status: 'applied',
+          code: null,
+          reason: null,
+          fills: 0,
+          stoppedNow: false,
+          decisions: { buy: 0, sell: 0, hold: 2 },
+          rejections: {},
+          heldBack: { insufficientHistory: 2, expectedBelowCost: 0 },
+          excludedSignals: ['가치: 재무 데이터 연결 전이라 제외'],
+          notes: [],
+        },
+      },
+      {
+        id: 'KR_2026-10-08',
+        date: '2026-10-08',
+        market: 'KR',
+        status: 'complete',
+        startedAt: '2026-10-08T00:05:00.000Z',
+        result: {
+          status: 'skipped',
+          code: 'EMERGENCY_STOP',
+          reason: '긴급 정지 중이라 아무것도 하지 않았습니다.',
+          fills: 0,
+          stoppedNow: false,
+          decisions: { buy: 0, sell: 0, hold: 0 },
+          rejections: {},
+          heldBack: { insufficientHistory: 0, expectedBelowCost: 0 },
+          excludedSignals: [],
+          notes: [],
+        },
+      },
+    ],
+    notes: [
+      '모의 운용은 가상 기록입니다. 실제 주문이나 체결이 아니며 실제 계좌에 영향이 없습니다.',
+    ],
+    ...patch,
+  };
+}
+
 const errorBody = (code: string, message: string) => ({ error: { code, message } });
 
 export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}) {
@@ -313,11 +439,30 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
         event('created', created, [{ field: 'targets', added: created.targets, removed: [] }]);
         return json({ algorithm: created }, 201);
       }
-      const match = path.match(/^\/api\/algorithms\/([^/]+)(\/backtest)?$/);
+      const match = path.match(/^\/api\/algorithms\/([^/]+)(\/backtest|\/paper)?$/);
       if (match) {
         const index = state.algorithms.findIndex((a) => a.id === match[1]);
         if (index < 0)
           return json(errorBody('ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.'), 404);
+        if (match[2] === '/paper') {
+          if (options.paperError)
+            return json(
+              errorBody(options.paperError.code, options.paperError.message),
+              options.paperError.status,
+            );
+          const algorithm = state.algorithms[index];
+          return json(
+            options.paper
+              ? options.paper(algorithm)
+              : paperBody(algorithm, {
+                  ledger: null,
+                  metrics: null,
+                  equityCurve: [],
+                  trades: [],
+                  runs: [],
+                }),
+          );
+        }
         if (match[2]) {
           if (options.backtestError)
             return json(

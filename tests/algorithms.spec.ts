@@ -1,6 +1,11 @@
 import { test, expect, type Page } from '@playwright/test';
 import { memberUser, mockApi, ownerUser } from './fixtures/api-mock';
-import { mockAlgorithmApi, record, type AlgoMockOptions } from './fixtures/algorithm-mock';
+import {
+  mockAlgorithmApi,
+  paperBody,
+  record,
+  type AlgoMockOptions,
+} from './fixtures/algorithm-mock';
 
 // Synthetic backend only (page.route). Nothing here is a market fact or real notification.
 async function openAlgorithms(page: Page, options: AlgoMockOptions = {}, user = ownerUser) {
@@ -261,6 +266,109 @@ test.describe('algorithm screen: backtest', () => {
   });
 });
 
+test.describe('algorithm screen: 모의 운용', () => {
+  const paperPanel = (page: Page) => page.getByRole('region', { name: '모의 운용' });
+  const paperRecord = record({ mode: 'paper' });
+
+  test('without any record it says so and invents no numbers', async ({ page }) => {
+    await openAlgorithms(page, { algorithms: [paperRecord] });
+    const panel = paperPanel(page);
+    await expect(panel.getByTestId('paper-empty')).toContainText('아직 모의 운용 기록이 없습니다');
+    await expect(panel.locator('.algo-metric')).toHaveCount(0);
+    await expect(panel.locator('.algo-badge-paper', { hasText: '가상 기록' })).toBeVisible();
+    await expect(panel).toContainText('실제 주문은 나가지 않습니다');
+    expect(await fits(page)).toBe(true);
+  });
+
+  test('labels every figure as virtual: metrics, positions, fills and run history', async ({
+    page,
+  }) => {
+    const api = await openAlgorithms(page, {
+      algorithms: [paperRecord],
+      paper: (algorithm) => paperBody(algorithm),
+    });
+    const panel = paperPanel(page);
+    await expect(panel).toContainText('아래 숫자는 모두 가상 기록입니다');
+    await expect(panel).toContainText('실제 주문과 체결이 아니며');
+    await expect(panel.locator('.algo-badge-paper', { hasText: '가상 운용 중' })).toBeVisible();
+    await expect(panel).toContainText('2026-10-01 (거래소 날짜)');
+    await expect(panel.locator('.algo-metric', { hasText: '총수익' })).toContainText('+0.61%');
+    await expect(panel.locator('.algo-metric', { hasText: '비용 합계' })).toContainText('13,600원');
+    await expect(panel.locator('.algo-metric', { hasText: '비용 차감 후 수익' })).toContainText(
+      '+0.48%',
+    );
+    await expect(panel.locator('.algo-metric', { hasText: '최대 낙폭' })).toContainText('0.62%');
+    await expect(panel.locator('.algo-metric', { hasText: '변동성' })).toContainText('9.12%');
+    await expect(panel.locator('.algo-metric', { hasText: '가상 매매 횟수' })).toContainText('3회');
+    const labels = await panel.locator('.algo-metric > span').allTextContents();
+    expect(labels.length).toBeGreaterThanOrEqual(10);
+    for (const label of labels) expect(label).toContain('가상');
+    await expect(panel.getByRole('img', { name: /모의 운용 가상 자산 곡선/ })).toBeVisible();
+    await expect(panel.locator('.recharts-line-curve')).toBeVisible();
+    const positions = panel.getByRole('region', { name: '가상 보유 종목' });
+    await expect(positions).toContainText('005930');
+    await expect(positions).toContainText('+3.31%');
+    // Short lists are open by default; the summary still names the count.
+    await expect(panel.getByText(/가상 체결 내역 1건/)).toBeVisible();
+    await expect(panel.getByRole('cell', { name: '가상 매수' })).toBeVisible();
+    await expect(
+      panel.getByRole('cell', { name: '종합 점수가 매수 기준 이상 · 종합 점수 0.62' }),
+    ).toBeVisible();
+    await expect(panel.getByText(/판단 기록 2회/)).toBeVisible();
+    await expect(panel).toContainText('예상 이익 기록 부족으로 매수 보류 2회');
+    await expect(panel).toContainText('가치: 재무 데이터 연결 전이라 제외');
+    await expect(panel).toContainText('긴급 정지 중이라 아무것도 하지 않았습니다.');
+    // Nothing on this screen is a real order, and no other request was needed to render it.
+    expect(api.requests.filter((r) => r.method !== 'GET')).toHaveLength(0);
+    expect(await fits(page)).toBe(true);
+  });
+
+  test('a stopped algorithm and an idle AI algorithm are explained', async ({ page }) => {
+    await openAlgorithms(page, {
+      algorithms: [record({ mode: 'paper', method: 'ai', signals: [{ id: 'trend', weight: 1 }] })],
+      paper: (algorithm) =>
+        paperBody(algorithm, {
+          ledger: {
+            status: 'stopped',
+            startedOn: '2026-10-01',
+            stoppedOn: '2026-10-09',
+            stoppedReason: 'loss-limit',
+            budget: 10_000_000,
+            cash: 7_000_000,
+            lastRunDate: '2026-10-09',
+            positions: [],
+          },
+          notes: ['AI형 알고리즘은 AI 비용 승인 대기 상태라 모의 판단도 하지 않습니다.'],
+        }),
+    });
+    const panel = paperPanel(page);
+    await expect(panel.getByTestId('paper-stopped')).toContainText(
+      '2026-10-09 누적 손실 한도로 정지 (가상)',
+    );
+    await expect(panel.locator('.algo-badge-warn', { hasText: 'AI 비용 승인 대기' })).toBeVisible();
+    await expect(panel.getByRole('list', { name: '모의 운용 안내' })).toContainText(
+      'AI 비용 승인 대기',
+    );
+  });
+
+  test('a failed load shows the error and offers retry; a non-owner never gets data', async ({
+    page,
+  }) => {
+    await openAlgorithms(page, {
+      algorithms: [paperRecord],
+      paperError: {
+        status: 503,
+        code: 'PAPER_UNAVAILABLE',
+        message: '모의 운용 기록을 불러오지 못했습니다.',
+      },
+    });
+    const panel = paperPanel(page);
+    await expect(panel.getByRole('alert')).toBeVisible();
+    await expect(panel.getByRole('button', { name: /다시 시도/ })).toBeVisible();
+    await expect(panel.locator('.algo-metric')).toHaveCount(0);
+  });
+});
+
 test.describe('algorithm screen: emergency stop', () => {
   test('is always visible, stops with one confirmed click, and release announces Telegram', async ({
     page,
@@ -431,15 +539,24 @@ test.describe('algorithm screen: visual check', () => {
         'desktop viewport is covered by the desktop project',
       );
       await page.setViewportSize({ width: viewport.width, height: viewport.height });
-      await openAlgorithms(page, { algorithms: [saved] });
+      await openAlgorithms(page, {
+        algorithms: [saved],
+        paper: (algorithm) => paperBody(algorithm),
+      });
       const panel = page.getByRole('region', { name: '과거 시뮬레이션' });
       await panel.getByRole('button', { name: '시뮬레이션 실행' }).click();
       await expect(panel.locator('.recharts-line-curve')).toBeVisible();
+      await expect(
+        page.getByRole('region', { name: '모의 운용' }).locator('.recharts-line-curve'),
+      ).toBeVisible();
       await expect(stopRegion(page)).toBeInViewport();
       expect(await fits(page)).toBe(true);
       await page.screenshot({
         path: `test-results/algorithms-${info.project.name}-${viewport.name}.png`,
         fullPage: true,
+      });
+      await page.getByRole('region', { name: '모의 운용' }).screenshot({
+        path: `test-results/paper-${info.project.name}-${viewport.name}.png`,
       });
     });
   }

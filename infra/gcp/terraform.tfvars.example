@@ -7,3 +7,5 @@ monthly_budget_amount = 10
 budget_currency = "USD" # Must match the billing account (e.g. KRW with amount15000)
 # Set true only after the first deploy created the investing-daily-snapshot Cloud Run Job (docs/operations/jobs.md)
 snapshot_schedules_enabled = false
+# Set true only after the first deploy created the investing-algo-paper Cloud Run Job and a manual run was checked (docs/operations/jobs.md)
+algo_schedules_enabled = false

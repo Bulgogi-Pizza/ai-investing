@@ -158,3 +158,51 @@ jobs:
             --project="$PROJECT" --region="$REGION" \
             --member="serviceAccount:investing-scheduler@$PROJECT.iam.gserviceaccount.com" \
             --role=roles/run.invoker --quiet >/dev/null
+      # Paper (virtual) algorithm run (docs/operations/jobs.md). Same image digest, identity, VPC and
+      # Toss secret versions as the snapshot job. Telegram secrets are attached only when the service
+      # already has them as numeric versions; without them notifications are recorded as disabled.
+      # AI stays off (cost approval pending): ALGO_AI_ENABLED is set to false explicitly. The market is
+      # chosen per execution by the Scheduler (ALGO_MARKET override), and the job places no orders.
+      - name: Deploy paper algorithm job
+        if: steps.deploy.outputs.deployed == 'true'
+        run: |
+          set -euo pipefail
+          JOB=investing-algo-paper
+          SERVICE_JSON=$(gcloud run services describe ai-investing --region="$REGION" --project="$PROJECT" --format=json)
+          SECRETS=$(printf '%s' "$SERVICE_JSON" | jq -r '
+            [.spec.template.spec.containers[0].env[]?
+              | select(.name | IN("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TOSS_ACCOUNT_SEQ", "TOSS_OWNER_USER_ID"))
+              | select(.valueFrom.secretKeyRef != null)
+              | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"
+            ] | sort | join(",")')
+          VALID=$(printf '%s' "$SECRETS" | tr ',' '\n' | grep -cE '^TOSS_(CLIENT_ID|CLIENT_SECRET|ACCOUNT_SEQ|OWNER_USER_ID)=investing-toss-[a-z-]+:[0-9]+$' || true)
+          if [ "$VALID" != "4" ]; then
+            echo "::warning::Toss secrets are not connected to the service with numeric versions yet; skipping paper algorithm job deployment."
+            exit 0
+          fi
+          TELEGRAM=$(printf '%s' "$SERVICE_JSON" | jq -r '
+            [.spec.template.spec.containers[0].env[]?
+              | select(.name | IN("TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
+              | select(.valueFrom.secretKeyRef != null)
+              | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"
+            ] | sort | join(",")')
+          TELEGRAM_VALID=$(printf '%s' "$TELEGRAM" | tr ',' '\n' | grep -cE '^TELEGRAM_(BOT_TOKEN|CHAT_ID)=investing-telegram-(bot-token|chat-id):[0-9]+$' || true)
+          if [ "$TELEGRAM_VALID" = "2" ]; then
+            SECRETS="$SECRETS,$TELEGRAM"
+          else
+            echo "::warning::Telegram secrets are not connected to the service with numeric versions; paper fills will be recorded but not sent."
+          fi
+          gcloud run jobs deploy "$JOB" \
+            --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
+            --service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com" \
+            --command=node --args=--import,tsx,src/jobs/algo-paper.ts \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,ALGO_AI_ENABLED=false" \
+            --set-secrets="$SECRETS" \
+            --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
+            --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=900s \
+            --cpu=1 --memory=512Mi --quiet
+          # Least privilege: the scheduler account may start only this job (and the snapshot job above).
+          gcloud run jobs add-iam-policy-binding "$JOB" \
+            --project="$PROJECT" --region="$REGION" \
+            --member="serviceAccount:investing-scheduler@$PROJECT.iam.gserviceaccount.com" \
+            --role=roles/run.invoker --quiet >/dev/null
