@@ -48,7 +48,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: docker build -t investing-smoke .
       - name: Verify one-off setup and scheduled job entries are packaged
-        run: docker run --rm --entrypoint sh investing-smoke -c 'test -f /app/src/server/toss-setup.ts && test -f /app/src/jobs/daily-snapshot.ts && test -f /app/src/jobs/morning-calendar.ts && test -f /app/src/jobs/algo-paper.ts && test -f /app/src/lib/algo/paper.ts'
+        run: docker run --rm --entrypoint sh investing-smoke -c 'test -f /app/src/server/toss-setup.ts && test -f /app/src/jobs/daily-snapshot.ts && test -f /app/src/jobs/morning-calendar.ts && test -f /app/src/jobs/algo-paper.ts && test -f /app/src/lib/algo/paper.ts && test -f /app/src/jobs/algo-live.ts && test -f /app/src/jobs/algo-live-data.ts && test -f /app/src/jobs/order-access-check.ts && test -f /app/src/server/trading/toss-transport.ts && test -f /app/src/server/trading/executor.ts && test -f /app/src/lib/algo/live.ts'
       - name: Verify production startup and private API boundary
         run: |
           docker run -d --name investing-smoke -p 127.0.0.1:8080:8080 -e GOOGLE_CLOUD_PROJECT=ci-placeholder -e APP_ORIGIN=https://ci.example.test investing-smoke

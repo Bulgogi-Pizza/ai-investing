@@ -13,3 +13,5 @@ algo_schedules_enabled = false
 morning_schedule_enabled = false
 # Set true only after the user approved the monthly AI cost (docs/planning/next-phase-design.md section 5)
 morning_ai_enabled = false
+# REAL ORDERS. Keep false until the order access check passed, the user checked the WTS Open API settings and enabled live on one algorithm (docs/operations/jobs.md)
+live_schedules_enabled = false
