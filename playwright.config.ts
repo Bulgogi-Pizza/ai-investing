@@ -1,4 +1,8 @@
 import { defineConfig, devices } from '@playwright/test';
+// Parallel worktrees must not share a dev server: each run picks its own port and never reuses
+// another checkout's server unless E2E_REUSE_SERVER=1 is set explicitly.
+const port = Number(process.env.E2E_PORT ?? 5173);
+const origin = `http://127.0.0.1:${port}`;
 export default defineConfig({
   testDir: './tests',
   testMatch: '**/*.spec.ts',
@@ -8,7 +12,7 @@ export default defineConfig({
   reporter: [['list']],
   timeout: 30_000,
   use: {
-    baseURL: 'http://127.0.0.1:5173',
+    baseURL: origin,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
   },
@@ -20,9 +24,9 @@ export default defineConfig({
     { name: 'mobile', use: { ...devices['iPhone 13'], defaultBrowserType: 'chromium' } },
   ],
   webServer: {
-    command: 'npm run dev -- --port 5173 --strictPort',
-    url: 'http://127.0.0.1:5173',
-    reuseExistingServer: !process.env.CI,
+    command: `npm run dev -- --port ${port} --strictPort`,
+    url: origin,
+    reuseExistingServer: !process.env.CI && process.env.E2E_REUSE_SERVER === '1',
     timeout: 30_000,
   },
 });
