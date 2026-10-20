@@ -14,7 +14,7 @@
 | 실제 운영 인증·Firestore                     | 관리자 로그인·권한·전략조회200, 미연결 토스503, 로그아웃 후401                                  |
 | GitHub OIDC 자동배포                         | [main4b1033e 배포 성공](https://github.com/Bulgogi-Pizza/ai-investing/actions/runs/39397020788) |
 | 실제 Vertex 모델                             | gemini-3.1-flash-lite/global, 공개 합성 입력1회 status ready. 개인 자산 입력 검증은 아님        |
-| 공식 RSS 파서                                | 실제 공개 XML에서 연준20건·한국은행100건 파싱; 운영 수집 검증 진행                              |
+| 공식 RSS 파서                                | 실제 공개 XML에서 연준20건·한국은행100건 파싱; 운영 관리자 수집200·120건 저장 검증 완료         |
 
 ## 직접 렌더링 검사
 
@@ -33,3 +33,7 @@ IAB에서 배포된 경제 캘린더를 열어 확인했다. 데스크톱·모�
 추가 독립 Codex 검토에서 신규 비중 설정 지시의 출력 검증 누락과 캐시 수집의 반복 저장 비용을 지적했다. 출력 문구 검사·회귀 사례와 수집 전용15분3회 제한을 보완했다. 패턴 검증이 의미 정확성을 보장한다고 주장하지 않는다.
 
 개인 프로젝트 Terraform apply 완료 후 재계획 결과 No changes로 실제 리소스와 코드 일치를 확인했다. Vertex API·런타임IAM·aiUsage TTL도 적용되어 있다.
+
+## 최종 운영 검증
+
+[main10beb6d 자동 배포](https://github.com/Bulgogi-Pizza/ai-investing/actions/runs/39398650633)가 성공했다. `smoke-deployed.mjs --sync-news`로 실제 운영 서버에서 연준20건·한국은행100건(총120건)을 Firestore에 저장했다. 관리자 로그인·권한·전략조회200, 익명 자산401, 토스 미설정503, 로그아웃 세션401을 확인했다. 로컬 결과는 gitignore된 `.local/deployed-provider-smoke.log`에 상태·건수만 기록하며 자격증명·세션·개인 자산을 기록하지 않는다.
