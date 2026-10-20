@@ -153,7 +153,7 @@ export type PaperJobDependencies = {
 type Deps = Required<Pick<PaperJobDependencies, 'now' | 'sleep'>> & PaperJobDependencies;
 
 // Failures that will not fix themselves within this run.
-const FATAL_CODES = new Set([
+export const FATAL_CODES = new Set([
   'PROVIDER_ACCESS_DENIED',
   'PROVIDER_RATE_LIMITED',
   'PROVIDER_TOKEN_BUSY',
@@ -175,13 +175,17 @@ const emptyResult = (status: AlgorithmRunResult['status'], code: string | null, 
     notes: [],
   }) satisfies AlgorithmRunResult;
 
-const skipped = (code: string, reason: string) => emptyResult('skipped', code, reason);
-const failed = (code: string, reason: string) => emptyResult('failed', code, reason);
+export const skipped = (code: string, reason: string) => emptyResult('skipped', code, reason);
+export const failed = (code: string, reason: string) => emptyResult('failed', code, reason);
 
-type DataStore = { bars: Map<string, { need: number; rows: CandleRow[] }> };
+export type DataStore = { bars: Map<string, { need: number; rows: CandleRow[] }> };
 
 /** One provider call with a single bounded wait on a rate limit. Fatal errors propagate. */
-async function providerCall<T>(deps: Deps, options: PaperJobOptions, fn: () => Promise<T>) {
+export async function providerCall<T>(
+  deps: Pick<Deps, 'sleep'>,
+  options: Pick<PaperJobOptions, 'paceMs' | 'maxRateLimitWaitSeconds'>,
+  fn: () => Promise<T>,
+) {
   if (options.paceMs > 0) await deps.sleep(options.paceMs);
   try {
     return await fn();
@@ -200,7 +204,7 @@ async function providerCall<T>(deps: Deps, options: PaperJobOptions, fn: () => P
   }
 }
 
-class AlgorithmFailure extends Error {
+export class AlgorithmFailure extends Error {
   constructor(
     public code: string,
     public reason: string,
@@ -210,8 +214,8 @@ class AlgorithmFailure extends Error {
 }
 
 async function loadBars(
-  deps: Deps,
-  options: PaperJobOptions,
+  deps: DecisionDeps,
+  options: DecisionOptions,
   store: DataStore,
   record: AlgorithmRecord,
   symbol: string,
@@ -250,7 +254,7 @@ async function loadBars(
 }
 
 /** Closed signal-level round trips of the same algorithm on history before the paper start. */
-function simulatedSamples(
+export function simulatedSamples(
   record: AlgorithmRecord,
   barsBy: Record<string, DailyBar[]>,
   used: SignalWeight[],
@@ -283,42 +287,49 @@ function simulatedSamples(
   }
 }
 
-async function runAlgorithm(
-  deps: Deps,
-  options: PaperJobOptions,
+/** What one decision day needs, prepared identically for the paper run and the live run. */
+export type DecisionInputs = {
+  used: SignalWeight[];
+  excluded: string[];
+  isDual: boolean;
+  definition: ReturnType<typeof toDefinition>;
+  barsBy: Record<string, DailyBar[]>;
+  quotes: PaperQuote[];
+  externalDecisions: Record<string, ExternalDecision> | undefined;
+  universe: string[];
+};
+export type PrepareOutcome = { result: AlgorithmRunResult } | { inputs: DecisionInputs };
+export type DecisionDeps = Pick<Deps, 'toss' | 'now' | 'sleep' | 'supply' | 'values' | 'ai'>;
+export type DecisionOptions = Pick<
+  PaperJobOptions,
+  'paceMs' | 'maxRateLimitWaitSeconds' | 'historyBars' | 'maxQuoteAgeMs'
+>;
+
+/**
+ * Signals available today, daily bars, supply scores, decision-time quotes and (AI method) the
+ * model's decisions for one algorithm. Shared by the paper job and the live job so both decide on
+ * the same inputs. `held` are the symbols (with their entry date) the algorithm owns besides its
+ * targets. Data problems throw AlgorithmFailure; "nothing to do" returns a skipped result.
+ */
+export async function prepareDecisionInputs(
+  deps: DecisionDeps,
+  options: DecisionOptions,
   record: AlgorithmRecord,
   context: {
     session: Session;
     calendar: MarketCalendar;
-    runId: string;
     costs: CostSettings;
     store: DataStore;
-    ordersLeft: () => number;
-    countOrders: (n: number) => void;
   },
-): Promise<AlgorithmRunResult> {
-  const { session, runId } = context;
+  held: Record<string, { entryDate: string }>,
+  budget: number,
+  notes: string[],
+): Promise<PrepareOutcome> {
+  const { session } = context;
   const date = session.date;
-  const nowIso = () => deps.now().toISOString();
   const aiMethod = record.method === 'ai';
-
-  // Existing ledger decides idempotency and the stopped state.
-  const existing = await deps.paper.getLedger(record.id);
-  if (existing?.lastRunId === runId)
-    return skipped('RUN_ALREADY_APPLIED', '이 실행은 이미 반영되어 다시 계산하지 않았습니다.');
-  if (existing?.status === 'stopped')
-    return skipped('PAPER_STOPPED', '누적 손실 한도에 닿아 정지된 모의 운용입니다.');
-  if (aiMethod && !(deps.ai?.enabled && deps.ai.decider))
-    return skipped(ALGO_AI_PENDING_CODE, ALGO_AI_PENDING_REASON);
-
-  const notes: string[] = [];
-  const excluded: string[] = [];
   const isDual = record.template === 'dualMomentum';
-  const budget = existing?.budget ?? record.budget ?? defaultSimulationBudget[record.currency];
-  if (!existing && record.budget === null)
-    notes.push(
-      `운용 금액이 비어 있어 가상 시작 금액 ${defaultSimulationBudget[record.currency].toLocaleString('en-US')} ${record.currency}을 썼다.`,
-    );
+  const excluded: string[] = [];
 
   // Which signals can be used today.
   let used: SignalWeight[] = [];
@@ -336,13 +347,15 @@ async function runAlgorithm(
     }
     if (used.length === 0)
       return {
-        ...skipped('NO_USABLE_SIGNAL', '오늘 쓸 수 있는 신호가 없습니다.'),
-        excludedSignals: excluded,
+        result: {
+          ...skipped('NO_USABLE_SIGNAL', '오늘 쓸 수 있는 신호가 없습니다.'),
+          excludedSignals: excluded,
+        },
       };
   }
 
-  const held = Object.keys(existing?.positions ?? {});
-  const universe = [...new Set([...record.targets, ...held])].sort();
+  const heldSymbols = Object.keys(held);
+  const universe = [...new Set([...record.targets, ...heldSymbols])].sort();
   const definition = toDefinition(record, record.params, budget);
   const required = requiredBars(definition);
   const need = Math.max(options.historyBars, required + 30);
@@ -398,9 +411,11 @@ async function runAlgorithm(
       excluded.push('수급: 최근 영업일의 저장된 수급 스냅샷이 없어 제외');
       if (used.length === 0)
         return {
-          ...skipped('NO_USABLE_SIGNAL', '오늘 쓸 수 있는 신호가 없습니다.'),
-          excludedSignals: excluded,
-          notes,
+          result: {
+            ...skipped('NO_USABLE_SIGNAL', '오늘 쓸 수 있는 신호가 없습니다.'),
+            excludedSignals: excluded,
+            notes,
+          },
         };
     } else if (covered < Object.keys(supplyScores).length) {
       notes.push(
@@ -467,7 +482,7 @@ async function runAlgorithm(
     const ids = used.map((s) => s.id) as SignalId[];
     for (const q of quotes) {
       if (q.price === null || !record.targets.includes(q.symbol)) continue;
-      const ledgerPosition = existing?.positions[q.symbol];
+      const ledgerPosition = held[q.symbol];
       const signals = isDual
         ? {
             momentum: (() => {
@@ -526,6 +541,60 @@ async function runAlgorithm(
       ]),
     );
   }
+
+  return {
+    inputs: { used, excluded, isDual, definition, barsBy, quotes, externalDecisions, universe },
+  };
+}
+
+async function runAlgorithm(
+  deps: Deps,
+  options: PaperJobOptions,
+  record: AlgorithmRecord,
+  context: {
+    session: Session;
+    calendar: MarketCalendar;
+    runId: string;
+    costs: CostSettings;
+    store: DataStore;
+    ordersLeft: () => number;
+    countOrders: (n: number) => void;
+  },
+): Promise<AlgorithmRunResult> {
+  const { session, runId } = context;
+  const date = session.date;
+  const nowIso = () => deps.now().toISOString();
+  const aiMethod = record.method === 'ai';
+
+  // Existing ledger decides idempotency and the stopped state.
+  const existing = await deps.paper.getLedger(record.id);
+  if (existing?.lastRunId === runId)
+    return skipped('RUN_ALREADY_APPLIED', '이 실행은 이미 반영되어 다시 계산하지 않았습니다.');
+  if (existing?.status === 'stopped')
+    return skipped('PAPER_STOPPED', '누적 손실 한도에 닿아 정지된 모의 운용입니다.');
+  if (aiMethod && !(deps.ai?.enabled && deps.ai.decider))
+    return skipped(ALGO_AI_PENDING_CODE, ALGO_AI_PENDING_REASON);
+
+  const notes: string[] = [];
+  const budget = existing?.budget ?? record.budget ?? defaultSimulationBudget[record.currency];
+  if (!existing && record.budget === null)
+    notes.push(
+      `운용 금액이 비어 있어 가상 시작 금액 ${defaultSimulationBudget[record.currency].toLocaleString('en-US')} ${record.currency}을 썼다.`,
+    );
+
+  const prepared = await prepareDecisionInputs(
+    deps,
+    options,
+    record,
+    context,
+    Object.fromEntries(
+      Object.values(existing?.positions ?? {}).map((p) => [p.symbol, { entryDate: p.entryDate }]),
+    ),
+    budget,
+    notes,
+  );
+  if ('result' in prepared) return prepared.result;
+  const { used, excluded, definition, barsBy, quotes, externalDecisions } = prepared.inputs;
 
   const ledger: PaperLedger =
     existing ??

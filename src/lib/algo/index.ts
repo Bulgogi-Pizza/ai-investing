@@ -73,6 +73,7 @@ export {
 } from './backtest';
 export {
   createPaperLedger,
+  decideSymbols,
   heldTradingDays,
   maxPaperEquityPoints,
   maxPaperSamples,
@@ -89,7 +90,15 @@ export {
   type PaperPosition,
   type PaperQuote,
   type PaperShadow,
+  type SymbolDecision,
 } from './paper';
+export {
+  buildLiveDecisions,
+  type LiveDecisionInput,
+  type LiveDecisionResult,
+  type LiveHold,
+  type LiveOrderIntent,
+} from './live';
 export {
   defaultSupplyParams,
   supplyScore,
