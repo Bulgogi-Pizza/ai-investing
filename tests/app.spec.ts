@@ -89,7 +89,7 @@ test.describe('owner with live data', () => {
     await expect(strip).toContainText('1,375.00');
     await expect(strip).toContainText('조회 ');
     await expect(page.locator('.watch-price').first()).toHaveText('71,234원');
-    await expect(page.locator('.watch-price').nth(1)).toHaveText('$234.76');
+    await expect(page.locator('.watch-price').nth(1)).toHaveText('$236.00');
     for (const text of forbiddenText) await expect(page.getByText(text)).toHaveCount(0);
   });
   test('calendar filters, views and month navigation remain consistent', async ({ page }) => {
@@ -223,7 +223,7 @@ test.describe('empty provider data', () => {
   }) => {
     await open(page, '종목 분석');
     await expect(page.locator('.analysis [data-state="no-data"]').last()).toContainText(
-      '종목을 찾지 못했습니다',
+      '표시할 데이터가 없습니다',
     );
     await expect(page.locator('.analysis-chart-main')).toHaveCount(0);
     await open(page, '내 자산');

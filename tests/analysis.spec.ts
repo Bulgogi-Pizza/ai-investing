@@ -123,7 +123,7 @@ test.describe('indicators', () => {
     // The last tick is the 26th future position, not a date.
     await expect(page.locator('.analysis-chart-main').getByText('+26봉')).toBeVisible();
     await expect(page.getByText(/선행스팬\(구름대\)은 26봉 앞으로/)).toBeVisible();
-    for (const name of ['RSI', '스토캐스틱', '평균 진폭'])
+    for (const name of ['상대강도지수', '스토캐스틱', '평균 진폭'])
       await expect(
         page.getByRole('region', { name: new RegExp(`^${name}.* 패널$`) }),
       ).toBeVisible();
@@ -355,6 +355,10 @@ test.describe('rendered layout', () => {
     await page.screenshot({
       path: testInfo.outputPath(`${testInfo.project.name}-analysis-value.png`),
       fullPage: true,
+      animations: 'disabled',
+    });
+    await page.getByRole('region', { name: '가격 차트' }).screenshot({
+      path: testInfo.outputPath(`${testInfo.project.name}-analysis-chart.png`),
       animations: 'disabled',
     });
     await page.getByRole('button', { name: /^일목균형표 설명/ }).focus();

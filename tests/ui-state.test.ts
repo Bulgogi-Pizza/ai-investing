@@ -21,6 +21,19 @@ describe('data state classification', () => {
     expect(issueOf(new ApiError(409, 'STRATEGY_REQUIRED', 'm')).retryable).toBe(false);
     expect(issueOf(new Error('x')).kind).toBe('error');
   });
+  it('separates a Toss permission refusal (403) from owner-only and from service errors', () => {
+    expect(issueOf(new ApiError(403, 'TOSS_PERMISSION_DENIED', 'm'))).toMatchObject({
+      kind: 'permission',
+      retryable: false,
+    });
+    expect(issueOf(new ApiError(403, 'OWNER_REQUIRED', 'm')).kind).toBe('owner-only');
+    expect(issueOf(new ApiError(503, 'PROVIDER_ACCESS_DENIED', 'm')).kind).toBe('error');
+  });
+  it('treats a missing DART/SEC key as not connected (with its own code) and no filings as no data', () => {
+    for (const code of ['DART_UNAVAILABLE', 'SEC_UNAVAILABLE'])
+      expect(issueOf(new ApiError(503, code, 'm'))).toMatchObject({ kind: 'not-connected', code });
+    expect(issueOf(new ApiError(404, 'FUNDAMENTALS_NOT_FOUND', 'm')).kind).toBe('no-data');
+  });
   it('treats an empty candle list as no data and a malformed one as an error', () => {
     const base = { source: 'Toss', asOf: '2026-10-20T00:00:00Z' };
     expect(() => parseCandles({ ...base, candles: [] })).toThrow(NoDataError);
