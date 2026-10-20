@@ -22,15 +22,16 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md)의 "알림" 절과
 
 `NotificationEvent`는 설계의 알림 목록을 그대로 타입으로 만든다.
 
-| kind                    | 내용                                                                |
-| ----------------------- | ------------------------------------------------------------------- |
-| `fill`                  | 체결. `mode`(`paper`/`live`), 종목, 방향, 체결·일부 체결, 알고리즘  |
-| `algorithm-auto-stop`   | 알고리즘 자동 정지. 선택 사유(`loss-limit`, `data-error`)           |
-| `order-rejected`        | 주문 거부. 고정 사유 문구(`broker-rejected`, `safety-guard`)만 허용 |
-| `data-error`            | 데이터 오류. 대상(시세·캔들·재무·뉴스·캘린더·기타)과 선택 종목      |
-| `job-failure`           | 작업 실패. 작업 이름                                                |
-| `morning-brief`         | 아침 브리핑. 선택 요약 문장(정리 후 600자 이하)                     |
-| `setting-risk-increase` | 실전 켜기, 운용 금액 한도 상향, 긴급 정지 해제                      |
+| kind                     | 내용                                                                                                                                                                                                  |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `fill`                   | 체결. `mode`(`paper`/`live`), 종목, 방향, 체결·일부 체결, 알고리즘                                                                                                                                    |
+| `algorithm-auto-stop`    | 알고리즘 자동 정지. 선택 사유(`loss-limit`, `data-error`, `order-permission`, `first-order-rejected`)                                                                                                 |
+| `order-rejected`         | 주문 거부. 고정 사유 문구(`broker-rejected`, `safety-guard`)만 허용                                                                                                                                   |
+| `data-error`             | 데이터 오류. 대상(시세·캔들·재무·뉴스·캘린더·기타)과 선택 종목                                                                                                                                        |
+| `live-order-unconfirmed` | 실전 주문을 보냈지만 응답을 못 받음(접수 여부 미확인). 선택 종목·방향·알고리즘 이름. "토스증권 앱에서 주문 내역을 확인" 안내                                                                          |
+| `job-failure`            | 작업 실패. 작업 이름                                                                                                                                                                                  |
+| `morning-brief`          | 아침 브리핑. 선택 요약 문장(정리 후 600자 이하)                                                                                                                                                       |
+| `setting-risk-increase`  | 위험을 늘리는 설정 변경: `live-enabled`, `budget-raised`, `emergency-stop-released`, `algorithm-stop-released`, `max-orders-raised`, `min-holding-lowered`, `loss-stop-loosened`, `liquidity-lowered` |
 
 타입에 금액·수량·계좌 식별값·제공자 오류 필드가 없다. 모의는 `[모의 운용·가상 체결]`과 "가상 기록이며 실제 주문이 아닙니다", 실전은 `[실전 주문·실제 체결]`과 "실제 주문입니다."로 구분한다. 위험 증가 설정 변경에는 "본인이 한 변경이 아니면 화면에서 바로 긴급 정지를 누르세요."를 붙인다. 마지막 줄은 `화면: APP_ORIGIN + 고정 경로`다. 경로는 알림 종류에서 고르며(알고리즘 관련 `/algorithms`, 아침 브리핑 `/calendar`) 입력으로 받지 않는다. 앱이 아직 URL 경로를 쓰지 않으므로 서버의 SPA 대체 응답이 첫 화면을 열고, 화면별 경로 처리는 알고리즘 화면 단계에서 맞춘다.
 
@@ -82,3 +83,10 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md)의 "알림" 절과
 - 체결·자동 정지·주문 거부·데이터 오류·작업 실패·아침 브리핑을 호출하는 쪽(7c~7f, 6b).
 - `.env.example`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 빈 항목 추가.
 - 실제 봇으로 한 번 보내 보는 운영 확인과 그 기록.
+
+## 7e/7f 연결 (2026-10-21)
+
+- **실전 주문 알림**: `src/server/trading/alerts.ts`의 `liveAlertEvent`가 유일한 매핑이다. 접수 여부 미확인은 전용 종류 `live-order-unconfirmed`(이전에는 `job-failure`로 보냈다), 권한 문제 정지와 첫 주문 거부 정지는 `algorithm-auto-stop`의 `order-permission`·`first-order-rejected` 사유로 보낸다. 주문 거부(`order-rejected`)와 체결(`fill`)은 이전과 같다. 알림 실패는 주문을 막지 않는다.
+- **위험 증가 설정 변경 알림(추가 인증 없음의 대가)**: 실전 켜기(`live-enabled`), 운용 금액 상향(`budget-raised`), 긴급 정지 해제(`emergency-stop-released`), 알고리즘 자동 정지 해제(`algorithm-stop-released`), 안전장치 완화 네 가지(`max-orders-raised`, `min-holding-lowered`, `loss-stop-loosened`, `liquidity-lowered`)가 **변경이 저장된 직후 변경 종류마다 한 번** 나간다. 줄이는 변경(긴급 정지 켜기, 실전 끄기, 한도 낮추기, 안전장치 강화)은 알리지 않는다. 문구에는 금액·수량·설정 값이 없다. 응답의 `notification(s)`가 `sent|failed|disabled`를 그대로 화면에 알린다.
+- 텔레그램 설정이 없으면 실전 작업은 시작하지 않는다(알림이 필수 안전장치). 실행 중 전송 실패는 주문을 막지 않고 기록된다.
+- 테스트: `tests/notify.test.ts`(새 종류와 모든 변경 문구, 위험 값 정리), `tests/algorithms-api.test.ts`(변경마다 알림), `tests/algo-live-job.test.ts`(주문 거부·권한 정지·미확인), `tests/live-api.test.ts`(정지 해제 알림).

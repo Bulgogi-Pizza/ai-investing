@@ -1,8 +1,8 @@
 # 실전 주문 기반 — TRADING
 
-SOT: [next-phase-design.md](../planning/next-phase-design.md) 4절(주문·주문 권한 확인·비용 반영·안전장치 1–10), 계획: [next-phase-plan.md](../planning/next-phase-plan.md) 7d. 구현: `src/server/trading/`, 테스트: `tests/trading-*.test.ts`.
+SOT: [next-phase-design.md](../planning/next-phase-design.md) 4절(주문·주문 권한 확인·비용 반영·안전장치 1–10), 계획: [next-phase-plan.md](../planning/next-phase-plan.md) 7d–7f. 구현: `src/server/trading/`, `src/jobs/algo-live*.ts`, `src/jobs/order-access-check.ts`, `src/server/live.ts`, 테스트: `tests/trading-*.test.ts`, `tests/algo-live-*.test.ts`, `tests/order-access-check.test.ts`, `tests/live-api.test.ts`.
 
-**이 모듈은 어디에도 연결되어 있지 않다.** `src/server/app.ts`, `src/server/index.ts`, 작업, 스케줄러 어느 것도 이 모듈을 import하지 않고 호출하지 않는다(정적 테스트가 검사한다). 테스트는 가짜 토스 서버(`tests/support/fake-toss.ts`)만 쓴다. 이 저장소의 어떤 테스트도 실제 주문을 내지 않는다. 연결(7e), 화면과 실전 켜기(7f)는 이후 단계다.
+**연결 상태(7e/7f, 2026-10-21)**: 이 모듈은 세 곳에만 연결되어 있다. (1) 실전 작업 `src/jobs/algo-live.ts`(주문 실행기), (2) 읽기 전용 확인 작업 `src/jobs/order-access-check.ts`(`checkOrderAccess`), (3) 소유자 전용 화면 API `src/server/live.ts`와 앱 조립(`app.ts`·`index.ts`)이 저장소를 **읽기만** 한다. 주문 실행기(`placeOrder`를 부르는 곳)는 `executor.ts` 한 곳이고, 화면 서버는 주문 클라이언트·실행기·전송 계층을 import하지 않는다(정적 테스트 `tests/trading-static.test.ts`가 이 목록과 "주문 POST 경로 한 곳"을 검사한다). 테스트는 가짜 토스 서버(`tests/support/fake-toss.ts`)만 쓰고 이 저장소의 어떤 테스트도 실제 주문을 내지 않는다. **실제 주문이 한 번이라도 나간 적은 없고, 아래 연결 코드는 실호출로 검증하지 않았다.**
 
 ## 공식 계약
 
@@ -52,7 +52,9 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md) 4절(주문·주�
 | `stores.ts`          | 저장소 인터페이스, 상태 전이, 장부 계산, 메모리 구현                                                        |
 | `firestore-store.ts` | Firestore 구현(트랜잭션)                                                                                    |
 | `reasons.ts`         | 거부 사유 코드와 한국어 문구                                                                                |
-| `alerts.ts`          | 알림 매핑 단 한 곳(`liveAlertEvent`). 7e가 알림 종류를 추가할 때 이 함수만 고친다                           |
+| `alerts.ts`          | 알림 매핑 단 한 곳(`liveAlertEvent`)                                                                        |
+| `toss-transport.ts`  | `OrderTransport` 구현(7e): `TossClient.authorizedRequest` 위의 허용 목록 전송 계층                          |
+| `ledger-pnl.ts`      | 알고리즘 자신의 주문에서 누적 손익(실현 + 평가) 계산                                                        |
 
 가짜 토스 서버(`FakeToss`), 가짜 Firestore, 고정 입력은 `tests/support/`에 있다. `src/`의 어떤 파일도 이를 import하지 않는다(정적 테스트가 검사한다).
 
@@ -185,18 +187,46 @@ interface OrderTransport {
 - 상태: `reserved → accepted | rejected | unknown`, `unknown → accepted | rejected | partially-filled | filled | canceled`, `accepted → partially-filled | filled | canceled | rejected`, `partially-filled → filled | canceled | rejected`. `rejected`, `filled`, `canceled`는 끝 상태이며 나갈 수 없다. 어긋난 전이는 던진다.
 - 장부 계산(`summarizeLedger`)은 알고리즘 자신의 주문 기록에서 보유 수량, 평균 원가 기반 보유 원가, 진행 중 매수 금액, 진행 중 매도 수량, 마지막 매수일을 구한다. 사전 검사의 "알고리즘이 산 수량"과 예산 누적이 이것이다.
 - 하루 카운터는 **KST 날짜** 기준이다. 예약 때 증가하고 나중에 거부되어도 되돌리지 않는다(연속 실패의 안전망이기도 하다). 미국 장도 KST 22:30 이후 한 번만 판단하므로 같은 날짜에 들어간다.
-- Firestore 구현은 서버 전용 컬렉션을 쓴다(클라이언트 접근은 기존 Firestore 규칙이 막는다): `liveOrders/{clientOrderId}`, `tradingControl/emergencyStop`(`{active}`, 문서가 없으면 정지 아님, 형식이 틀리면 던진다), `tradingAlgorithmState/{algorithmId}`, `tradingCounters/{날짜}_global`·`{날짜}_a_{algorithmId}`, `tradingSymbolLocks/{algorithmId}_{종목}`(주문이 끝날 때까지 잡고 있는 잠금, 종료 상태로 바뀌는 같은 트랜잭션에서 지운다. 주인 주문이 종료 상태이면 낡은 잠금으로 보고 덮어쓰며, 주인 문서가 없으면 미확인으로 막는다), `tradingRunLeases/{algorithmId}`(`{runId, expiresAt}`), `blockedOrders/{id}`. 예약은 한 `runTransaction` 안에서 모든 읽기(알고리즘 주문 질의 포함)를 한 뒤 쓴다. 문서 ID는 정규식으로 검증한다(경로 주입 방지, 종목은 점만으로 된 값도 거부). 저장된 문서가 형식에 맞지 않으면 잘못된 값을 조용히 쓰지 않고 오류로 처리한다. `liveOrders`의 알고리즘별 조회와 `status in` 조회는 단일 필드라 복합 색인이 필요 없다. 테스트는 낙관적 동시성(읽은 문서나 질의한 컬렉션이 바뀌면 재시도)을 흉내 내는 가짜 Firestore로, 실행 ID가 다른 동시 예약이 같은 종목·예산·보유 수량을 두 번 쓰지 못함과 한도를 넘지 못함을 확인한다. 실제 Firestore에는 연결하지 않았다.
+- Firestore 구현은 서버 전용 컬렉션을 쓴다(클라이언트 접근은 기존 Firestore 규칙이 막는다): `liveOrders/{clientOrderId}`, `algorithmControl/global`(`{emergencyStop, updatedAt}`: **화면의 긴급 정지 버튼이 쓰는 바로 그 문서**, 모의 작업도 이것을 읽는다. 문서가 없으면 정지 아님, `emergencyStop`이 불리언이 아니면 던진다), `tradingAlgorithmState/{algorithmId}`, `tradingCounters/{날짜}_global`·`{날짜}_a_{algorithmId}`, `tradingSymbolLocks/{algorithmId}_{종목}`(주문이 끝날 때까지 잡고 있는 잠금, 종료 상태로 바뀌는 같은 트랜잭션에서 지운다. 주인 주문이 종료 상태이면 낡은 잠금으로 보고 덮어쓰며, 주인 문서가 없으면 미확인으로 막는다), `tradingRunLeases/{algorithmId}`(`{runId, expiresAt}`), `blockedOrders/{id}`. 예약은 한 `runTransaction` 안에서 모든 읽기(알고리즘 주문 질의 포함)를 한 뒤 쓴다. 문서 ID는 정규식으로 검증한다(경로 주입 방지, 종목은 점만으로 된 값도 거부). 저장된 문서가 형식에 맞지 않으면 잘못된 값을 조용히 쓰지 않고 오류로 처리한다. `liveOrders`의 알고리즘별 조회와 `status in` 조회는 단일 필드라 복합 색인이 필요 없다. 테스트는 낙관적 동시성(읽은 문서나 질의한 컬렉션이 바뀌면 재시도)을 흉내 내는 가짜 Firestore로, 실행 ID가 다른 동시 예약이 같은 종목·예산·보유 수량을 두 번 쓰지 못함과 한도를 넘지 못함을 확인한다. 실제 Firestore에는 연결하지 않았다.
 
 ## 읽기 전용 권한 확인 (`access-check.ts`)
 
 `checkOrderAccess(api)`는 `GET /buying-power`(KRW, USD), `GET /commissions`, `GET /orders?status=OPEN`만 차례로 부르고 각각 `{ok, code?, status?}`와 `allOk`, `permissionDenied`를 돌려준다(설계 주문 권한 확인 1). 매개변수 타입이 읽기 메서드만 포함하므로 쓰기 메서드를 부를 수 없고, 테스트는 어떤 응답에서도 POST가 전송 계층에 닿지 않음을 확인한다. 금액, 수수료율, 주문 내용, 계좌 식별값, 제공자 문구는 결과에 넣지 않는다. 이 함수를 고정 출구 IP 일회성 작업으로 실행하는 일은 7e/7f 연결 단계에서 한다.
 
-## 7e/7f에 남은 일
+## 연결 (7e/7f)
 
-- **연결**: `OrderTransport`를 `TossClient`의 토큰·계좌 헤더로 구현(위 요구 사항), 주문 계열 읽기 확인 작업(고정 IP)에서 `checkOrderAccess` 실행, 작업(`investing-algo-kr/us`)에서 `executeRun` 호출, `RunDataProvider` 구현(현재가는 판단 시점에 새로 받음, 직전 거래일 일봉, 20일 평균 거래대금, 재무 유무, `/exchange-rate`의 `midRate`, 누적 손익, 점수 구간 통계), `tradingDaysSince`와 기대 일봉 날짜를 장 운영 캘린더로 구현, 실행 전 `reconcile` 스케줄.
-- **7e**: 긴급 정지 설정 화면·API(`tradingControl/emergencyStop`에 쓰는 인증된 경로, 해제 시 `setting-risk-increase` 알림), 알고리즘 정지 해제, 누적 손실의 실현·평가 합산 계산, 위험을 늘리는 설정 변경 알림.
-- **7f**: 실전 켜기 화면(운용 금액 필수, "기록 부족으로 주문 보류" 안내), `liveOrders` 화면 표시와 체결 마커(5e 차트 연결), `unknown` 주문의 수동 확인·해소 경로, 알림 종류에 "접수 여부 미확인"과 권한 정지 사유 추가(현재 `notify.ts`를 바꾸지 않아 `job-failure`와 사유 없는 `algorithm-auto-stop`으로 보낸다), `blockedOrders`·`liveOrders` 보존 기간.
-- **미해결**: `GET /orders`에 `clientOrderId`가 없어 `unknown` 주문 확인이 약하다. 호가 단위를 매번 400으로 배우므로 국내 매수·매도의 첫 시도가 한 번 더 걸릴 수 있다. KRX 호가 단위 표를 공식 자료로 확인해 넣는 선택지는 감독자가 정한다.
+### 전송 계층 (`toss-transport.ts`, `TossClient.authorizedRequest`)
+
+`TossClient`에 공개 메서드 `authorizedRequest(요청, {timeoutMs, maxBytes})`를 하나 더했다. 기존 `request`/`get`의 동작은 바꾸지 않았다. 고정 호스트, 베어러 토큰 + `X-Tossinvest-Account`, 시간 제한(기본 8초), `redirect: 'error'`, 응답 크기 상한(기본 1 MiB)을 지키고, **HTTP 오류 상태도 본문과 함께 돌려주며**(호가 단위 `data`를 주문 클라이언트가 읽으려면 필요하다), `Retry-After`를 파싱하고, 전역 쿨다운을 만들지 않고, 재시도하지 않는다. 연결 실패·시간 초과·큰 응답·토큰 발급 실패는 URL·헤더·본문이 없는 고정 문구의 `ProviderError`로 던진다.
+
+`TossOrderTransport`는 이것 위에서 `OrderTransport`를 구현한다. 응답이 없을 때만 `TransportNetworkError`를 던진다. **허용 목록**(`transportAllows`)에 없는 요청은 토큰을 요청하기 전에 거부한다: 읽기는 `/orders`, `/orders/{id}`, `/buying-power`, `/sellable-quantity`, `/commissions`, `/stocks/{symbol}/warnings`, `/price-limits`, `/exchange-rate`, `/prices`이고 쓰기는 `POST /orders`(주문 생성) 하나다. 취소 경로와 토큰 경로는 목록에 없다(실전 흐름 어디도 주문을 취소하지 않는다). 호출 사이 최소 120 ms 간격을 둔다. 본문·헤더·토큰·계좌 식별값은 어디에도 기록하지 않는다. 계좌 헤더는 허용된 모든 요청에 붙는다(포트 계약). 가격 제한·종목 유의사항처럼 계좌가 필요 없다고 문서에 적힌 엔드포인트에 붙여도 되는지는 실호출로 확인하지 않았다.
+
+### 실전 작업 (`src/jobs/algo-live.ts`, 운영 절차는 [jobs.md](../operations/jobs.md#실전-작업-algo-live-7f))
+
+1. 설정 검사: `LIVE_TRADING_ENABLED`가 정확히 `true`가 아니면 아무것도 하지 않고 종료 코드 2(**배포 킬 스위치, 화면과 무관**). production·Cloud Run Job·프로젝트·토스·시장·텔레그램 설정과 `APP_ORIGIN`도 필수다. 개장 창이나 안전장치를 환경 변수로 넓히는 길은 없다.
+2. 달력으로 오늘이 정규장 개장 직후(20분)인지 판단한다(모의 작업과 같은 `selectSessionToTrade`, 서머타임·휴장·단축일은 달력 데이터). 실행 기록 `algorithmRuns/live_{시장}_{날짜}`로 같은 날 중복 실행을 막는다.
+3. **먼저 모든 비종료 주문을 동기화(`reconcile`)**한다. 체결이 알고리즘의 보유 수량을 바꾸기 때문이다.
+4. 실전 모드이고 시장이 맞는 알고리즘마다: 긴급 정지를 **새로 읽고**, 알고리즘 정지 상태·운용 금액·가치 신호(재무 어댑터가 없어 실전 불가)·AI 승인 여부를 본 뒤, 모의 작업과 같은 입력(`prepareDecisionInputs`: 신호·일봉·수급·현재가)과 같은 판단 함수(`decideSymbols`)로 판단한다.
+5. `buildLiveDecisions`가 판단을 주문 의도로 바꾼다. 매도는 알고리즘이 산(그리고 이미 매도 주문에 넣지 않은) 수량 전부, 매수는 점수 순서로 `운용 금액 × 종목 비율`과 남은 한도 안에서 수량을 정한다. 가격은 판단 시점 현재가다(지정가, 더 공격적이지 않음). 이것은 안전장치를 하나도 검사하지 않는다.
+6. `LiveOrderExecutor.executeRun`: 주문마다 주문 직전 사실을 **새로** 받는다(`/prices` 현재가와 관측 시각, 직전 거래일 일봉, 최근 20거래일 평균 거래대금, 미국은 `/exchange-rate`의 `midRate`와 시각, 누적 손익, 점수 구간 통계). 그다음 `preTradeCheck` → 원자적 예약 → 주문 → 기록 → 알림. 긴급 정지는 알고리즘마다, 그리고 실행기가 주문 직전·재시도마다 다시 읽는다.
+7. 결과를 실행 기록에 쓰고 하트비트(`tradingStatus/liveJob_{시장}`)를 남긴다. 화면은 이 하트비트로 "실전 일정이 꺼져 있음"을 알린다.
+
+입력 출처 정리: 수수료율은 토스 `/commissions`의 활성 항목 중 가장 높은 값(읽지 못하면 매수 보류), 국내 거래세율은 수수료·세금 설정의 `sellTaxRate`(없으면 국내 매수 보류 `COST_SETTINGS_MISSING`), 점수 구간 통계는 모의 장부 시작일 이전 시뮬레이션 + 모의 왕복 기록(없으면 "기록 부족으로 주문 보류"), 누적 손익은 라이브 주문 기록에서 계산(`ledger-pnl.ts`: 체결 평균가 기준 현금 흐름 + 보유분 평가, 수수료·세금은 추정, 평가가격이 없으면 `null`이라 주문하지 않음), `tradingDaysSince`는 이 알고리즘 일봉의 날짜 합집합으로 센다(모의·시뮬레이션과 같은 "완료된 봉 + 오늘" 규칙). AI형은 `ALGO_AI_ENABLED=true`이고 판단기가 있을 때만 돈다(배포는 `false`). AI의 예상 수익률 범위 중간값을 점수 구간 통계 대신 쓰는 합성 통계로 주문 직전 검사에 넘긴다.
+
+### 읽기 전용 확인 작업 (`src/jobs/order-access-check.ts`)
+
+`checkOrderAccess`만 실행한다(`GET /buying-power` KRW·USD, `/commissions`, `/orders?status=OPEN`). 로그에는 상태 단어(`all-ok`/`denied`/`failed`), 성공·실패 개수, 대문자 코드만 남기고, 같은 내용(불리언·정리된 코드·시각)을 `tradingStatus/accessCheck`에 저장해 화면이 보여 준다. 응답 본문·금액·계좌 식별값은 저장도 출력도 하지 않는다. 이 파일에는 쓰기 경로가 없다(정적 테스트).
+
+### 화면 API (`src/server/live.ts`)
+
+`GET /api/algorithms/:id/live`(소유자 전용): 실전 켜기 조건(`enable.blockers`), 모의 요약, 긴급 정지·알고리즘 정지, 주문 권한 확인 결과, 실전 작업 하트비트, 보유(라이브 장부), 주문 40건, 보류·차단 기록 25건. 주문은 고정 필드로만 투영하고 오류는 정리된 코드와 한국어 문장으로만 낸다. `POST /api/algorithms/:id/live/release-stop`: 자동 정지 해제(위험을 늘리는 변경이라 텔레그램 알림 + 변경 이력). `unknown` 주문은 화면이 "접수 여부 미확인"으로 알리고 앱에서 확인하라고 안내한다.
+
+### 남은 한계
+
+- `unknown` 주문(응답 유실)의 **자동 해소 경로는 없다.** 같은 알고리즘·종목의 새 주문은 막히고, 일치하는 미체결 주문이 정확히 하나일 때만 동기화가 이어받는다. 사용자가 앱에서 확인한 뒤 해소하는 화면 기능은 없다(다음 작업).
+- 토큰을 주문 직전에 받지 못하면 전송 계층은 "응답 없음"으로 처리해 주문이 `unknown`이 될 수 있다(실제로는 아무것도 보내지 않았다). 같은 작업에서 직전 읽기가 같은 토큰을 이미 쓰므로 드물다.
+- `blockedOrders`·`liveOrders` 보존 기간은 정하지 않았다(TTL 없음).
+- 호가 단위는 여전히 400으로 배운다(국내 첫 시도가 한 번 더 걸릴 수 있다).
 
 ## 실제 주문 전 확인
 
@@ -206,9 +236,9 @@ interface OrderTransport {
 2. 연결 PR에서 `OrderTransport` 구현이 재시도하지 않고 오류 본문을 보존하며 토큰·계좌 식별값을 로그에 남기지 않는지 검토한다.
 3. 고정 출구 IP 일회성 작업에서 `checkOrderAccess`가 `allOk`이고 `permissionDenied`가 `false`다(응답 원문 출력 없음). 사용자가 WTS 설정 > Open API 화면에서 주문 관련 설정을 확인했다.
 4. 명세가 바뀌지 않았다: `openapi.json` 버전이 v1.2.24이거나, 바뀐 부분(주문 요청, 오류 코드, 호가 단위 `data`)을 다시 읽고 이 문서를 고쳤다.
-5. 긴급 정지 문서와 화면이 실제로 `tradingControl/emergencyStop`을 쓰고, 정지를 켠 뒤 다음 주문이 나가지 않는 것을 모의 주문 없이 단위 수준(가짜 서버)으로 확인했다.
+5. 긴급 정지: 화면 버튼(`AlgorithmRepository.setControl`)과 주문 경로(`FirestoreTradingStore`)가 같은 문서 `algorithmControl/global`을 쓰고 읽는다(테스트가 두 구현을 같은 가짜 Firestore에 물려 확인하고, 두 모듈이 같은 컬렉션·문서 이름을 쓰는지 정적으로 검사한다). 정지를 켠 뒤 다음 주문이 나가지 않는 것은 단위 수준(가짜 서버)으로 확인했다. **운영 문서로는 확인하지 않았다.**
 6. 세금 설정(`sellTaxRate`)과 수수료율이 현재 값이다. 운용 금액 한도(알고리즘별, 통화별)를 작게 입력했다. 첫 실전은 작은 금액으로 사용자가 직접 켠다.
 7. 텔레그램 알림이 도착한다(주문 거부, 알고리즘 자동 정지, 체결). 알림 실패가 주문을 막지 않는 것은 테스트로 확인했다.
-8. Firestore 규칙이 새 컬렉션(`liveOrders`, `tradingControl`, `tradingAlgorithmState`, `tradingCounters`, `tradingSymbolLocks`, `tradingRunLeases`, `blockedOrders`)의 클라이언트 접근을 막는다.
+8. Firestore 규칙이 새 컬렉션(`liveOrders`, `algorithmControl`, `tradingAlgorithmState`, `tradingCounters`, `tradingSymbolLocks`, `tradingRunLeases`, `blockedOrders`, `tradingStatus`)의 클라이언트 접근을 막는다.
 9. 시장 캘린더 기반 `tradingDaysSince`, 직전 거래일 일봉 날짜, 환율(`midRate`)이 실제 값으로 들어온다. 평균 거래대금(20거래일), 현재가 관측 시각, 누적 손익이 사실과 맞는지 샘플로 대조했다.
 10. 첫 실전 주문 뒤 `liveOrders` 기록, `reconcile` 결과, 텔레그램 알림이 서로 맞는지 사용자가 확인한다. 거부되면 알고리즘이 정지되었는지 확인한다.
