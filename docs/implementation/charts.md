@@ -1,0 +1,11 @@
+# 차트 분석
+
+SOT: docs/planning/requirements.md. 구현: src/features/charts/ChartsPage.tsx, 계산: src/lib/market.ts.
+
+기본 모드는 결정적 합성 가격이다. 삼성전자/SK하이닉스/Apple 선택, 기간, KOSPI 합성 비교(시작 100 정규화), SMA20/EMA20/볼린저20(2σ), RSI14(단순 윈도 평균), MACD12/26, 관심종목 토글 및 삼성전자 사용자 매수·매도 검토선을 제공한다. 자동 주문 없음. 외부 알림은 연결되지 않았고 가격 메모는 현재 세션에만 존재한다.
+
+토스 API 시세 연결 모드는 인증된 `/api/market/candles?symbol=005930|000660|AAPL&interval=1d&count=100`을 조회한다. 로그인·서버 설정·계약·네트워크 조건이 충족되어야 데이터가 표시된다. 응답의 날짜와 양의 유한한 종가를 검증하며 출처와 조회시간(KST)을 표시한다. 로딩·오류 상태에서 합성 가격을 실데이터로 대체하지 않는다. 실제 시세 모드에서 합성 KOSPI 비교와 합성 검토선은 비활성화한다. 데이터는 조정주가 일봉이며 자동 갱신하지 않는다. API 계약은 docs/architecture 및 서버 문서를 따른다.
+
+검증: tests/market.test.ts 에서 알려진 입력으로 평균, EMA, 중립·극단 RSI, 밴드, MACD를 검증한다. `npm test`, `npm run build`, `npm run test:e2e`. UI 변경 후 브라우저 시각 검증이 필요하다. 데이터 출처와 합성 표시를 지우지 않는다.
+
+가격 표시 시 USD는 센트(소수 둘째 자리), KRW는 원 단위를 사용하며 정규화 지수는 소수 둘째 자리까지 표시한다. 비교 시 선택 기간을 먼저 자르고, 각 시계열의 첫 가격을 각각 100으로 정규화한다. 지표는 선택 기간 이전 이력을 사용하여 계산하되 가격 시계열과 동일 기준으로 정규화한다. 회귀 검증: tests/market.test.ts의 기간별 비교/통화 포맷 테스트와 tests/ui-regressions.spec.ts의 실제 USD 응답 렌더링 테스트.

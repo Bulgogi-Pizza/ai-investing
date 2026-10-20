@@ -1,0 +1,16 @@
+.git
+.github
+node_modules
+dist
+.env
+.env.*
+*.log
+.local
+infra
+playwright-report
+test-results
+docs
+gha-creds-*.json
+*.tfstate*
+*.tfvars
+*.tfplan

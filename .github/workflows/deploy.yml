@@ -1,0 +1,74 @@
+name: Deploy GCP
+on:
+  workflow_run:
+    workflows: [Verify]
+    types: [completed]
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: production
+  cancel-in-progress: false
+jobs:
+  deploy:
+    if: vars.GCP_PROJECT_ID != '' && vars.GCP_WORKLOAD_IDENTITY_PROVIDER != '' && vars.GCP_DEPLOY_SERVICE_ACCOUNT != '' && vars.APP_ORIGIN != '' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: production
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      REGION: asia-northeast3
+      APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha }}
+      - uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
+      - uses: google-github-actions/setup-gcloud@v2
+      - name: Require production configuration
+        run: |
+          test -n "$PROJECT"
+          test -n "$APP_ORIGIN"
+          case "$APP_ORIGIN" in https://*) ;; *) exit 1 ;; esac
+      - name: Authenticate container registry
+        run: gcloud auth configure-docker "$REGION-docker.pkg.dev" --quiet
+      - name: Build immutable application image
+        env:
+          REVISION: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          IMAGE="$REGION-docker.pkg.dev/$PROJECT/ai-investing/app:$REVISION"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          DIGEST=$(gcloud artifacts docker images describe "$IMAGE" --format='value(image_summary.digest)')
+          test -n "$DIGEST"
+          echo "DEPLOY_IMAGE=$REGION-docker.pkg.dev/$PROJECT/ai-investing/app@$DIGEST" >> "$GITHUB_ENV"
+      - name: Deploy verified revision
+        id: deploy
+        env:
+          VERIFIED_SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          CURRENT_MAIN=$(git ls-remote origin refs/heads/main | awk '{print $1}')
+          if [ "$CURRENT_MAIN" != "$VERIFIED_SHA" ]; then
+            echo "A newer main revision exists; skipping stale deployment."
+            exit 0
+          fi
+          gcloud run deploy ai-investing \
+            --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
+            --service-account="investing-runtime@$PROJECT.iam.gserviceaccount.com" \
+            --port=8080 --cpu=1 --memory=512Mi --min-instances=0 --max-instances=2 \
+            --concurrency=40 --timeout=30 --allow-unauthenticated \
+            --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
+            --update-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN" \
+            --quiet
+          echo "deployed=true" >> "$GITHUB_OUTPUT"
+      - name: Verify deployment health
+        if: steps.deploy.outputs.deployed == 'true'
+        run: |
+          SERVICE_URL=$(gcloud run services describe ai-investing --region="$REGION" --project="$PROJECT" --format='value(status.url)')
+          curl --fail --retry 5 --retry-delay 5 "$SERVICE_URL/api/health"

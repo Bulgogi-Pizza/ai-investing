@@ -1,0 +1,6 @@
+node_modules
+dist
+.local
+infra/gcp/.terraform
+package-lock.json
+*.tsbuildinfo

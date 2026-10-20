@@ -1,0 +1,59 @@
+name: Verify
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run check
+      - run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: browser-failures
+          path: test-results/
+          retention-days: 7
+
+  infrastructure:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.10.5
+      - run: terraform fmt -check
+        working-directory: infra/gcp
+      - run: terraform init -backend=false
+        working-directory: infra/gcp
+      - run: terraform validate
+        working-directory: infra/gcp
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t investing-smoke .
+      - name: Verify production startup and private API boundary
+        run: |
+          docker run -d --name investing-smoke -p 127.0.0.1:8080:8080 -e GOOGLE_CLOUD_PROJECT=ci-placeholder -e APP_ORIGIN=https://ci.example.test investing-smoke
+          for attempt in 1 2 3 4 5; do
+            if curl --fail http://127.0.0.1:8080/api/health; then break; fi
+            sleep 2
+          done
+          curl --fail http://127.0.0.1:8080/api/health
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/api/portfolio)" = 401
+      - if: always()
+        run: docker rm -f investing-smoke || true

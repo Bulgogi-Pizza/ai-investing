@@ -1,0 +1,6 @@
+project_id           = "YOUR_PROJECT_ID"
+github_repository    = "YOUR_GITHUB_USER/ai-investing"
+github_repository_id = "123456789"
+# Optional: budget notification (not a hard spending cap)
+# billing_account = "XXXXXX-XXXXXX-XXXXXX"
+monthly_budget_usd = 10
