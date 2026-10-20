@@ -3,6 +3,8 @@
 import getpass
 import ipaddress
 import json
+import ntpath
+import os
 import re
 import subprocess
 import sys
@@ -18,6 +20,69 @@ NEXT_STEP = "[3/5] 연결 코드가 main에 배포된 상태에서 사전 확인
 
 class SetupError(Exception):
     """A safe, credential-free error for the operator."""
+
+
+WINDOWS_HINT = "WSL, macOS 또는 Linux에서 실행하거나 Google Cloud SDK 설치를 확인하세요."
+
+
+def _env_value(environ, name):
+    # Windows environment variable names are case-insensitive.
+    for key, value in environ.items():
+        if key.upper() == name.upper() and isinstance(value, str) and value != "":
+            return value
+    return None
+
+
+def resolve_gcloud(platform=sys.platform, environ=os.environ, is_file=os.path.isfile):
+    """Return (argv prefix, env or None) that starts gcloud without a shell.
+
+    macOS/Linux run `gcloud` directly. On Windows the entry point is gcloud.cmd, which cannot be
+    started without a shell, so run the SDK's Python entry point the way gcloud.cmd does:
+    `<python> [-S] <sdk>/lib/gcloud.py`. Error messages never contain paths, env values or args.
+    """
+    if platform != "win32":
+        return ["gcloud"], None
+    cmd_path = None
+    for raw in (_env_value(environ, "PATH") or "").split(";"):
+        directory = raw.strip().strip('"')
+        # Relative entries (for example ".") would let a planted gcloud.cmd choose the interpreter.
+        if directory and ntpath.isabs(directory) and is_file(ntpath.join(directory, "gcloud.cmd")):
+            cmd_path = ntpath.join(directory, "gcloud.cmd")
+            break
+    if cmd_path is None:
+        raise SetupError(f"PATH에서 gcloud.cmd를 찾지 못했습니다. Google Cloud SDK를 설치하고 PATH에 추가하세요. {WINDOWS_HINT}")
+    bin_dir = ntpath.dirname(cmd_path)
+    root = next((d for d in (ntpath.dirname(bin_dir), bin_dir) if is_file(ntpath.join(d, "lib", "gcloud.py"))), None)
+    if root is None:
+        raise SetupError(f"Google Cloud SDK의 lib/gcloud.py를 찾지 못했습니다. SDK 설치 상태를 확인하세요. {WINDOWS_HINT}")
+    python = _env_value(environ, "CLOUDSDK_PYTHON")
+    if python:
+        if python.lower().endswith((".cmd", ".bat")):
+            raise SetupError(f"CLOUDSDK_PYTHON은 python.exe 같은 실행 파일이어야 합니다(.cmd/.bat 불가). {WINDOWS_HINT}")
+        # A bare name such as "python" is resolved through PATH by the OS, like gcloud.cmd does.
+        if ntpath.isabs(python) and not is_file(python):
+            raise SetupError(f"gcloud용 Python을 찾지 못했습니다. SDK 번들 Python을 복구하거나 CLOUDSDK_PYTHON에 python.exe 경로를 지정하세요. {WINDOWS_HINT}")
+    else:
+        python = ntpath.join(root, "platform", "bundledpython", "python.exe")
+        if not is_file(python):
+            raise SetupError(f"gcloud용 Python을 찾지 못했습니다. SDK 번들 Python을 복구하거나 CLOUDSDK_PYTHON에 python.exe 경로를 지정하세요. {WINDOWS_HINT}")
+    # gcloud.cmd passes -S (no site-packages) unless site packages were requested or a venv is active.
+    site_packages = _env_value(environ, "CLOUDSDK_PYTHON_SITEPACKAGES") is not None or _env_value(environ, "VIRTUAL_ENV") is not None
+    encoding = _env_value(environ, "CLOUDSDK_ENCODING")
+    replaced = {"CLOUDSDK_PYTHON", "PYTHONHOME"} | ({"PYTHONIOENCODING"} if encoding else set())
+    child_env = {k: v for k, v in environ.items() if k.upper() not in replaced}
+    child_env["CLOUDSDK_PYTHON"] = python
+    if encoding:
+        child_env["PYTHONIOENCODING"] = encoding
+    return [python, *([] if site_packages else ["-S"]), ntpath.join(root, "lib", "gcloud.py")], child_env
+
+
+def run_gcloud_process(argv, **kwargs):
+    """Default runner: argv[0] is the logical name "gcloud"; resolve how to start it on this OS."""
+    prefix, env = resolve_gcloud()
+    if env is not None:
+        kwargs["env"] = env
+    return subprocess.run([*prefix, *argv[1:]], **kwargs)
 
 
 def read_identity(root=ROOT):
@@ -45,7 +110,7 @@ def validate_value(value):
     return value
 
 
-def gcloud(config, args, *, value=None, runner=subprocess.run):
+def gcloud(config, args, *, value=None, runner=run_gcloud_process):
     argv = [
         "gcloud", *args,
         f"--account={config['account']}",
@@ -70,7 +135,7 @@ def gcloud(config, args, *, value=None, runner=subprocess.run):
     return result.stdout
 
 
-def check_targets(config, *, runner=subprocess.run):
+def check_targets(config, *, runner=run_gcloud_process):
     raw = gcloud(config, ["secrets", "list", "--format=json(name)"], runner=runner)
     try:
         existing = {item["name"].rsplit("/", 1)[-1] for item in json.loads(raw)}
@@ -86,7 +151,7 @@ def check_targets(config, *, runner=subprocess.run):
     return existing
 
 
-def allowlist_ip(config, *, runner=subprocess.run):
+def allowlist_ip(config, *, runner=run_gcloud_process):
     raw = gcloud(config, ["compute", "addresses", "describe", EGRESS_ADDRESS,
                           f"--region={REGION}", "--format=value(address)"], runner=runner)
     try:
@@ -95,7 +160,7 @@ def allowlist_ip(config, *, runner=subprocess.run):
         raise SetupError("고정 출구 IP를 확인할 수 없습니다. Terraform 인프라 적용 상태를 확인하세요.") from None
 
 
-def upload(config, values, *, runner=subprocess.run, progress=print):
+def upload(config, values, *, runner=run_gcloud_process, progress=print):
     if len(values) != len(SECRET_NAMES):
         raise SetupError("키 두 개가 모두 필요합니다.")
     values = tuple(validate_value(value) for value in values)

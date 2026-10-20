@@ -1,9 +1,9 @@
 // Operator-only connection. Never prints credentials, account identifiers or raw errors.
-import { execFileSync } from 'node:child_process';
 import { readFileSync, existsSync } from 'node:fs';
 import { isIPv4 } from 'node:net';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import { GcloudResolutionError, execGcloudSync } from './gcloud-command.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const REGION = 'asia-northeast3';
@@ -33,7 +33,7 @@ export function loadConfiguration(root = ROOT) {
 }
 
 export function executeGcloud(argv, options) {
-  return execFileSync('gcloud', argv, {
+  return execGcloudSync(argv, {
     ...options,
     encoding: 'utf8',
     stdio: ['pipe', 'pipe', 'pipe'],
@@ -59,7 +59,9 @@ export function connectToss(
           { input, timeout },
         ),
       );
-    } catch {
+    } catch (error) {
+      // Resolution errors are static, credential-free messages that tell the operator what to fix.
+      if (error instanceof GcloudResolutionError) throw new ConnectionError(error.message);
       throw new ConnectionError(SAFE_FAILURE);
     }
   };

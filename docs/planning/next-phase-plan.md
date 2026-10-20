@@ -30,17 +30,17 @@
 
 ## 진행 표
 
-| 단계 | 내용                                   | 상태                        |
-| ---- | -------------------------------------- | --------------------------- |
-| 0    | 기반 정비(Windows, 줄바꿈, 원격 state) | 진행 중(줄바꿈 정규화 완료) |
-| 1    | 규칙 문서 변경                         | 대기                        |
-| 2    | 외부 키·텔레그램 봇 준비               | 대기                        |
-| 3    | 데모 제거·소유자 전용                  | 대기                        |
-| 4    | 일일 데이터 적재 작업                  | 대기                        |
-| 5a–e | 종목 분석 탭                           | 대기                        |
-| 6a–b | 알림, 아침 캘린더 갱신                 | 대기                        |
-| 7a–f | 알고리즘                               | 대기                        |
-| 8    | 도메인                                 | 대기                        |
+| 단계 | 내용                                   | 상태                                     |
+| ---- | -------------------------------------- | ---------------------------------------- |
+| 0    | 기반 정비(Windows, 줄바꿈, 원격 state) | 완료(2026-10-21, Windows 실제 실행 확인) |
+| 1    | 규칙 문서 변경                         | 대기                                     |
+| 2    | 외부 키·텔레그램 봇 준비               | 대기                                     |
+| 3    | 데모 제거·소유자 전용                  | 대기                                     |
+| 4    | 일일 데이터 적재 작업                  | 대기                                     |
+| 5a–e | 종목 분석 탭                           | 대기                                     |
+| 6a–b | 알림, 아침 캘린더 갱신                 | 대기                                     |
+| 7a–f | 알고리즘                               | 대기                                     |
+| 8    | 도메인                                 | 대기                                     |
 
 ## 구현 전 확인 목록
 
@@ -66,12 +66,13 @@
 목적: 어느 컴퓨터에서든 검증과 운영 명령이 같은 결과를 내게 한다. 기능 코드는 바꾸지 않는다.
 
 - (완료 2026-10-21) `.gitattributes`에 `* text=auto eol=lf`를 추가하고 저장소를 다시 정규화했다. PNG 등 이진 파일은 `binary`로 둔다.
-- `scripts/gcp.mjs`, `scripts/connect-toss.mjs`, `scripts/toss-secrets.py`의 gcloud 실행을 Windows에서도 되게 한다.
+- (완료 2026-10-21) `scripts/gcp.mjs`, `scripts/connect-toss.mjs`, `scripts/toss-secrets.py`의 gcloud 실행을 Windows에서도 되게 한다.
   - 공통 해석 함수를 둔다. macOS/Linux는 지금처럼 `gcloud`를 바로 실행한다. Windows는 PATH에서 `gcloud.cmd`를 찾아 SDK 루트를 구한 뒤, 번들 Python(또는 `CLOUDSDK_PYTHON`)으로 `lib/gcloud.py`를 셸 없이 실행한다.
   - 셸 문자열 실행(`shell: true`, `cmd /c`)은 인자 주입 위험이 있어 쓰지 않는다. 비밀은 계속 stdin으로만 넘긴다.
   - 해석에 실패하면 원인과 WSL 사용 안내만 출력하고 중단한다.
-- `connect-toss.mjs` 사전 확인에 "배포 이미지에 `toss-setup.ts` 진입점이 있는지" 검사를 추가한다(설계의 운영 과제).
-- Terraform state를 GCS backend로 옮긴다.
+  - 구현: `scripts/gcloud-command.mjs`(JS 공용)와 `toss-secrets.py`의 `resolve_gcloud`. 단위 테스트는 플랫폼·PATH·파일 시스템·환경을 주입해 검증한다. 실제 Windows gcloud 실행은 아래 완료 기준의 `doctor` 실행으로 확인한다.
+- (결정 2026-10-21, 코드 변경 없음) `connect-toss.mjs` 사전 확인에 "배포 이미지에 `toss-setup.ts` 진입점이 있는지" 검사를 넣지 않는다. 읽기 전용으로 이미지 내용을 확인할 방법이 없고, 확인하려면 작업을 실행해야 한다. 대신 CI `container` 작업이 모든 이미지에서 이 파일을 검증하고 CI를 통과한 main만 배포한다. 근거는 [toss-setup.md](../operations/toss-setup.md)에 적었다.
+- (완료 2026-10-21) Terraform state를 GCS backend로 옮긴다. 버킷은 Terraform 밖에서 gcloud로 만들었다(state를 담는 버킷을 같은 state로 관리하지 않기 위해서다). 실행: `node scripts/gcp.mjs init`.
   - 개인 프로젝트에 버전 관리와 균일 버킷 접근을 켠 비공개 버킷을 만든다. 공개 접근을 막고 접근 권한은 사용자 계정만 둔다.
   - `terraform init -migrate-state` 후 `plan`이 "No changes"인지 확인한다. 로컬 state 파일은 확인 뒤에도 바로 지우지 않고 사용자가 안전한 곳에 백업한다.
   - **사용자 확인 필요**: 버킷 생성은 클라우드 리소스 생성이므로 `plan` 결과를 보여 드리고 승인을 받은 뒤 적용한다.

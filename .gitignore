@@ -23,3 +23,6 @@ gha-creds-*.json
 # Python operator-tool bytecode
 __pycache__/
 *.py[cod]
+
+# Agent worktrees (local only)
+.claude/worktrees/

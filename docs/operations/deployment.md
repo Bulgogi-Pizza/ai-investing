@@ -29,7 +29,7 @@ terraform plan -out=/private/tmp/investing-plan
 terraform apply /private/tmp/investing-plan
 ```
 
-Terraform은 API·Artifact Registry·Firestore·세션 TTL·서비스 계정·GitHub WIF·선택 예산 알림을 만든다. Cloud Run은 검증된 이미지로 배포 워크플로가 생성한다. `terraform.tfstate`는 민감 상태이므로 gitignore 유지하고 접근 제한된 원격 backend로 이전한다. Firestore PITR은 유료 추가 비용일 수 있다. Firestore Security Rules는 `firestore.rules`로 모든 클라이언트 접근을 차단해야 한다. 이 서버는 IAM/Admin SDK만 사용한다. Firebase 클라이언트 SDK는 포함하지 않는다.
+Terraform은 API·Artifact Registry·Firestore·세션 TTL·서비스 계정·GitHub WIF·선택 예산 알림을 만든다. Cloud Run은 검증된 이미지로 배포 워크플로가 생성한다. state는 민감 정보이므로 개인 프로젝트의 비공개 GCS 버킷 `<project>-tfstate`(prefix `infra/gcp`, 버전 관리, 공개 접근 차단)에 둔다. 버킷 이름은 공개 저장소에 쓰지 않고 gitignore된 `.local/gcs-backend.hcl`에 `bucket`·`prefix` 두 줄로 둔다. 버킷은 state 밖에서 gcloud로 만든다. 서비스 계정에는 Storage 권한을 주지 않는다. Firestore PITR은 유료 추가 비용일 수 있다. Firestore Security Rules는 `firestore.rules`로 모든 클라이언트 접근을 차단해야 한다. 이 서버는 IAM/Admin SDK만 사용한다. Firebase 클라이언트 SDK는 포함하지 않는다.
 
 GitHub 저장소의 Actions Variables에 다음 비밀이 아닌 값을 설정한다. 배포 job의 if 조건에서도 읽으므로 환경 전용 변수가 아닌 저장소 변수로 등록한다:
 
@@ -80,11 +80,12 @@ unset PROVISION_ADMIN_EMAIL PROVISION_ADMIN_PASSWORD
 
 ```sh
 node scripts/gcp.mjs doctor
+node scripts/gcp.mjs init
 node scripts/gcp.mjs plan
 node scripts/gcp.mjs apply
 ```
 
-이 도구는 gcloud의 기본 계정을 사용하지 않고 모든 호출에 지정 계정을 전달한다. OAuth 토큰은 메모리의 자식 프로세스 환경변수로만 전달한다. plan은 개인 프로젝트를 CLI 변수로 고정한다. apply는 실제 활성 결제 상태와 저장된 plan의 프로젝트 일치 여부를 검사한다. `.local/gcp.plan`을 검토한 뒤 apply하며 이 명령은 실제 리소스를 만든다. 먼저 `infra/gcp`에서 `terraform init`과 비밀 없는 `terraform.tfvars` 설정이 필요하다. 기본 ADC에 의존한 수동 apply는 피한다.
+이 도구는 gcloud의 기본 계정을 사용하지 않고 모든 호출에 지정 계정을 전달한다. OAuth 토큰은 메모리의 자식 프로세스 환경변수로만 전달한다. plan은 개인 프로젝트를 CLI 변수로 고정한다. apply는 실제 활성 결제 상태와 저장된 plan의 프로젝트 일치 여부를 검사한다. `.local/gcp.plan`을 검토한 뒤 apply하며 이 명령은 실제 리소스를 만든다. 먼저 비밀 없는 `terraform.tfvars`를 두고 `node scripts/gcp.mjs init`으로 원격 state에 연결한다. init은 `.local/gcs-backend.hcl`의 버킷이 지정 프로젝트의 `<project>-tfstate`가 아니면 중단한다. Windows에서도 같은 명령을 쓴다. 기본 ADC에 의존한 수동 apply는 피한다.
 
 개인 계정 ADC 혼용을 피하는 최초 소유자 생성 도구도 제공한다: `node --import tsx scripts/provision-owner.ts`. 비공개 deployment.json의 지정 계정으로만 gcloud 임시 토큰을 메모리에서 얻고, 공식 Firestore REST commit으로 이메일 예약·관리자 문서를 원자적으로 생성한다. 기존 계정은 덮어쓰지 않는다. 무작위 초기 비밀번호는 해시로 서버에 저장하고 원문은 gitignore된 `.local/owner-access.json`(0600)에만 기록한다. 채팅·로그·공개 저장소에 출력하지 않는다. 최초 소유자 이메일은 지정한 개인 배포 계정과 같다. 이 파일을 안전한 비밀번호 관리자로 옮긴 뒤 로컬 원문을 정리한다. 출처: https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/commit .
 
