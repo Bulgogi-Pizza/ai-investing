@@ -23,7 +23,7 @@ const makeFirestore = () => {
     db,
     store: new FirestoreTradingStore(db as unknown as Firestore, () => NOW),
     stop: (active: unknown) =>
-      db.write('tradingControl/emergencyStop', { active } as Record<string, unknown>),
+      db.write('algorithmControl/global', { emergencyStop: active } as Record<string, unknown>),
   };
 };
 
@@ -550,7 +550,7 @@ describe('FirestoreTradingStore specifics', () => {
   it('the stop flag flipped while reservations race is honoured by whoever commits after it', async () => {
     const { db, store } = makeFirestore();
     const first = reserve(store, { clientOrderId: 'one' });
-    db.write('tradingControl/emergencyStop', { active: true });
+    db.write('algorithmControl/global', { emergencyStop: true });
     const second = reserve(store, { clientOrderId: 'two', symbol: 'S2' });
     const [a, b] = await Promise.all([first, second]);
     // Whatever interleaving happened, nothing was reserved after the flag was set.
@@ -611,7 +611,7 @@ describe('FirestoreTradingStore specifics', () => {
   });
   it('a malformed emergency-stop document fails closed (throws) instead of reading as false', async () => {
     const { db, store } = makeFirestore();
-    db.write('tradingControl/emergencyStop', { active: 'yes' });
+    db.write('algorithmControl/global', { emergencyStop: 'yes' });
     await expect(store.getEmergencyStop()).rejects.toThrow();
     await expect(reserve(store)).rejects.toThrow();
   });

@@ -6,22 +6,35 @@ import {
   applyPatch,
   decideReserve,
   ledgerFacts,
+  newestOrderFirst,
+  planResolution,
   symbolLockState,
+  type AccessCheckStatus,
+  type AccessProbeStatus,
+  type AlgorithmStop,
   type BlockedOrderRecord,
+  type LiveJobHeartbeat,
   type LiveOrderRecord,
   type LiveOrderStatus,
   type OrderPatch,
+  type OrderResolution,
   type ReserveInput,
   type ReserveResult,
   type TradingStore,
 } from './stores.js';
+import type { TradeMarket } from './toss-orders.js';
 
 /**
  * Firestore implementation of the trading store (plan stage 7d). UNWIRED. Collections are
  * server-only (the project's Firestore rules deny all client SDK access):
  *   liveOrders/{clientOrderId}              one document per reserved order
- *   tradingControl/emergencyStop            { active: boolean }  (absent = not stopped)
- *   tradingAlgorithmState/{algorithmId}     { stopped: true, reason }
+ *   algorithmControl/global                 { emergencyStop: boolean, updatedAt }  (absent = not
+ *                                           stopped). The SAME document the screen's emergency-stop
+ *                                           button writes (AlgorithmRepository.setControl) and the
+ *                                           paper job reads: there is exactly one flag.
+ *   tradingAlgorithmState/{algorithmId}     { stopped: true, reason, stoppedAt }
+ *   tradingStatus/accessCheck               result of the read-only access check job
+ *   tradingStatus/liveJob_{KR|US}           heartbeat of the live job (see LiveJobHeartbeat)
  *   tradingCounters/{dateKey}_global        { count }
  *   tradingCounters/{dateKey}_a_{id}        { count }
  *   tradingSymbolLocks/{algorithmId}_{symbol}  { clientOrderId }  held from reservation until the
@@ -96,6 +109,108 @@ export function parseLiveOrder(data: unknown): LiveOrderRecord {
   }) as LiveOrderRecord;
 }
 
+const marketKey = (market: TradeMarket) => {
+  if (market !== 'KR' && market !== 'US') throw new Error('Invalid market');
+  return market;
+};
+
+const SAFE_CODE = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const OUTCOMES = ['ok', 'partial', 'failed', 'skipped'] as const;
+const PROBES = ['buyingPowerKrw', 'buyingPowerUsd', 'commissions', 'openOrders'] as const;
+
+function parseProbe(value: unknown): AccessProbeStatus | null {
+  if (!value || typeof value !== 'object') return null;
+  const d = value as Record<string, unknown>;
+  if (typeof d.ok !== 'boolean') return null;
+  return {
+    ok: d.ok,
+    ...(typeof d.code === 'string' && SAFE_CODE.test(d.code) ? { code: d.code } : {}),
+    ...(typeof d.status === 'number' && Number.isInteger(d.status) ? { status: d.status } : {}),
+  };
+}
+/** Defensive projection of the access-check status document; null when it is not usable. */
+export function parseAccessCheck(data: unknown): AccessCheckStatus | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  const probes = d.probes as Record<string, unknown> | undefined;
+  if (
+    typeof d.checkedAt !== 'string' ||
+    !Number.isFinite(Date.parse(d.checkedAt)) ||
+    typeof d.allOk !== 'boolean' ||
+    typeof d.permissionDenied !== 'boolean' ||
+    !probes ||
+    typeof probes !== 'object'
+  )
+    return null;
+  const parsed: Record<string, AccessProbeStatus> = {};
+  for (const key of PROBES) {
+    const probe = parseProbe(probes[key]);
+    if (!probe) return null;
+    parsed[key] = probe;
+  }
+  return {
+    checkedAt: d.checkedAt,
+    allOk: d.allOk,
+    permissionDenied: d.permissionDenied,
+    probes: parsed as AccessCheckStatus['probes'],
+  };
+}
+function parseHeartbeat(data: unknown, market: TradeMarket): LiveJobHeartbeat | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  if (
+    d.market !== market ||
+    typeof d.at !== 'string' ||
+    !Number.isFinite(Date.parse(d.at)) ||
+    !OUTCOMES.includes(d.outcome as (typeof OUTCOMES)[number])
+  )
+    return null;
+  return {
+    market,
+    at: d.at,
+    date: typeof d.date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d.date) ? d.date : null,
+    outcome: d.outcome as LiveJobHeartbeat['outcome'],
+    ...(typeof d.code === 'string' && /^[A-Z][A-Z0-9_]{2,63}$/.test(d.code)
+      ? { code: d.code }
+      : {}),
+  };
+}
+function parseBlocked(data: unknown): BlockedOrderRecord | null {
+  if (!data || typeof data !== 'object') return null;
+  const d = data as Record<string, unknown>;
+  if (
+    typeof d.id !== 'string' ||
+    typeof d.algorithmId !== 'string' ||
+    typeof d.runId !== 'string' ||
+    (d.market !== 'KR' && d.market !== 'US') ||
+    typeof d.symbol !== 'string' ||
+    (d.side !== 'buy' && d.side !== 'sell') ||
+    typeof d.quantity !== 'number' ||
+    typeof d.price !== 'string' ||
+    typeof d.tranche !== 'number' ||
+    !Array.isArray(d.reasons) ||
+    typeof d.dateKey !== 'string' ||
+    typeof d.createdAt !== 'string'
+  )
+    return null;
+  return {
+    id: d.id,
+    algorithmId: d.algorithmId,
+    runId: d.runId,
+    market: d.market,
+    symbol: d.symbol,
+    side: d.side,
+    quantity: d.quantity,
+    price: d.price,
+    tranche: d.tranche,
+    reasons: d.reasons.filter(
+      (r): r is BlockedOrderRecord['reasons'][number] => typeof r === 'string',
+    ),
+    dateKey: d.dateKey,
+    createdAt: d.createdAt,
+  };
+}
+
 export class FirestoreTradingStore implements TradingStore {
   constructor(
     private readonly db: Firestore = new Firestore(),
@@ -103,7 +218,10 @@ export class FirestoreTradingStore implements TradingStore {
   ) {}
 
   private control() {
-    return this.db.collection('tradingControl').doc('emergencyStop');
+    return this.db.collection('algorithmControl').doc('global');
+  }
+  private statusRef(name: string) {
+    return this.db.collection('tradingStatus').doc(name);
   }
   private algorithmState(id: string) {
     if (!ALGORITHM_ID.test(id)) throw new Error('Invalid algorithm id');
@@ -131,18 +249,21 @@ export class FirestoreTradingStore implements TradingStore {
     return this.db.collection('liveOrders').doc(clientOrderId);
   }
 
-  /** Operator/test control. The 7e screen wires its own authenticated writer and notification. */
+  /** Operator/test control. The screen writes the same document through AlgorithmRepository. */
   async setEmergencyStop(active: boolean) {
-    await this.control().set({ active, updatedAt: this.clock().toISOString() });
+    await this.control().set({ emergencyStop: active, updatedAt: this.clock().toISOString() });
   }
 
-  /** Always a fresh server read: never cached. A missing document means "not stopped". */
+  /**
+   * Always a fresh server read: never cached. A missing document means "not stopped"; a document
+   * whose flag is not a boolean throws (the callers refuse to trade on any read problem).
+   */
   async getEmergencyStop() {
     const snapshot = await this.control().get();
     if (!snapshot.exists) return false;
-    const active = snapshot.data()?.active;
-    if (typeof active !== 'boolean') throw new Error('Invalid emergency stop document');
-    return active;
+    const flag = snapshot.data()?.emergencyStop;
+    if (typeof flag !== 'boolean') throw new Error('Invalid emergency stop document');
+    return flag;
   }
   async isAlgorithmStopped(algorithmId: string) {
     return (await this.algorithmState(algorithmId).get()).exists;
@@ -186,7 +307,7 @@ export class FirestoreTradingStore implements TradingStore {
         tx.get(lock),
         tx.get(algorithmOrders),
       ]);
-      const active = c.exists ? c.data()?.active : false;
+      const active = c.exists ? c.data()?.emergencyStop : false;
       if (typeof active !== 'boolean') throw new Error('Invalid emergency stop document');
       const count = (snap: typeof a) =>
         snap.exists && typeof snap.data()?.count === 'number' ? (snap.data()!.count as number) : 0;
@@ -275,6 +396,74 @@ export class FirestoreTradingStore implements TradingStore {
       .collection('blockedOrders')
       .doc(record.id)
       .set(clean({ ...record }));
+  }
+  async getAlgorithmStop(algorithmId: string): Promise<AlgorithmStop | null> {
+    const snapshot = await this.algorithmState(algorithmId).get();
+    if (!snapshot.exists) return null;
+    const d = snapshot.data() ?? {};
+    return {
+      reason: typeof d.reason === 'string' ? d.reason.slice(0, 64) : 'unknown',
+      stoppedAt: typeof d.stoppedAt === 'string' ? d.stoppedAt : null,
+    };
+  }
+  async releaseAlgorithmStop(algorithmId: string) {
+    const ref = this.algorithmState(algorithmId);
+    return this.db.runTransaction(async (tx) => {
+      const snapshot = await tx.get(ref);
+      if (!snapshot.exists) return false;
+      tx.delete(ref);
+      return true;
+    });
+  }
+  async listRecentBlocked(algorithmId: string, limit: number) {
+    if (!ALGORITHM_ID.test(algorithmId)) throw new Error('Invalid algorithm id');
+    const result = await this.db
+      .collection('blockedOrders')
+      .where('algorithmId', '==', algorithmId)
+      .get();
+    return result.docs
+      .map((d) => parseBlocked(d.data()))
+      .filter((b): b is BlockedOrderRecord => b !== null)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit);
+  }
+  async listOrdersBySymbol(symbol: string, limit: number) {
+    if (!/^[A-Za-z0-9.\-]{1,30}$/.test(symbol) || /^\.+$/.test(symbol))
+      throw new Error('Invalid symbol');
+    // Equality filter only (single-field index); a symbol has few live orders.
+    const result = await this.db.collection('liveOrders').where('symbol', '==', symbol).get();
+    return result.docs
+      .map((d) => parseLiveOrder(d.data()))
+      .sort(newestOrderFirst)
+      .slice(0, limit);
+  }
+  async resolveUnconfirmedOrder(
+    algorithmId: string,
+    clientOrderId: string,
+    resolution: OrderResolution,
+  ) {
+    const current = await this.getOrder(clientOrderId);
+    if (!current || current.algorithmId !== algorithmId) throw new Error('Unknown order');
+    let last = current;
+    // Each patch is its own transaction that re-validates the transition: a concurrent change of the
+    // order (for example a reconciliation that adopted it) makes the later patch throw.
+    for (const patch of planResolution(current, resolution))
+      last = await this.updateOrder(clientOrderId, patch);
+    return last;
+  }
+  async getAccessCheck(): Promise<AccessCheckStatus | null> {
+    const snapshot = await this.statusRef('accessCheck').get();
+    return snapshot.exists ? parseAccessCheck(snapshot.data()) : null;
+  }
+  async putAccessCheck(status: AccessCheckStatus) {
+    await this.statusRef('accessCheck').set(clean({ ...status }));
+  }
+  async getJobHeartbeat(market: TradeMarket): Promise<LiveJobHeartbeat | null> {
+    const snapshot = await this.statusRef(`liveJob_${marketKey(market)}`).get();
+    return snapshot.exists ? parseHeartbeat(snapshot.data(), market) : null;
+  }
+  async putJobHeartbeat(heartbeat: LiveJobHeartbeat) {
+    await this.statusRef(`liveJob_${marketKey(heartbeat.market)}`).set(clean({ ...heartbeat }));
   }
   async acquireRunLease(algorithmId: string, runId: string, ttlMs: number) {
     if (!(ttlMs > 0) || !/^[A-Za-z0-9_-]{1,64}$/.test(runId)) throw new Error('Invalid lease');

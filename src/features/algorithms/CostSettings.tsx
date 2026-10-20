@@ -36,8 +36,9 @@ export function CostSettings() {
         <div>
           <h2 id="algo-costs-title">수수료·세금 설정</h2>
           <p>
-            시뮬레이션 비용 계산에 쓰는 값입니다. 입력하지 않은 항목은 0으로 계산하고 결과에
-            &quot;설정 필요&quot;로 표시합니다.
+            시뮬레이션·모의 운용 비용 계산에 쓰는 값입니다. 입력하지 않은 항목은 0으로 계산하고
+            결과에 &quot;설정 필요&quot;로 표시합니다. 실전은 수수료율을 토스 값으로 쓰고, 국내 실전
+            매수는 증권거래세율이 있어야 합니다.
           </p>
         </div>
       </div>
@@ -128,7 +129,9 @@ function CostForm({ initial }: { initial: CostSettingsRecord }) {
             value={commission}
             onChange={(e) => setCommission(e.target.value)}
           />
-          <small className="invest-muted">토스 /commissions 값 연동 전까지 직접 입력합니다.</small>
+          <small className="invest-muted">
+            시뮬레이션·모의용. 실전은 토스 /commissions 값을 씁니다.
+          </small>
         </label>
         <label className="algo-field">
           국내 증권거래세율 (%, 매도 금액 기준)

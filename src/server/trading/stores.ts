@@ -148,7 +148,7 @@ export interface PreTradeStore {
   listOrders(filter: { algorithmId: string; symbol?: string }): Promise<LiveOrderRecord[]>;
 }
 
-export interface TradingStore extends PreTradeStore {
+export interface TradingStore extends PreTradeStore, TradingStatusStore {
   stopAlgorithm(algorithmId: string, reason: string): Promise<void>;
   /**
    * Atomically: re-read the emergency stop and the algorithm state, check the daily counters,
@@ -169,6 +169,101 @@ export interface TradingStore extends PreTradeStore {
   acquireRunLease(algorithmId: string, runId: string, ttlMs: number): Promise<boolean>;
   /** Releases the lease only if `runId` still holds it. */
   releaseRunLease(algorithmId: string, runId: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Status records the screen reads (plan stage 7e/7f). None of them carries an amount, an account
+// identifier or provider text.
+// ---------------------------------------------------------------------------
+export type AlgorithmStop = { reason: string; stoppedAt: string | null };
+export type AccessProbeStatus = { ok: boolean; code?: string; status?: number | null };
+/** Result of the read-only order-API access check job (booleans and sanitized codes only). */
+export type AccessCheckStatus = {
+  checkedAt: string;
+  allOk: boolean;
+  permissionDenied: boolean;
+  probes: {
+    buyingPowerKrw: AccessProbeStatus;
+    buyingPowerUsd: AccessProbeStatus;
+    commissions: AccessProbeStatus;
+    openOrders: AccessProbeStatus;
+  };
+};
+/**
+ * Written by the live job on every scheduled invocation that got past its configuration check
+ * (also when the market was closed). The screen uses it to tell "the live schedule is paused"
+ * from "the live job ran".
+ */
+export type LiveJobHeartbeat = {
+  market: TradeMarket;
+  at: string;
+  /** Session date the run was for, when there was one. */
+  date: string | null;
+  outcome: 'ok' | 'partial' | 'failed' | 'skipped';
+  /** Upper-snake skip code ("MARKET_CLOSED_TODAY", ...). */
+  code?: string;
+};
+export const LIVE_JOB_MARKETS: readonly TradeMarket[] = ['KR', 'US'];
+export interface TradingStatusStore extends PreTradeStore {
+  getAlgorithmStop(algorithmId: string): Promise<AlgorithmStop | null>;
+  /** Removes the stop of one algorithm. Returns whether there was one. */
+  releaseAlgorithmStop(algorithmId: string): Promise<boolean>;
+  /** Newest first. */
+  listRecentBlocked(algorithmId: string, limit: number): Promise<BlockedOrderRecord[]>;
+  /** Orders of one symbol across algorithms (chart markers), newest first, at most `limit`. */
+  listOrdersBySymbol(symbol: string, limit: number): Promise<LiveOrderRecord[]>;
+  /**
+   * The owner's decision about an order whose outcome is unconfirmed (status `unknown`, or `reserved`
+   * after a crash). Validates the transition, updates the order (and so the ledger), releases the
+   * symbol lock, and returns the updated record. Throws when the order is not unconfirmed or does
+   * not belong to the algorithm.
+   */
+  resolveUnconfirmedOrder(
+    algorithmId: string,
+    clientOrderId: string,
+    resolution: OrderResolution,
+  ): Promise<LiveOrderRecord>;
+  getAccessCheck(): Promise<AccessCheckStatus | null>;
+  putAccessCheck(status: AccessCheckStatus): Promise<void>;
+  getJobHeartbeat(market: TradeMarket): Promise<LiveJobHeartbeat | null>;
+  putJobHeartbeat(heartbeat: LiveJobHeartbeat): Promise<void>;
+}
+
+/** What the owner found out about an unconfirmed order (checked in the broker app). */
+export type OrderResolution =
+  | { outcome: 'filled'; quantity: number; averagePrice: number }
+  | { outcome: 'canceled'; quantity?: number; averagePrice?: number }
+  | { outcome: 'not-placed' };
+export const RESOLVABLE_STATUSES: readonly LiveOrderStatus[] = ['unknown', 'reserved'];
+
+/**
+ * Validates a resolution against the order and returns the patches to apply in order (each one a
+ * legal status transition). `filled` with fewer shares than ordered is recorded as a cancellation
+ * that kept the filled part: the unfilled rest is not live any more. Pure.
+ */
+export function planResolution(order: LiveOrderRecord, resolution: OrderResolution): OrderPatch[] {
+  if (!RESOLVABLE_STATUSES.includes(order.status)) throw new Error('Order is not unconfirmed');
+  const manual = { code: 'manually-resolved', kind: 'http' as const, status: null };
+  const toUnknown: OrderPatch[] = order.status === 'reserved' ? [{ status: 'unknown' }] : [];
+  if (resolution.outcome === 'not-placed')
+    return [{ status: 'rejected', error: { ...manual, code: 'not-placed' } }];
+  const quantity = resolution.quantity ?? 0;
+  if (!Number.isInteger(quantity) || quantity < 0 || quantity > order.quantity)
+    throw new Error('Invalid filled quantity');
+  if (resolution.outcome === 'filled' && quantity < 1) throw new Error('Invalid filled quantity');
+  if (quantity > 0) {
+    const price = resolution.averagePrice;
+    if (typeof price !== 'number' || !Number.isFinite(price) || !(price > 0))
+      throw new Error('Invalid average price');
+  }
+  const fill: OrderPatch =
+    quantity > 0
+      ? { filledQuantity: quantity, averageFilledPrice: resolution.averagePrice }
+      : { filledQuantity: 0 };
+  const status: LiveOrderStatus =
+    resolution.outcome === 'filled' && quantity === order.quantity ? 'filled' : 'canceled';
+  // notifiedStatus: the owner's own alert replaces the automatic fill notification.
+  return [...toUnknown, { ...fill, status, error: manual, notifiedStatus: status }];
 }
 
 /**
@@ -319,9 +414,16 @@ export function summarizeLedger(orders: LiveOrderRecord[]): Ledger {
 // ---------------------------------------------------------------------------
 // In-memory implementation (tests and local development).
 // ---------------------------------------------------------------------------
+/** Newest first by update time, then id (chart markers and screens). */
+export const newestOrderFirst = (a: LiveOrderRecord, b: LiveOrderRecord) =>
+  b.updatedAt.localeCompare(a.updatedAt) || b.clientOrderId.localeCompare(a.clientOrderId);
+
 export class MemoryTradingStore implements TradingStore {
   private emergencyStop = false;
   private readonly stopped = new Map<string, string>();
+  private readonly stoppedAt = new Map<string, string>();
+  private accessCheck: AccessCheckStatus | null = null;
+  private readonly heartbeats = new Map<TradeMarket, LiveJobHeartbeat>();
   private readonly orders = new Map<string, LiveOrderRecord>();
   private readonly counters = new Map<string, number>();
   private readonly blocked: BlockedOrderRecord[] = [];
@@ -345,7 +447,60 @@ export class MemoryTradingStore implements TradingStore {
   }
   async stopAlgorithm(algorithmId: string, reason: string) {
     if (!ALGORITHM_ID.test(algorithmId)) throw new Error('Invalid algorithm id');
-    if (!this.stopped.has(algorithmId)) this.stopped.set(algorithmId, reason);
+    if (!this.stopped.has(algorithmId)) {
+      this.stopped.set(algorithmId, reason);
+      this.stoppedAt.set(algorithmId, this.clock().toISOString());
+    }
+  }
+  async getAlgorithmStop(algorithmId: string) {
+    return this.stopped.has(algorithmId)
+      ? {
+          reason: this.stopped.get(algorithmId)!,
+          stoppedAt: this.stoppedAt.get(algorithmId) ?? null,
+        }
+      : null;
+  }
+  async releaseAlgorithmStop(algorithmId: string) {
+    this.stoppedAt.delete(algorithmId);
+    return this.stopped.delete(algorithmId);
+  }
+  async listRecentBlocked(algorithmId: string, limit: number) {
+    return this.blocked
+      .filter((b) => b.algorithmId === algorithmId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit)
+      .map((b) => structuredClone(b));
+  }
+  async listOrdersBySymbol(symbol: string, limit: number) {
+    return [...this.orders.values()]
+      .filter((o) => o.symbol === symbol)
+      .sort(newestOrderFirst)
+      .slice(0, limit)
+      .map((o) => structuredClone(o));
+  }
+  async resolveUnconfirmedOrder(
+    algorithmId: string,
+    clientOrderId: string,
+    resolution: OrderResolution,
+  ) {
+    const current = this.orders.get(clientOrderId);
+    if (!current || current.algorithmId !== algorithmId) throw new Error('Unknown order');
+    let last = structuredClone(current);
+    for (const patch of planResolution(current, resolution))
+      last = await this.updateOrder(clientOrderId, patch);
+    return last;
+  }
+  async getAccessCheck() {
+    return structuredClone(this.accessCheck);
+  }
+  async putAccessCheck(status: AccessCheckStatus) {
+    this.accessCheck = structuredClone(status);
+  }
+  async getJobHeartbeat(market: TradeMarket) {
+    return structuredClone(this.heartbeats.get(market) ?? null);
+  }
+  async putJobHeartbeat(heartbeat: LiveJobHeartbeat) {
+    this.heartbeats.set(heartbeat.market, structuredClone(heartbeat));
   }
   async getDailyCounts(dateKey: string, algorithmId: string) {
     return {

@@ -25,7 +25,7 @@ import {
 } from '../../lib/algorithmRecords';
 import { ApiError, apiSend } from '../../lib/api';
 import { outcomeText } from './EmergencyStop';
-import { liveUnavailableText, modeDescriptions, modeLabels, money } from './shared';
+import { modeDescriptions, modeLabels, money } from './shared';
 
 const templateOrder: AlgorithmTemplateId[] = [
   'momentum',
@@ -34,6 +34,11 @@ const templateOrder: AlgorithmTemplateId[] = [
   'custom',
 ];
 const modeOrder: AlgorithmMode[] = ['simulation', 'paper', 'live'];
+const changeLabel: Record<string, string> = {
+  'budget-raised': '운용 금액 한도 상향',
+  'live-enabled': '실전 켜기',
+  'live-strategy-changed': '실전 알고리즘 전략 변경',
+};
 
 export const inputOfRecord = (record: AlgorithmRecord): AlgorithmInput => ({
   name: record.name,
@@ -225,13 +230,13 @@ export function AlgorithmForm({
           })
         : apiSend('POST', '/api/algorithms', { algorithm: parsed.value }))) as {
         algorithm: AlgorithmRecord;
-        notification?: { status: 'sent' | 'failed' | 'disabled' };
+        notifications?: { change: string; status: 'sent' | 'failed' | 'disabled' }[];
       };
       if (!body.algorithm?.id)
         throw new ApiError(502, 'INVALID_RESPONSE', '저장 응답 형식을 확인하지 못했습니다.');
-      const extra = body.notification
-        ? ` 운용 금액 한도 상향 알림: ${outcomeText(body.notification)}`
-        : '';
+      const extra = (body.notifications ?? [])
+        .map((n) => ` ${changeLabel[n.change] ?? '위험 증가 변경'} 알림: ${outcomeText(n)}`)
+        .join('');
       const message = `저장했습니다.${extra}`;
       setNotice({ kind: 'ok', text: message });
       onSaved(body.algorithm, message);
@@ -307,7 +312,7 @@ export function AlgorithmForm({
           <small className="invest-muted">
             {input.method === 'formula'
               ? '신호 점수 × 가중치의 합이 기준값을 넘으면 매수합니다.'
-              : 'AI형은 과거 시뮬레이션을 지원하지 않습니다(모의 운용부터 시작). 모의 운용 기능은 다음 단계(7c)에서 연결됩니다.'}
+              : 'AI형은 과거 시뮬레이션을 지원하지 않습니다(모의 운용부터 시작). AI 비용 승인 전에는 AI형 판단도 하지 않습니다.'}
           </small>
         </fieldset>
       </div>
@@ -487,7 +492,11 @@ export function AlgorithmForm({
         <legend>모드</legend>
         <div className="algo-mode-grid" role="radiogroup" aria-label="모드">
           {modeOrder.map((mode) => {
-            const unavailable = mode === 'live' || (mode === 'simulation' && input.method === 'ai');
+            // Live is switched on only from the live panel; an algorithm that is already live may
+            // stay live or move back to another mode here.
+            const wasLive = record?.mode === 'live';
+            const unavailable =
+              (mode === 'live' && !wasLive) || (mode === 'simulation' && input.method === 'ai');
             return (
               <label
                 key={mode}
@@ -501,11 +510,14 @@ export function AlgorithmForm({
                   onChange={() => patch({ mode })}
                 />
                 <strong>
-                  {mode === 'live' && <Lock size={13} aria-hidden="true" />} {modeLabels[mode]}
+                  {mode === 'live' && !wasLive && <Lock size={13} aria-hidden="true" />}{' '}
+                  {modeLabels[mode]}
                 </strong>
                 <span>
                   {mode === 'live'
-                    ? liveUnavailableText
+                    ? wasLive
+                      ? '실전 운용 중입니다. 다른 모드를 고르면 실전이 꺼집니다(추가 인증 없음).'
+                      : '아래 "실전 운용" 패널에서 모의 기록을 보고 켭니다.'
                     : mode === 'simulation' && input.method === 'ai'
                       ? 'AI형은 과거 시뮬레이션을 지원하지 않습니다.'
                       : modeDescriptions[mode]}
@@ -516,8 +528,8 @@ export function AlgorithmForm({
         </div>
         {input.mode === 'paper' && (
           <small className="invest-muted">
-            모의 운용 판단 작업은 다음 단계(7c)에서 연결됩니다. 지금은 모드와 설정만 저장되며 가상
-            기록도 아직 쌓이지 않습니다.
+            모의 운용은 영업일 개장 직후 한 번 판단하고 가상 기록만 쌓습니다. 실제 주문은 나가지
+            않습니다.
           </small>
         )}
       </fieldset>

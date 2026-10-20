@@ -2,11 +2,9 @@ import type { NotificationEvent } from '../notify.js';
 import type { TradeSide } from './toss-orders.js';
 
 /**
- * The ONE place where live-trading situations are mapped to notification events. Stage 7e adds a
- * dedicated `live-order-unconfirmed` event kind and a permission-stop reason to `notify.ts`; only
- * this function has to change then. Until then:
- * - "sent but unconfirmed" is surfaced as a `job-failure`,
- * - a permission/first-order stop is an `algorithm-auto-stop` without a reason,
+ * The ONE place where live-trading situations are mapped to notification events:
+ * - "sent but unconfirmed" is a dedicated `live-order-unconfirmed` event,
+ * - a permission or first-order stop is an `algorithm-auto-stop` with its own reason,
  * - a purely local input failure is a `job-failure`.
  * Events carry no amounts, quantities, account identifiers or provider text (the notify module
  * has no field for them).
@@ -18,10 +16,10 @@ export type LiveAlert =
   | { type: 'broker-rejected'; symbol: string; side: TradeSide; algorithmName: string }
   | {
       type: 'algorithm-stopped';
-      why: 'loss-limit' | 'order-permission' | 'first-order-rejected';
+      why: 'loss-limit' | 'order-permission' | 'first-order-rejected' | 'unconfirmed-order';
       algorithmName: string;
     }
-  | { type: 'order-unconfirmed' }
+  | { type: 'order-unconfirmed'; symbol?: string; side?: TradeSide; algorithmName?: string }
   | { type: 'local-input-failure' }
   | {
       type: 'fill';
@@ -56,10 +54,16 @@ export function liveAlertEvent(alert: LiveAlert): NotificationEvent {
         kind: 'algorithm-auto-stop',
         mode: 'live',
         algorithmName: alert.algorithmName,
-        ...(alert.why === 'loss-limit' ? { reason: 'loss-limit' as const } : {}),
+        reason: alert.why,
       };
     case 'order-unconfirmed':
-      return { kind: 'job-failure', jobName: 'live-order-unconfirmed' };
+      return {
+        kind: 'live-order-unconfirmed',
+        mode: 'live',
+        ...(alert.symbol ? { symbol: alert.symbol } : {}),
+        ...(alert.side ? { side: alert.side } : {}),
+        ...(alert.algorithmName ? { algorithmName: alert.algorithmName } : {}),
+      };
     case 'local-input-failure':
       return { kind: 'job-failure', jobName: 'live-order-input-invalid' };
     case 'fill':

@@ -15,7 +15,7 @@ export type Safeguards = {
   liquidityMinAvgValue: number;
   liquidityWindow: number;
   /**
-   * 10. Orders at or above this notional are never placed (`confirmHighValueOrder` is never set):
+   * 10. Orders at or above this notional are never placed (the broker's high-value confirmation flag is never set):
    * buys are rejected, sells are split into tranches below it.
    * KR default 100,000,000 KRW. US has no default here because it needs an FX rate; pass the
    * USD equivalent when known (null = not checked, flagged as a warning by the backtester).

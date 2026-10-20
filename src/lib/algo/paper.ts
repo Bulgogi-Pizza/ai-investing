@@ -266,72 +266,34 @@ export function heldTradingDays(completed: DailyBar[], entryDate: string): numbe
   return after + 1;
 }
 
-export function runPaperDay(input: PaperDayInput): PaperDayResult {
-  const { algorithm, date } = input;
-  const market = algorithm.market;
-  const ledger: PaperLedger = structuredClone(input.ledger);
-  if (ledger.market !== market) throw new Error('paper: ledger and algorithm markets differ');
-  const slipBps = input.slippageBps ?? 0;
-  if (!Number.isFinite(slipBps) || slipBps < 0 || slipBps >= 10_000)
-    throw new Error('paper: slippageBps must be within [0, 10000)');
-  const slip = slipBps / 10_000;
-  const costs = resolveCosts(market, input.costs);
-  const sg: Safeguards = { ...defaultSafeguards(market), ...input.safeguards };
-  if (!(sg.lossStopFraction > 0 && sg.lossStopFraction <= 1))
-    throw new Error('paper: lossStopFraction must be within (0, 1]');
-  const minSamples = input.minSamples ?? defaultMinSamples;
-  const roundTripCost = roundTripCostRate(costs);
-  const budget = ledger.budget;
-  const isDual = algorithm.template === 'dualMomentum';
+export type SymbolDecision = {
+  action: 'buy' | 'sell' | 'hold';
+  score: number | null;
+  reason: string;
+};
+
+/**
+ * The decision step shared by the paper day and the live job: one decision per symbol that has a
+ * fresh quote (`traded`: targets, plus held symbols that left the list, which are sold). Pure.
+ */
+export function decideSymbols(input: {
+  algorithm: AlgorithmDefinition;
+  usedSignals: SignalWeight[];
+  externalDecisions?: Record<string, ExternalDecision>;
+  date: string;
+  /** Quotes with a price only. */
+  traded: PaperQuote[];
+}): {
+  decisions: Map<string, SymbolDecision>;
+  reasonsOf: Map<string, string[]>;
+  /** AI method: the expected return the model gave per symbol. */
+  expectedOverride: Map<string, number | null>;
+} {
+  const { algorithm, date, traded } = input;
   const external = input.externalDecisions;
+  const isDual = algorithm.template === 'dualMomentum';
   const targets = new Set(algorithm.symbols);
-  const fills: PaperFill[] = [];
-  const decisionRecords: PaperDecisionRecord[] = [];
-  const rejections: Partial<Record<OrderRejection, number>> = {};
-  const heldBack = { insufficientHistory: 0, expectedBelowCost: 0 };
-  const reject = (reason: OrderRejection) => {
-    rejections[reason] = (rejections[reason] ?? 0) + 1;
-  };
-  let newlyStopped = false;
-
-  // Annual capital-gains tax of finished years accrues when a new calendar year starts.
-  const year = date.slice(0, 4);
-  for (const [gainYear, gain] of Object.entries(ledger.yearGain)) {
-    if (gainYear < year && !ledger.taxedYears.includes(gainYear)) {
-      ledger.accruedTax += capitalGainsTaxForYear(gain, costs.capitalGainsTax);
-      ledger.taxedYears.push(gainYear);
-    }
-  }
-
-  const quotes = [...input.quotes].sort(bySymbol);
-  const quoteOf = new Map(quotes.map((q) => [q.symbol, q]));
-  const lastClose = (q: PaperQuote | undefined) => q?.completed[q.completed.length - 1]?.close;
-  const markOf = (symbol: string, entryPrice: number, markPrice: number) => {
-    const q = quoteOf.get(symbol);
-    return q?.price ?? lastClose(q) ?? markPrice ?? entryPrice;
-  };
-
-  // 4. Cumulative-loss stop, evaluated before any order using today's marks.
-  if (ledger.status === 'running') {
-    let mv = 0;
-    for (const p of Object.values(ledger.positions))
-      mv += p.quantity * markOf(p.symbol, p.entryPrice, p.markPrice);
-    if (ledger.cash + mv - ledger.accruedTax - budget <= -sg.lossStopFraction * budget) {
-      ledger.status = 'stopped';
-      ledger.stoppedOn = date;
-      ledger.stoppedReason = 'loss-limit';
-      newlyStopped = true;
-    }
-  }
-
-  // Decisions for every symbol with a fresh quote: targets, plus held symbols that left the list.
-  const decisions = new Map<
-    string,
-    { action: 'buy' | 'sell' | 'hold'; score: number | null; reason: string }
-  >();
-  const traded = quotes.filter(
-    (q) => q.price !== null && (targets.has(q.symbol) || ledger.positions[q.symbol]),
-  );
+  const decisions = new Map<string, SymbolDecision>();
   const expectedOverride = new Map<string, number | null>();
   const reasonsOf = new Map<string, string[]>();
   if (external) {
@@ -405,6 +367,79 @@ export function runPaperDay(input: PaperDayInput): PaperDayResult {
       reasonsOf.set(q.symbol, reasonsFor(d));
     }
   }
+
+  return { decisions, reasonsOf, expectedOverride };
+}
+
+export function runPaperDay(input: PaperDayInput): PaperDayResult {
+  const { algorithm, date } = input;
+  const market = algorithm.market;
+  const ledger: PaperLedger = structuredClone(input.ledger);
+  if (ledger.market !== market) throw new Error('paper: ledger and algorithm markets differ');
+  const slipBps = input.slippageBps ?? 0;
+  if (!Number.isFinite(slipBps) || slipBps < 0 || slipBps >= 10_000)
+    throw new Error('paper: slippageBps must be within [0, 10000)');
+  const slip = slipBps / 10_000;
+  const costs = resolveCosts(market, input.costs);
+  const sg: Safeguards = { ...defaultSafeguards(market), ...input.safeguards };
+  if (!(sg.lossStopFraction > 0 && sg.lossStopFraction <= 1))
+    throw new Error('paper: lossStopFraction must be within (0, 1]');
+  const minSamples = input.minSamples ?? defaultMinSamples;
+  const roundTripCost = roundTripCostRate(costs);
+  const budget = ledger.budget;
+  const isDual = algorithm.template === 'dualMomentum';
+  const external = input.externalDecisions;
+  const targets = new Set(algorithm.symbols);
+  const fills: PaperFill[] = [];
+  const decisionRecords: PaperDecisionRecord[] = [];
+  const rejections: Partial<Record<OrderRejection, number>> = {};
+  const heldBack = { insufficientHistory: 0, expectedBelowCost: 0 };
+  const reject = (reason: OrderRejection) => {
+    rejections[reason] = (rejections[reason] ?? 0) + 1;
+  };
+  let newlyStopped = false;
+
+  // Annual capital-gains tax of finished years accrues when a new calendar year starts.
+  const year = date.slice(0, 4);
+  for (const [gainYear, gain] of Object.entries(ledger.yearGain)) {
+    if (gainYear < year && !ledger.taxedYears.includes(gainYear)) {
+      ledger.accruedTax += capitalGainsTaxForYear(gain, costs.capitalGainsTax);
+      ledger.taxedYears.push(gainYear);
+    }
+  }
+
+  const quotes = [...input.quotes].sort(bySymbol);
+  const quoteOf = new Map(quotes.map((q) => [q.symbol, q]));
+  const lastClose = (q: PaperQuote | undefined) => q?.completed[q.completed.length - 1]?.close;
+  const markOf = (symbol: string, entryPrice: number, markPrice: number) => {
+    const q = quoteOf.get(symbol);
+    return q?.price ?? lastClose(q) ?? markPrice ?? entryPrice;
+  };
+
+  // 4. Cumulative-loss stop, evaluated before any order using today's marks.
+  if (ledger.status === 'running') {
+    let mv = 0;
+    for (const p of Object.values(ledger.positions))
+      mv += p.quantity * markOf(p.symbol, p.entryPrice, p.markPrice);
+    if (ledger.cash + mv - ledger.accruedTax - budget <= -sg.lossStopFraction * budget) {
+      ledger.status = 'stopped';
+      ledger.stoppedOn = date;
+      ledger.stoppedReason = 'loss-limit';
+      newlyStopped = true;
+    }
+  }
+
+  // Decisions for every symbol with a fresh quote: targets, plus held symbols that left the list.
+  const traded = quotes.filter(
+    (q) => q.price !== null && (targets.has(q.symbol) || ledger.positions[q.symbol]),
+  );
+  const { decisions, reasonsOf, expectedOverride } = decideSymbols({
+    algorithm,
+    usedSignals: input.usedSignals,
+    externalDecisions: external,
+    date,
+    traded,
+  });
 
   // Signal-level shadow round trips feed the expected-profit buckets (applied after today's orders).
   const pending: ProfitSample[] = [];

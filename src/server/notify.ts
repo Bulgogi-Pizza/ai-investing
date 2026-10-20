@@ -9,6 +9,17 @@ import { Router } from 'express';
 // ---------------------------------------------------------------------------
 export type TradeMode = 'paper' | 'live';
 export type OrderSide = 'buy' | 'sell';
+/** Every setting change that can increase risk; each one is announced (no extra authentication). */
+export type RiskIncreaseChange =
+  | 'live-enabled'
+  | 'budget-raised'
+  | 'emergency-stop-released'
+  | 'algorithm-stop-released'
+  | 'max-orders-raised'
+  | 'min-holding-lowered'
+  | 'loss-stop-loosened'
+  | 'liquidity-lowered'
+  | 'live-strategy-changed';
 export type NotificationEvent =
   | {
       kind: 'fill';
@@ -22,7 +33,12 @@ export type NotificationEvent =
       kind: 'algorithm-auto-stop';
       mode: TradeMode;
       algorithmName: string;
-      reason?: 'loss-limit' | 'data-error';
+      reason?:
+        | 'loss-limit'
+        | 'data-error'
+        | 'order-permission'
+        | 'first-order-rejected'
+        | 'unconfirmed-order';
     }
   | {
       kind: 'order-rejected';
@@ -38,11 +54,28 @@ export type NotificationEvent =
       symbol?: string;
       algorithmName?: string;
     }
+  | {
+      /** A live order was sent but the broker's answer was lost: it may exist. Check the broker app. */
+      kind: 'live-order-unconfirmed';
+      mode: 'live';
+      symbol?: string;
+      side?: OrderSide;
+      algorithmName?: string;
+    }
+  | {
+      /** The owner closed out an unconfirmed live order by hand (what they found in the broker app). */
+      kind: 'live-order-resolved';
+      mode: 'live';
+      symbol?: string;
+      side?: OrderSide;
+      algorithmName?: string;
+      outcome: 'filled' | 'canceled' | 'not-placed';
+    }
   | { kind: 'job-failure'; jobName: string }
   | { kind: 'morning-brief'; summary?: string }
   | {
       kind: 'setting-risk-increase';
-      change: 'live-enabled' | 'budget-raised' | 'emergency-stop-released';
+      change: RiskIncreaseChange;
       algorithmName?: string;
     };
 export type NotificationKind = NotificationEvent['kind'];
@@ -138,6 +171,8 @@ const screenPaths: Record<NotificationKind, string> = {
   fill: '/algorithms',
   'algorithm-auto-stop': '/algorithms',
   'order-rejected': '/algorithms',
+  'live-order-unconfirmed': '/algorithms',
+  'live-order-resolved': '/algorithms',
   'data-error': '/algorithms',
   'job-failure': '/algorithms',
   'morning-brief': '/calendar',
@@ -159,7 +194,20 @@ function bodyLines(event: NotificationEvent): string[] {
       return [
         `${headerFor(event.mode)} 알고리즘 자동 정지`,
         algorithm(event.algorithmName),
-        `사유: ${pick({ 'loss-limit': '누적 손실 한도 도달', 'data-error': '데이터 오류' }, event.reason, '자동 정지 조건 충족')}`,
+        `사유: ${pick(
+          {
+            'loss-limit': '누적 손실 한도 도달',
+            'data-error': '데이터 오류',
+            'order-permission': '증권사 주문 권한 문제(인증·권한 거부)',
+            'first-order-rejected': '첫 실전 주문이 증권사에 거부됨',
+            'unconfirmed-order': '접수 여부를 확인하지 못한 주문이 한 세션 넘게 남음',
+          },
+          event.reason,
+          '자동 정지 조건 충족',
+        )}`,
+        ...(event.mode === 'live'
+          ? ['정지해도 보유 종목은 자동으로 팔지 않습니다. 남은 보유분은 직접 관리하세요.']
+          : []),
         '화면에서 상태를 확인하세요.',
       ];
     case 'order-rejected':
@@ -169,6 +217,24 @@ function bodyLines(event: NotificationEvent): string[] {
         `방향: ${pick(sideLabel, event.side)}`,
         algorithm(event.algorithmName),
         `사유: ${pick({ 'broker-rejected': '증권사 거부', 'safety-guard': '안전장치 차단' }, event.reason, '주문이 거부되었습니다')}`,
+      ];
+    case 'live-order-unconfirmed':
+      return [
+        `${headerFor('live')} 주문 접수 여부 미확인`,
+        ...(event.symbol === undefined ? [] : [`종목: ${symbolText(event.symbol)}`]),
+        ...(event.side === undefined ? [] : [`방향: ${pick(sideLabel, event.side)}`]),
+        ...(event.algorithmName === undefined ? [] : [algorithm(event.algorithmName)]),
+        '주문을 보냈지만 증권사 응답을 확인하지 못했습니다. 주문이 있을 수 있으니 토스증권 앱에서 주문 내역을 확인하세요.',
+        '확인될 때까지 이 종목의 새 주문은 나가지 않습니다.',
+      ];
+    case 'live-order-resolved':
+      return [
+        `${headerFor('live')} 미확인 주문을 직접 정리했습니다`,
+        ...(event.symbol === undefined ? [] : [`종목: ${symbolText(event.symbol)}`]),
+        ...(event.side === undefined ? [] : [`방향: ${pick(sideLabel, event.side)}`]),
+        ...(event.algorithmName === undefined ? [] : [algorithm(event.algorithmName)]),
+        `정리 결과: ${pick({ filled: '체결됨', canceled: '취소·미체결', 'not-placed': '접수되지 않음' }, event.outcome, '확인 필요')}`,
+        '본인이 한 정리가 아니면 화면에서 바로 긴급 정지를 누르세요.',
       ];
     case 'data-error':
       return [
@@ -191,7 +257,21 @@ function bodyLines(event: NotificationEvent): string[] {
       ];
     case 'setting-risk-increase':
       return [
-        `[위험 증가 설정 변경] ${pick({ 'live-enabled': '실전 매매 켜기', 'budget-raised': '운용 금액 한도 상향', 'emergency-stop-released': '긴급 정지 해제' }, event.change, '설정 변경')}`,
+        `[위험 증가 설정 변경] ${pick(
+          {
+            'live-enabled': '실전 매매 켜기',
+            'budget-raised': '운용 금액 한도 상향',
+            'emergency-stop-released': '긴급 정지 해제',
+            'algorithm-stop-released': '알고리즘 자동 정지 해제',
+            'max-orders-raised': '하루 최대 주문 횟수 상향',
+            'min-holding-lowered': '최소 보유 기간 단축',
+            'loss-stop-loosened': '누적 손실 정지 기준 완화',
+            'liquidity-lowered': '최소 거래대금 기준 하향',
+            'live-strategy-changed': '실전 알고리즘 전략 변경(대상 종목·기준값·가중치·포지션 크기)',
+          },
+          event.change,
+          '설정 변경',
+        )}`,
         ...(event.algorithmName === undefined ? [] : [algorithm(event.algorithmName)]),
         '본인이 한 변경이 아니면 화면에서 바로 긴급 정지를 누르세요.',
       ];
@@ -481,6 +561,10 @@ export class NotificationService {
     if (!validAppOrigin(options.appOrigin)) throw new Error('Valid APP_ORIGIN required');
     this.now = options.now ?? (() => new Date());
     this.newId = options.newId ?? randomUUID;
+  }
+  /** True when a Telegram notifier is configured (alerts can actually be delivered). */
+  configured(): boolean {
+    return this.options.notifier !== undefined;
   }
   async notify(event: NotificationEvent): Promise<NotifyOutcome> {
     let formatted: ReturnType<typeof formatNotification>;

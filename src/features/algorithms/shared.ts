@@ -10,9 +10,8 @@ export const modeLabels: Record<AlgorithmMode, string> = {
 export const modeDescriptions: Record<AlgorithmMode, string> = {
   simulation: '과거 일봉으로 계산만 해 보는 단계입니다. 서버에서 따로 실행하지 않습니다.',
   paper: '오늘부터 실제 시세로 매일 판단하고 가상 기록만 쌓습니다. 실제 주문은 나가지 않습니다.',
-  live: '실제 주문이 나가는 모드입니다.',
+  live: '실제 주문이 나가는 모드입니다. 아래 "실전 운용" 패널의 "실전 켜기"에서만 켤 수 있습니다.',
 };
-export const liveUnavailableText = '실전 운용은 주문 기능 단계(7d–7f) 이후에 켤 수 있습니다.';
 
 export function money(value: number, currency: Currency, fractionDigits?: number) {
   return currency === 'KRW'

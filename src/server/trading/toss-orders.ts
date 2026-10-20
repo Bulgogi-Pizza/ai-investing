@@ -159,6 +159,8 @@ const ERROR_MESSAGES: Record<string, string> = {
   'order-not-found': '주문을 찾을 수 없습니다.',
   'stock-not-found': '종목을 찾을 수 없습니다.',
   'account-not-found': '계좌를 찾을 수 없습니다.',
+  'manually-resolved': '직접 확인해 정리한 주문입니다.',
+  'not-placed': '증권사에 접수되지 않은 것으로 확인해 정리했습니다.',
 };
 export function describeOrderError(info: OrderErrorInfo): string {
   return (

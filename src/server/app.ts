@@ -35,6 +35,8 @@ import {
   type NotificationRepository,
 } from './notify.js';
 import { createPaperRouter, MemoryPaperRepository, type PaperRepository } from './paper.js';
+import { createLiveRouter } from './live.js';
+import { MemoryTradingStore, type TradingStatusStore } from './trading/stores.js';
 import { createAnalysisRouter } from './analysis.js';
 import { createAnalysisEventsRouter } from './analysis-events.js';
 import type { AlgorithmFillSource } from './algorithm-fills.js';
@@ -85,8 +87,10 @@ export type AppOptions = {
   loginThrottle?: LoginThrottle;
   /** Algorithm models, change history, emergency-stop flag and cost settings (owner-only API). */
   algorithmRepository?: AlgorithmRepository;
-  /** Stage 7a keeps live mode off. Only tests set this, to exercise the live-overlap rule. */
+  /** Live mode can be switched on from the screen (default true). `false` refuses every live save. */
   algorithmLiveEnabled?: boolean;
+  /** Live orders, stops and job status for the live panel (owner-only API). Defaults to an empty in-memory store. */
+  tradingStore?: TradingStatusStore;
   /** Paper (virtual) ledger, fills and run history for the 모의 운용 section (owner-only API). */
   paperRepository?: PaperRepository;
   /** Mirrors the job's ALGO_AI_ENABLED so the screen can explain idle AI algorithms. */
@@ -546,13 +550,26 @@ export function createApp(options: AppOptions = {}) {
         : undefined,
       notify: notifications ? (event) => notifications.notify(event) : undefined,
       liveEnabled: options.algorithmLiveEnabled,
+      alertsConfigured: () => notifications?.configured() === true,
+    }),
+  );
+  const paperRepository = options.paperRepository ?? new MemoryPaperRepository();
+  app.use(
+    createPaperRouter({
+      repository: paperRepository,
+      algorithmRepository,
+      ownerUserId: options.ownerUserId,
+      aiEnabled: options.algorithmAiEnabled,
     }),
   );
   app.use(
-    createPaperRouter({
-      repository: options.paperRepository ?? new MemoryPaperRepository(),
-      algorithmRepository,
+    createLiveRouter({
+      repository: algorithmRepository,
+      paper: options.paperRepository ?? paperRepository,
+      trading: options.tradingStore ?? new MemoryTradingStore(),
       ownerUserId: options.ownerUserId,
+      notify: notifications ? (event) => notifications.notify(event) : undefined,
+      liveEnabled: options.algorithmLiveEnabled,
       aiEnabled: options.algorithmAiEnabled,
     }),
   );

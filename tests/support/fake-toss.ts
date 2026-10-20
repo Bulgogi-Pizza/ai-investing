@@ -64,6 +64,13 @@ export class FakeToss implements OrderTransport {
   /** Runs after an order is created (used to flip control flags between orders). */
   onCreated?: (order: FakeOrder) => void;
   malformed = new Set<string>();
+  /** GET /api/v1/prices: last price per symbol (fresh by default; `timestamp` overrides, null = none). */
+  quotes = new Map<
+    string,
+    { price: string; currency?: 'KRW' | 'USD'; timestamp?: string | null }
+  >();
+  /** GET /api/v1/exchange-rate (USD/KRW). null = the endpoint answers 404. */
+  fx: { midRate: string; validFrom?: string; validUntil?: string } | null = { midRate: '1400' };
   now = () => Date.now();
   private seq = 0;
   private readonly idempotency = new Map<string, { at: number; body: string; orderId: string }>();
@@ -121,6 +128,37 @@ export class FakeToss implements OrderTransport {
         const id = decodeURIComponent(request.path.split('/')[4]);
         const found = this.orders.find((o) => o.orderId === id);
         return found ? this.ok(this.view(found)) : this.fail(404, 'order-not-found');
+      }
+      case request.path === '/api/v1/prices': {
+        const wanted = String(q.symbols ?? '').split(',');
+        return this.ok(
+          wanted
+            .filter((symbol) => this.quotes.has(symbol))
+            .map((symbol) => {
+              const quote = this.quotes.get(symbol)!;
+              return {
+                symbol,
+                lastPrice: quote.price,
+                currency: quote.currency ?? (/^[0-9A-Z]{6}$/.test(symbol) ? 'KRW' : 'USD'),
+                timestamp:
+                  quote.timestamp === undefined
+                    ? new Date(this.now() - 5_000).toISOString()
+                    : quote.timestamp,
+              };
+            }),
+        );
+      }
+      case request.path === '/api/v1/exchange-rate': {
+        if (!this.fx) return this.fail(404, 'not-found');
+        return this.ok({
+          baseCurrency: 'USD',
+          quoteCurrency: 'KRW',
+          midRate: this.fx.midRate,
+          rate: this.fx.midRate,
+          rateChangeType: 'EQUAL',
+          validFrom: this.fx.validFrom ?? new Date(this.now() - 60_000).toISOString(),
+          validUntil: this.fx.validUntil ?? new Date(this.now() + 3_600_000).toISOString(),
+        });
       }
       case request.path === '/api/v1/buying-power': {
         const cash = this.buyingPower[q.currency as 'KRW' | 'USD'];

@@ -14,20 +14,26 @@ import {
 import {
   budgetRaised,
   currencyOf,
+  defaultSafeguardSettings,
   defaultSimulationBudget,
+  hardSafeguards,
   diffAlgorithm,
   findLiveOverlap,
   maxAlgorithms,
   parseAlgorithmInput,
   parseCostSettings,
+  parseSafeguardSettings,
+  safeguardRisks,
+  strategyChanged,
   toDefinition,
   type AlgorithmEvent,
   type AlgorithmInput,
   type AlgorithmRecord,
   type Change,
   type CostSettingsRecord,
+  type SafeguardSettingsRecord,
 } from '../lib/algorithmRecords';
-import type { NotificationEvent, NotifyOutcome } from './notify';
+import type { NotificationEvent, NotifyOutcome, RiskIncreaseChange } from './notify';
 import { ownerGate } from './owner';
 
 // ---------------------------------------------------------------------------
@@ -57,12 +63,21 @@ export interface AlgorithmRepository {
   setControl(emergencyStop: boolean, now: string, event: AlgorithmEvent): Promise<boolean>;
   getCosts(): Promise<CostSettingsRecord>;
   putCosts(costs: CostSettingsRecord, event: AlgorithmEvent): Promise<void>;
+  /** Stored live safeguard settings, or the design defaults when nothing was saved. Throws on a malformed document. */
+  getSafeguards(): Promise<SafeguardSettingsRecord>;
+  putSafeguards(settings: SafeguardSettingsRecord, event: AlgorithmEvent): Promise<void>;
+  /** Appends a history entry that is not tied to an algorithm write (append-only). */
+  recordEvent(event: AlgorithmEvent): Promise<void>;
 }
 
 const emptyCosts: CostSettingsRecord = {
   commissionRate: null,
   sellTaxRate: null,
   capitalGainsTax: null,
+  updatedAt: null,
+};
+const defaultSafeguards: SafeguardSettingsRecord = {
+  ...structuredClone(defaultSafeguardSettings),
   updatedAt: null,
 };
 /** Firestore rejects `undefined`; drop it from plain data. */
@@ -75,6 +90,7 @@ export class MemoryAlgorithmRepository implements AlgorithmRepository {
   private events: AlgorithmEvent[] = [];
   private control: ControlState = { emergencyStop: false, updatedAt: null };
   private costs: CostSettingsRecord = structuredClone(emptyCosts);
+  private safeguards: SafeguardSettingsRecord = structuredClone(defaultSafeguards);
   async list() {
     return structuredClone([...this.algorithms.values()].sort(byCreated));
   }
@@ -116,6 +132,16 @@ export class MemoryAlgorithmRepository implements AlgorithmRepository {
     this.costs = structuredClone(costs);
     this.events.push(structuredClone(event));
   }
+  async getSafeguards() {
+    return structuredClone(this.safeguards);
+  }
+  async putSafeguards(settings: SafeguardSettingsRecord, event: AlgorithmEvent) {
+    this.safeguards = structuredClone(settings);
+    this.events.push(structuredClone(event));
+  }
+  async recordEvent(event: AlgorithmEvent) {
+    this.events.push(structuredClone(event));
+  }
 }
 
 export class FirestoreAlgorithmRepository implements AlgorithmRepository {
@@ -131,6 +157,9 @@ export class FirestoreAlgorithmRepository implements AlgorithmRepository {
   }
   private costsRef() {
     return this.db.collection('algorithmSettings').doc('costs');
+  }
+  private safeguardsRef() {
+    return this.db.collection('algorithmSettings').doc('safeguards');
   }
   async list() {
     const snapshot = await this.algorithms()
@@ -195,6 +224,28 @@ export class FirestoreAlgorithmRepository implements AlgorithmRepository {
     batch.set(this.costsRef(), clean(costs));
     batch.create(this.events().doc(event.id), clean(event));
     await batch.commit();
+  }
+  async getSafeguards() {
+    const snapshot = await this.safeguardsRef().get();
+    if (!snapshot.exists) return structuredClone(defaultSafeguards);
+    const data = snapshot.data() ?? {};
+    // The stored document is validated like a request: a bad value must never silently loosen a
+    // safeguard, so a malformed document is an error (the live job then refuses to trade).
+    const parsed = parseSafeguardSettings(data);
+    if (!parsed.ok) throw new Error('Invalid stored safeguard settings');
+    return {
+      ...parsed.value,
+      updatedAt: typeof data.updatedAt === 'string' ? data.updatedAt : null,
+    };
+  }
+  async putSafeguards(settings: SafeguardSettingsRecord, event: AlgorithmEvent) {
+    const batch = this.db.batch();
+    batch.set(this.safeguardsRef(), clean(settings));
+    batch.create(this.events().doc(event.id), clean(event));
+    await batch.commit();
+  }
+  async recordEvent(event: AlgorithmEvent) {
+    await this.events().doc(event.id).create(clean(event));
   }
 }
 
@@ -416,10 +467,17 @@ export type AlgorithmsRouterOptions = {
   candles?: CandleSource;
   notify?: (event: NotificationEvent) => Promise<NotifyOutcome>;
   /**
-   * Live mode stays unavailable until the order stages (7d-7f) exist. Production never sets this;
-   * it exists so the live-overlap rule can be tested end to end.
+   * Whether live mode can be turned on from the screen. Default true (stage 7f). `false` is a
+   * deployment switch that refuses every live save. Whether orders actually go out is decided by
+   * the live job (LIVE_TRADING_ENABLED) and the Cloud Scheduler state, not here.
    */
   liveEnabled?: boolean;
+  /**
+   * True when Telegram alerts can actually be delivered. Turning live on and raising a budget rely on
+   * those alerts (no extra authentication), so both are refused with 409 ALERTS_NOT_CONFIGURED when
+   * this answers false. Absent = not required (unit use).
+   */
+  alertsConfigured?: () => boolean;
   now?: () => Date;
   newId?: () => string;
 };
@@ -432,7 +490,7 @@ const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}
 const liveRejection = bad(
   403,
   'LIVE_NOT_AVAILABLE',
-  '실전 운용은 주문 기능 단계(7d–7f) 이후에 켤 수 있습니다.',
+  '이 배포에서는 실전 운용을 켤 수 없도록 꺼져 있습니다.',
 );
 const outcomeBody = (outcome: NotifyOutcome | undefined) =>
   outcome
@@ -446,6 +504,7 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
   const { repository } = options;
   const now = options.now ?? (() => new Date());
   const newId = options.newId ?? randomUUID;
+  const liveEnabled = options.liveEnabled !== false;
   const router = Router();
   const gate = ownerGate(options.ownerUserId);
   const paths = [
@@ -458,6 +517,18 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
   router.use(paths, gate);
   const notify = async (event: NotificationEvent) =>
     outcomeBody(options.notify ? await options.notify(event) : undefined);
+  /** One risk-increase announcement; the screen reports each outcome exactly. */
+  const announce = async (
+    change: RiskIncreaseChange,
+    algorithmName?: string,
+  ): Promise<{ change: RiskIncreaseChange } & ReturnType<typeof outcomeBody>> => ({
+    change,
+    ...(await notify({
+      kind: 'setting-risk-increase',
+      change,
+      ...(algorithmName === undefined ? {} : { algorithmName }),
+    })),
+  });
   const event = (
     kind: AlgorithmEvent['kind'],
     changes: Change[],
@@ -502,10 +573,34 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     }
     return null;
   };
+  /**
+   * What an algorithm needs to be (or stay) live: a budget in its own currency and no value signal
+   * (the job has no financial-data adapter, so a value-signal algorithm could never pass design
+   * safeguard 6 and would only trap its positions).
+   */
+  const liveRequirements = (input: AlgorithmInput): Rejection | null => {
+    if (input.mode !== 'live') return null;
+    if (input.budget === null)
+      return bad(
+        400,
+        'LIVE_BUDGET_REQUIRED',
+        `실전은 운용 금액 한도(${currencyOf(input.market) === 'KRW' ? '원' : '달러'})를 입력해야 켤 수 있습니다.`,
+      );
+    if (
+      input.template !== 'dualMomentum' &&
+      input.signals.some((s) => s.id === 'value' && s.weight > 0)
+    )
+      return bad(
+        400,
+        'LIVE_VALUE_SIGNAL_UNSUPPORTED',
+        '가치 신호는 재무 데이터 연결 전이라 실전에서 쓸 수 없습니다. 가치 신호를 빼거나 가중치를 0으로 하세요.',
+      );
+    return null;
+  };
   /** Body must carry `algorithm`; live is refused before anything else is looked at. */
   const readInput = (req: Request, res: Response): AlgorithmInput | null => {
     const raw = req.body?.algorithm;
-    if (raw && typeof raw === 'object' && raw.mode === 'live' && !options.liveEnabled) {
+    if (raw && typeof raw === 'object' && raw.mode === 'live' && !liveEnabled) {
       failure(res, liveRejection);
       return null;
     }
@@ -521,13 +616,24 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     res.json({
       algorithms: await repository.list(),
       limits: { maxAlgorithms },
-      liveAvailable: options.liveEnabled === true,
+      liveAvailable: liveEnabled,
     });
   });
 
   router.post('/api/algorithms', async (req, res) => {
     const input = readInput(req, res);
     if (!input) return;
+    // Live is switched on only for an existing algorithm, from its live-enable panel (which shows the
+    // paper record first). Creating one directly in live mode would skip that.
+    if (input.mode === 'live')
+      return failure(
+        res,
+        bad(
+          400,
+          'LIVE_REQUIRES_EXISTING',
+          '실전은 알고리즘을 만든 뒤 "실전 켜기" 화면에서 켤 수 있습니다. 모의나 시뮬레이션으로 먼저 만드세요.',
+        ),
+      );
     const timestamp = now().toISOString();
     const id = newId();
     const result = await repository.mutate(id, (_current, all) => {
@@ -575,6 +681,8 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     if (!input) return;
     const timestamp = now().toISOString();
     let raised = false;
+    let enabling = false;
+    let strategyUpdated = false;
     const result = await repository.mutate(id, (current, all) => {
       if (!current)
         return { reject: bad(404, 'ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.') };
@@ -594,10 +702,32 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
             '시장은 만든 뒤에 바꿀 수 없습니다. 새 알고리즘을 만드세요.',
           ),
         };
-      const rejected = crossRules(input, id, all);
+      const rejected = crossRules(input, id, all) ?? liveRequirements(input);
       if (rejected) return { reject: rejected };
+      // Turning live on needs an explicit confirmation flag (sent by the live-enable panel only), so
+      // a stale or accidental save of the ordinary form can never switch to live.
+      enabling = input.mode === 'live' && current.mode !== 'live';
+      if (enabling && req.body?.liveConfirm !== true)
+        return {
+          reject: bad(
+            400,
+            'LIVE_CONFIRM_REQUIRED',
+            '실전 켜기는 "실전 켜기" 화면에서 확인한 뒤에만 할 수 있습니다.',
+          ),
+        };
       const changes = diffAlgorithm(inputOf(current), input);
       raised = budgetRaised(inputOf(current), input);
+      if ((enabling || raised) && options.alertsConfigured && !options.alertsConfigured())
+        return {
+          reject: bad(
+            409,
+            'ALERTS_NOT_CONFIGURED',
+            '텔레그램 알림이 설정되어 있지 않아 실전 켜기와 운용 금액 상향을 할 수 없습니다. 이 변경들은 알림으로 알려야 하는 위험 증가 변경입니다. 텔레그램 봇 설정을 먼저 연결하세요.',
+          ),
+        };
+      strategyUpdated =
+        current.mode === 'live' && input.mode === 'live' && strategyChanged(changes);
+      const strategyTouched = strategyChanged(changes);
       const targetsChanged = changes.some((c) => c.field === 'targets');
       const record: AlgorithmRecord = {
         ...current,
@@ -607,20 +737,34 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
         currency: current.currency,
         params: current.params,
         targetsChangedAt: targetsChanged ? timestamp : current.targetsChangedAt,
+        ...(strategyTouched
+          ? { strategyChangedAt: timestamp }
+          : current.strategyChangedAt
+            ? { strategyChangedAt: current.strategyChangedAt }
+            : {}),
         updatedAt: timestamp,
         version: current.version + 1,
       };
       return { write: record, event: event('updated', changes, record) };
     });
     if (!result.ok) return failure(res, result);
-    const notification = raised
-      ? await notify({
-          kind: 'setting-risk-increase',
-          change: 'budget-raised',
-          algorithmName: result.record!.name,
-        })
-      : undefined;
-    res.json({ algorithm: result.record, ...(notification ? { notification } : {}) });
+    // Every risk-increasing change is announced right away (no extra authentication by decision).
+    const notifications = [];
+    if (enabling) notifications.push(await announce('live-enabled', result.record!.name));
+    if (raised) notifications.push(await announce('budget-raised', result.record!.name));
+    // A live algorithm's targets, thresholds, weights or sizing changed: it now trades differently.
+    if (strategyUpdated)
+      notifications.push(await announce('live-strategy-changed', result.record!.name));
+    const notification = notifications[0];
+    res.json({
+      algorithm: result.record,
+      ...(notification
+        ? {
+            notification: { status: notification.status, failureCode: notification.failureCode },
+            notifications,
+          }
+        : {}),
+    });
   });
 
   router.delete('/api/algorithms/:id', async (req, res) => {
@@ -628,9 +772,17 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     if (!idPattern.test(id))
       return failure(res, bad(404, 'ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.'));
     const result = await repository.mutate(id, (current) =>
-      current
-        ? { remove: id, event: event('deleted', [], current) }
-        : { reject: bad(404, 'ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.') },
+      !current
+        ? { reject: bad(404, 'ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.') }
+        : current.mode === 'live'
+          ? {
+              reject: bad(
+                409,
+                'LIVE_ACTIVE',
+                '실전 운용 중인 알고리즘은 삭제할 수 없습니다. 먼저 모드를 모의나 시뮬레이션으로 바꾸세요.',
+              ),
+            }
+          : { remove: id, event: event('deleted', [], current) },
     );
     if (!result.ok) return failure(res, result);
     res.sendStatus(204);
@@ -687,7 +839,65 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
   });
 
   router.get('/api/algorithm-settings', async (_req, res) => {
-    res.json({ costs: await repository.getCosts() });
+    let safeguards: SafeguardSettingsRecord | null = null;
+    let safeguardsInvalid = false;
+    try {
+      safeguards = await repository.getSafeguards();
+    } catch {
+      safeguardsInvalid = true;
+    }
+    res.json({
+      costs: await repository.getCosts(),
+      safeguards,
+      safeguardsInvalid,
+      safeguardDefaults: defaultSafeguardSettings,
+      hardLimits: hardSafeguards,
+    });
+  });
+
+  router.put('/api/algorithm-settings/safeguards', async (req, res) => {
+    const parsed = parseSafeguardSettings(req.body?.safeguards);
+    if (!parsed.ok) return failure(res, bad(400, 'INVALID_SAFEGUARDS', parsed.message));
+    let before: SafeguardSettingsRecord;
+    let repair = false;
+    try {
+      before = await repository.getSafeguards();
+    } catch {
+      // A malformed stored document is repaired by this save (always written, even when the values
+      // equal the defaults); the risk comparison is against the defaults.
+      repair = true;
+      before = { ...structuredClone(defaultSafeguardSettings), updatedAt: null };
+    }
+    const after = parsed.value;
+    const changes: Change[] = [];
+    const flat = (v: SafeguardSettingsRecord | typeof after) => ({
+      maxOrdersPerDay: v.maxOrdersPerDay,
+      maxGlobalOrdersPerDay: v.maxGlobalOrdersPerDay,
+      minHoldingTradingDays: v.minHoldingTradingDays,
+      lossStopFraction: v.lossStopFraction,
+      liquidityKRW: v.liquidityMinAvgValue.KRW,
+      liquidityUSD: v.liquidityMinAvgValue.USD,
+    });
+    const b = flat(before);
+    const a = flat(after);
+    for (const key of Object.keys(a) as (keyof typeof a)[])
+      if (a[key] !== b[key])
+        changes.push({ field: 'safeguards', from: `${key}: ${b[key]}`, to: `${key}: ${a[key]}` });
+    if (repair && changes.length === 0)
+      changes.push({
+        field: 'safeguards',
+        from: '저장된 값이 올바르지 않음',
+        to: '올바른 값으로 다시 저장',
+      });
+    if (changes.length === 0) {
+      res.json({ safeguards: before, changed: false, notifications: [] });
+      return;
+    }
+    const record: SafeguardSettingsRecord = { ...after, updatedAt: now().toISOString() };
+    await repository.putSafeguards(record, event('safeguards-updated', changes));
+    const notifications = [];
+    for (const risk of safeguardRisks(before, after)) notifications.push(await announce(risk));
+    res.json({ safeguards: record, changed: true, notifications });
   });
 
   router.put('/api/algorithm-settings', async (req, res) => {

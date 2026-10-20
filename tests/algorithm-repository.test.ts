@@ -35,6 +35,9 @@ class FakeDocRef {
     const data = this.store.get(this.id);
     return { exists: data !== undefined, data: () => structuredClone(data) };
   }
+  async create(data: Doc) {
+    this.apply('create', data);
+  }
   apply(kind: 'set' | 'create' | 'delete', data?: Doc) {
     if (kind === 'delete') return void this.store.delete(this.id);
     assertNoUndefined(data);
@@ -138,6 +141,34 @@ const implementations: [string, () => AlgorithmRepository][] = [
 ];
 
 describe.each(implementations)('algorithm repository: %s', (_name, make) => {
+  it('keeps the live safeguard settings: defaults first, then what was saved, with its event', async () => {
+    const repo = make();
+    expect(await repo.getSafeguards()).toEqual({
+      maxOrdersPerDay: 3,
+      maxGlobalOrdersPerDay: 10,
+      minHoldingTradingDays: 5,
+      lossStopFraction: 0.2,
+      liquidityMinAvgValue: { KRW: 1_000_000_000, USD: 5_000_000 },
+      updatedAt: null,
+    });
+    const saved = {
+      maxOrdersPerDay: 2,
+      maxGlobalOrdersPerDay: 6,
+      minHoldingTradingDays: 7,
+      lossStopFraction: 0.1,
+      liquidityMinAvgValue: { KRW: 2_000_000_000, USD: 8_000_000 },
+      updatedAt: '2026-10-21T00:00:01.000Z',
+    };
+    await repo.putSafeguards(saved, event('sg1', '2026-10-21T00:00:01.000Z', 'safeguards-updated'));
+    expect(await repo.getSafeguards()).toEqual(saved);
+    expect((await repo.listEvents(5))[0]).toMatchObject({ id: 'sg1', kind: 'safeguards-updated' });
+  });
+  it('appends a history entry without an algorithm write', async () => {
+    const repo = make();
+    await repo.recordEvent(event('r1', '2026-10-21T00:00:01.000Z', 'live-stop-released'));
+    expect((await repo.listEvents(5)).map((e) => e.kind)).toEqual(['live-stop-released']);
+  });
+
   it('stores, lists in creation order, updates and removes algorithms with their events', async () => {
     const repo = make();
     for (const [i, name] of ['a', 'b'].entries())

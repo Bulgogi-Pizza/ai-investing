@@ -643,6 +643,96 @@ export class TossClient {
       throw error;
     }
   }
+  /**
+   * Raw authenticated request for the order transport (src/server/trading/toss-transport.ts).
+   * Unlike `request`, it returns HTTP error statuses WITH their parsed body (the order client reads
+   * documented error fields such as the tick-size `data`), never retries, never touches the shared
+   * rate-limit cooldown and has no cache. Fixed host, bearer + account header, timeout,
+   * `redirect: 'error'` and a response-size cap. Network failures, timeouts and oversized bodies
+   * throw a ProviderError whose message is a fixed text: no URL, header or body ever reaches an error
+   * or a log. A failure to obtain a token also throws (nothing was sent).
+   */
+  async authorizedRequest(
+    request: {
+      method: 'GET' | 'POST';
+      /** Absolute API path below `/api/v1/`; the query string is passed separately. */
+      path: string;
+      query?: Record<string, string>;
+      body?: Record<string, unknown>;
+    },
+    options: { timeoutMs?: number; maxBytes?: number } = {},
+  ): Promise<{ status: number; body: unknown; retryAfterSeconds: number | null }> {
+    if (
+      (request.method !== 'GET' && request.method !== 'POST') ||
+      !/^\/api\/v1\/[A-Za-z0-9_\-./=~%]{1,200}$/.test(request.path) ||
+      request.path.split('/').some((segment) => segment === '.' || segment === '..') ||
+      /%(?:2e|2f|5c|00)/i.test(request.path) ||
+      (request.method === 'GET' && request.body !== undefined)
+    )
+      throw new ProviderError(
+        400,
+        'INVALID_PROVIDER_REQUEST',
+        '제공자 요청 형식이 올바르지 않습니다.',
+      );
+    const timeoutMs = Math.min(Math.max(options.timeoutMs ?? 8000, 1000), 30_000);
+    const maxBytes = Math.min(Math.max(options.maxBytes ?? 1024 * 1024, 1024), 4 * 1024 * 1024);
+    const query = request.query ? `?${new URLSearchParams(request.query)}` : '';
+    const token = await this.bearer();
+    let response: Response;
+    try {
+      response = await this.transport(BASE + request.path + query, {
+        method: request.method,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'X-Tossinvest-Account': this.config.accountSeq,
+          ...(request.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(request.body !== undefined ? { body: JSON.stringify(request.body) } : {}),
+        signal: AbortSignal.timeout(timeoutMs),
+        redirect: 'error',
+      });
+    } catch {
+      throw new ProviderError(503, 'PROVIDER_UNREACHABLE', '금융 제공자에 연결할 수 없습니다.');
+    }
+    let text = '';
+    try {
+      const reader = response.body?.getReader();
+      if (reader) {
+        let size = 0;
+        const chunks: Uint8Array[] = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          size += value.byteLength;
+          if (size > maxBytes) {
+            await reader.cancel();
+            throw invalid();
+          }
+          chunks.push(value);
+        }
+        text = Buffer.concat(chunks).toString('utf8');
+      }
+    } catch {
+      throw new ProviderError(503, 'PROVIDER_RESPONSE_INVALID', '제공자 응답을 읽지 못했습니다.');
+    }
+    let body: unknown;
+    if (text) {
+      try {
+        body = JSON.parse(text);
+      } catch {
+        body = undefined;
+      }
+    }
+    const retryAfter = response.headers.get('retry-after');
+    return {
+      status: response.status,
+      body,
+      retryAfterSeconds:
+        retryAfter !== null && /^\d{1,6}$/.test(retryAfter)
+          ? Math.min(Number(retryAfter), 3600)
+          : null,
+    };
+  }
   private async cached<T>(key: string, read: () => Promise<T>): Promise<T> {
     const cached = this.reads.get(key);
     if (cached && cached.expiresAt > Date.now()) return structuredClone(cached.value) as T;

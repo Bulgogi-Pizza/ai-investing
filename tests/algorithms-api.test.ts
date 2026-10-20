@@ -230,7 +230,7 @@ describe('algorithm CRUD, validation and history', () => {
     expect(created).toMatchObject({ version: 1, currency: 'KRW', mode: 'simulation' });
     expect(created.params).toBeDefined();
     const list = await request(app).get('/api/algorithms').set('Cookie', cookie);
-    expect(list.body).toMatchObject({ limits: { maxAlgorithms }, liveAvailable: false });
+    expect(list.body).toMatchObject({ limits: { maxAlgorithms }, liveAvailable: true });
     expect(list.body.algorithms).toHaveLength(1);
 
     const updated = await write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
@@ -322,60 +322,409 @@ describe('algorithm CRUD, validation and history', () => {
   });
 });
 
-describe('live mode is not available in this stage', () => {
-  it('rejects mode live on create and update with 403 LIVE_NOT_AVAILABLE and stores nothing', async () => {
-    const app = appWith();
+describe('live switch (stage 7f)', () => {
+  const putLive = (
+    app: ReturnType<typeof createApp>,
+    cookie: string,
+    created: { id: string; version: number },
+    patch: Record<string, unknown> = {},
+    extra: Record<string, unknown> = { liveConfirm: true },
+  ) =>
+    write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
+      version: created.version,
+      algorithm: algo({ mode: 'live', budget: 1_000_000, ...patch }),
+      ...extra,
+    });
+  const sentTexts = () =>
+    telegram.mock.calls.map((c) => JSON.parse(c[1].body as string).text as string);
+
+  it('a deployment can still switch live off: 403 LIVE_NOT_AVAILABLE and nothing is stored', async () => {
+    const app = appWith({ live: false });
     const cookie = await login(app);
     const response = await write(app, 'post', '/api/algorithms', cookie, {
       algorithm: algo({ mode: 'live', budget: 1_000_000 }),
     });
     expect(response.status).toBe(403);
-    expect(response.body.error).toEqual({
-      code: 'LIVE_NOT_AVAILABLE',
-      message: '실전 운용은 주문 기능 단계(7d–7f) 이후에 켤 수 있습니다.',
-    });
+    expect(response.body.error.code).toBe('LIVE_NOT_AVAILABLE');
     expect(await repository.list()).toEqual([]);
     const created = await create(app, cookie, { mode: 'paper' });
-    const upgrade = await write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
-      version: 1,
-      algorithm: algo({ mode: 'live', budget: 1_000_000 }),
-    });
+    const upgrade = await putLive(app, cookie, created);
     expect(upgrade.status).toBe(403);
     expect((await repository.get(created.id))?.mode).toBe('paper');
-    // Rejected before any notification or event for a live switch.
     expect(await notificationRepository.listRecent(10)).toEqual([]);
+    expect(
+      (await request(app).get('/api/algorithms').set('Cookie', cookie)).body.liveAvailable,
+    ).toBe(false);
   });
-  it('still enforces that live algorithms never share a target (rule ready for 7f)', async () => {
-    const app = appWith({ live: true });
+  it('the gate is gone by default and an algorithm cannot be created directly in live mode', async () => {
+    const app = appWith();
     const cookie = await login(app);
-    await create(app, cookie, {
-      name: '실전 A',
-      mode: 'live',
-      budget: 1_000_000,
-      targets: ['005930'],
+    expect(
+      (await request(app).get('/api/algorithms').set('Cookie', cookie)).body.liveAvailable,
+    ).toBe(true);
+    const response = await write(app, 'post', '/api/algorithms', cookie, {
+      algorithm: algo({ mode: 'live', budget: 1_000_000 }),
     });
-    const overlap = await write(app, 'post', '/api/algorithms', cookie, {
-      algorithm: algo({
-        name: '실전 B',
-        mode: 'live',
-        budget: 1_000_000,
-        targets: ['005930', 'X1'],
-      }),
+    expect(response.status).toBe(400);
+    expect(response.body.error.code).toBe('LIVE_REQUIRES_EXISTING');
+    expect(await repository.list()).toEqual([]);
+  });
+  it('turning live on needs the explicit confirmation flag, a budget and no value signal', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const created = await create(app, cookie, { mode: 'paper' });
+    const noConfirm = await putLive(app, cookie, created, {}, {});
+    expect(noConfirm.status).toBe(400);
+    expect(noConfirm.body.error.code).toBe('LIVE_CONFIRM_REQUIRED');
+    const falsy = await putLive(app, cookie, created, {}, { liveConfirm: 'true' });
+    expect(falsy.body.error.code).toBe('LIVE_CONFIRM_REQUIRED');
+    const noBudget = await putLive(app, cookie, created, { budget: null });
+    expect(noBudget.status).toBe(400);
+    expect(noBudget.body.error.code).toBe('LIVE_BUDGET_REQUIRED');
+    const value = await putLive(app, cookie, created, {
+      signals: [
+        { id: 'momentum', weight: 0.5 },
+        { id: 'value', weight: 0.5 },
+      ],
     });
+    expect(value.status).toBe(400);
+    expect(value.body.error.code).toBe('LIVE_VALUE_SIGNAL_UNSUPPORTED');
+    expect((await repository.get(created.id))?.mode).toBe('paper');
+    expect(telegram).not.toHaveBeenCalled();
+    // A zero-weight value signal is fine.
+    const ok = await putLive(app, cookie, created, {
+      signals: [
+        { id: 'momentum', weight: 1 },
+        { id: 'value', weight: 0 },
+      ],
+    });
+    expect(ok.status, JSON.stringify(ok.body)).toBe(200);
+    expect(ok.body.algorithm.mode).toBe('live');
+  });
+  it('announces live-enabled on Telegram once, never with an amount, and records the change', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const created = await create(app, cookie, { mode: 'paper', budget: 1_000_000 });
+    const response = await putLive(app, cookie, created, { budget: 1_000_000 });
+    expect(response.status).toBe(200);
+    expect(response.body.notification).toEqual({ status: 'sent' });
+    expect(response.body.notifications).toEqual([{ change: 'live-enabled', status: 'sent' }]);
+    expect(telegram).toHaveBeenCalledTimes(1);
+    const [text] = sentTexts();
+    expect(text).toContain('실전 매매 켜기');
+    expect(text).toContain('모멘텀 A');
+    expect(text).not.toMatch(/1000000|1,000,000/);
+    const events = await request(app).get('/api/algorithm-events').set('Cookie', cookie);
+    expect(events.body.events[0]).toMatchObject({
+      kind: 'updated',
+      changes: [{ field: 'mode', from: 'paper', to: 'live' }],
+    });
+    // Saving the live algorithm again (no mode change, same budget) announces nothing more.
+    const again = await write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
+      version: 2,
+      algorithm: algo({ mode: 'live', budget: 1_000_000, name: '모멘텀 A2' }),
+    });
+    expect(again.status).toBe(200);
+    expect(again.body.notification).toBeUndefined();
+    expect(telegram).toHaveBeenCalledTimes(1);
+  });
+  it('enabling live and raising the budget in one save announces both', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const created = await create(app, cookie, { mode: 'paper', budget: 500_000 });
+    const response = await putLive(app, cookie, created, { budget: 2_000_000 });
+    expect(response.body.notifications.map((n: { change: string }) => n.change)).toEqual([
+      'live-enabled',
+      'budget-raised',
+    ]);
+    expect(telegram).toHaveBeenCalledTimes(2);
+  });
+  it('a live algorithm keeps its budget and cannot be deleted; going back to paper is allowed without confirmation', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const created = await create(app, cookie, { mode: 'paper' });
+    expect((await putLive(app, cookie, created)).status).toBe(200);
+    const clear = await write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
+      version: 2,
+      algorithm: algo({ mode: 'live', budget: null }),
+    });
+    expect(clear.status).toBe(400);
+    expect(clear.body.error.code).toBe('LIVE_BUDGET_REQUIRED');
+    const del = await write(app, 'delete', `/api/algorithms/${created.id}`, cookie);
+    expect(del.status).toBe(409);
+    expect(del.body.error.code).toBe('LIVE_ACTIVE');
+    expect(await repository.get(created.id)).not.toBeNull();
+    const calls = telegram.mock.calls.length;
+    const back = await write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
+      version: 2,
+      algorithm: algo({ mode: 'paper', budget: 1_000_000 }),
+    });
+    expect(back.status).toBe(200);
+    expect(back.body.algorithm.mode).toBe('paper');
+    expect(telegram.mock.calls.length).toBe(calls); // a risk reduction is not announced
+    expect((await write(app, 'delete', `/api/algorithms/${created.id}`, cookie)).status).toBe(204);
+  });
+  it('a failing or missing Telegram never blocks turning live on, and the screen is told', async () => {
+    telegram.mockRejectedValue(new Error('network down'));
+    let app = appWith();
+    let cookie = await login(app);
+    let created = await create(app, cookie, { mode: 'paper', name: '실패 알림' });
+    let response = await putLive(app, cookie, created, { name: '실패 알림' });
+    expect(response.status).toBe(200);
+    expect(response.body.notifications[0]).toMatchObject({
+      change: 'live-enabled',
+      status: 'failed',
+    });
+  });
+  it('without a configured Telegram notifier, turning live on and raising a budget are refused (409)', async () => {
+    const app = appWith({ notifier: false });
+    const cookie = await login(app);
+    const created = await create(app, cookie, {
+      mode: 'paper',
+      name: '미설정 알림',
+      budget: 500_000,
+    });
+    const live = await putLive(app, cookie, created, { name: '미설정 알림', budget: 500_000 });
+    expect(live.status).toBe(409);
+    expect(live.body.error.code).toBe('ALERTS_NOT_CONFIGURED');
+    expect((await repository.get(created.id))?.mode).toBe('paper');
+    const raise = await write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
+      version: 1,
+      algorithm: algo({ name: '미설정 알림', mode: 'paper', budget: 900_000 }),
+    });
+    expect(raise.status).toBe(409);
+    expect(raise.body.error.code).toBe('ALERTS_NOT_CONFIGURED');
+    expect((await repository.get(created.id))?.budget).toBe(500_000);
+    // Lowering the budget or changing something harmless is still possible without alerts.
+    const lower = await write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
+      version: 1,
+      algorithm: algo({ name: '미설정 알림', mode: 'paper', budget: 100_000 }),
+    });
+    expect(lower.status).toBe(200);
+  });
+  it("announces a change to a live algorithm's targets, thresholds, weights or sizing; other edits stay quiet", async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const created = await create(app, cookie, { mode: 'paper' });
+    expect((await putLive(app, cookie, created)).status).toBe(200);
+    telegram.mockClear();
+    const edit = (version: number, patch: Record<string, unknown>) =>
+      write(app, 'put', `/api/algorithms/${created.id}`, cookie, {
+        version,
+        algorithm: algo({ mode: 'live', budget: 1_000_000, ...patch }),
+      });
+    const renamed = await edit(2, { name: '이름만 변경' });
+    expect(renamed.body.notifications).toBeUndefined();
+    expect(telegram).not.toHaveBeenCalled();
+    const retargeted = await edit(3, { name: '이름만 변경', targets: ['005930', '035720'] });
+    expect(retargeted.body.notifications).toEqual([
+      { change: 'live-strategy-changed', status: 'sent' },
+    ]);
+    const thresholds = await edit(4, {
+      name: '이름만 변경',
+      targets: ['005930', '035720'],
+      buyThreshold: 0.9,
+    });
+    expect(thresholds.body.notifications[0].change).toBe('live-strategy-changed');
+    expect(telegram).toHaveBeenCalledTimes(2);
+    const text = JSON.parse(telegram.mock.calls[0][1].body as string).text as string;
+    expect(text).toContain('실전 알고리즘 전략 변경');
+    expect(text).not.toMatch(/005930|035720/);
+    // A paper algorithm's strategy edit is not announced, and records when the strategy changed.
+    const paper = await create(app, cookie, { name: '모의만', mode: 'paper', targets: ['000660'] });
+    telegram.mockClear();
+    const paperEdit = await write(app, 'put', `/api/algorithms/${paper.id}`, cookie, {
+      version: 1,
+      algorithm: algo({ name: '모의만', mode: 'paper', targets: ['000660', '051910'] }),
+    });
+    expect(paperEdit.body.notifications).toBeUndefined();
+    expect(paperEdit.body.algorithm.strategyChangedAt).toBeTruthy();
+    expect(telegram).not.toHaveBeenCalled();
+  });
+  it('still enforces that live algorithms never share a target', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const a = await create(app, cookie, { name: '실전 A', mode: 'paper', targets: ['005930'] });
+    expect((await putLive(app, cookie, a, { name: '실전 A', targets: ['005930'] })).status).toBe(
+      200,
+    );
+    const b = await create(app, cookie, {
+      name: '실전 B',
+      mode: 'paper',
+      targets: ['005930', 'X1'],
+    });
+    const overlap = await putLive(app, cookie, b, { name: '실전 B', targets: ['005930', 'X1'] });
     expect(overlap.status).toBe(409);
     expect(overlap.body.error.code).toBe('LIVE_TARGET_OVERLAP');
     expect(overlap.body.error.message).toContain('실전 A');
     expect(overlap.body.error.message).toContain('005930');
     // Paper algorithms may overlap with everything.
     await create(app, cookie, { name: '모의 C', mode: 'paper', targets: ['005930'] });
-    const paper = await create(app, cookie, { name: '모의 D', mode: 'paper', targets: ['X2'] });
-    // Moving a paper algorithm to live on an occupied symbol is refused too.
-    const move = await write(app, 'put', `/api/algorithms/${paper.id}`, cookie, {
-      version: 1,
-      algorithm: algo({ name: '모의 D', mode: 'live', budget: 1, targets: ['X2', '005930'] }),
+    expect((await repository.get(b.id))?.mode).toBe('paper');
+  });
+});
+
+describe('live safeguard settings', () => {
+  const putSafeguards = (
+    app: ReturnType<typeof createApp>,
+    cookie: string,
+    patch: Record<string, unknown> = {},
+  ) =>
+    write(app, 'put', '/api/algorithm-settings/safeguards', cookie, {
+      safeguards: {
+        maxOrdersPerDay: 3,
+        maxGlobalOrdersPerDay: 10,
+        minHoldingTradingDays: 5,
+        lossStopFraction: 0.2,
+        liquidityMinAvgValue: { KRW: 1_000_000_000, USD: 5_000_000 },
+        ...patch,
+      },
     });
-    expect(move.status).toBe(409);
-    expect(move.body.error.code).toBe('LIVE_TARGET_OVERLAP');
+  const changes = () =>
+    telegram.mock.calls.map((c) => JSON.parse(c[1].body as string).text as string);
+
+  it('exposes the design defaults and the fixed hard limits', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const body = (await request(app).get('/api/algorithm-settings').set('Cookie', cookie)).body;
+    expect(body.safeguards).toEqual({
+      maxOrdersPerDay: 3,
+      maxGlobalOrdersPerDay: 10,
+      minHoldingTradingDays: 5,
+      lossStopFraction: 0.2,
+      liquidityMinAvgValue: { KRW: 1_000_000_000, USD: 5_000_000 },
+      updatedAt: null,
+    });
+    expect(body.hardLimits).toEqual({ maxOrderValueKrw: 100_000_000, maxQuoteAgeSeconds: 60 });
+    expect(body.safeguardsInvalid).toBe(false);
+  });
+  it('the hard limits cannot be edited: unknown keys are ignored and never stored', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const response = await putSafeguards(app, cookie, {
+      maxOrderValueKrw: 999_999_999_999,
+      maxQuoteAgeSeconds: 3600,
+      maxOrderValue: 1,
+    });
+    expect(response.status).toBe(200);
+    expect(response.body.changed).toBe(false);
+    const stored = await repository.getSafeguards();
+    expect(JSON.stringify(stored)).not.toContain('maxOrderValue');
+    expect(JSON.stringify(stored)).not.toContain('maxQuoteAge');
+  });
+  it.each([
+    ['maxOrdersPerDay', { maxOrdersPerDay: 4 }, 'max-orders-raised', '하루 최대 주문 횟수 상향'],
+    [
+      'maxGlobalOrdersPerDay',
+      { maxGlobalOrdersPerDay: 11 },
+      'max-orders-raised',
+      '하루 최대 주문 횟수 상향',
+    ],
+    [
+      'minHoldingTradingDays',
+      { minHoldingTradingDays: 4 },
+      'min-holding-lowered',
+      '최소 보유 기간 단축',
+    ],
+    ['lossStopFraction', { lossStopFraction: 0.25 }, 'loss-stop-loosened', '손실 정지 기준 완화'],
+    [
+      'liquidity KRW',
+      { liquidityMinAvgValue: { KRW: 900_000_000, USD: 5_000_000 } },
+      'liquidity-lowered',
+      '최소 거래대금 기준 하향',
+    ],
+    [
+      'liquidity USD',
+      { liquidityMinAvgValue: { KRW: 1_000_000_000, USD: 4_000_000 } },
+      'liquidity-lowered',
+      '최소 거래대금 기준 하향',
+    ],
+  ])(
+    'raising risk via %s sends one setting-risk-increase alert',
+    async (_n, patch, change, text) => {
+      const app = appWith();
+      const cookie = await login(app);
+      const response = await putSafeguards(app, cookie, patch);
+      expect(response.status, JSON.stringify(response.body)).toBe(200);
+      expect(response.body.changed).toBe(true);
+      expect(response.body.notifications).toEqual([{ change, status: 'sent' }]);
+      expect(changes()).toHaveLength(1);
+      expect(changes()[0]).toContain(text);
+      expect(changes()[0]).not.toMatch(/\d{2,}/); // no numbers: no amounts, rates or counts
+      const events = await request(app).get('/api/algorithm-events').set('Cookie', cookie);
+      expect(events.body.events[0].kind).toBe('safeguards-updated');
+      expect(events.body.events[0].changes[0].field).toBe('safeguards');
+    },
+  );
+  it('tightening announces nothing; several risky changes announce each kind once', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    const tighter = await putSafeguards(app, cookie, {
+      maxOrdersPerDay: 2,
+      maxGlobalOrdersPerDay: 5,
+      minHoldingTradingDays: 10,
+      lossStopFraction: 0.1,
+      liquidityMinAvgValue: { KRW: 2_000_000_000, USD: 8_000_000 },
+    });
+    expect(tighter.body.changed).toBe(true);
+    expect(tighter.body.notifications).toEqual([]);
+    expect(telegram).not.toHaveBeenCalled();
+    // Back to the defaults is relative to the stored (tighter) values: that is risk-increasing.
+    const back = await putSafeguards(app, cookie);
+    expect(back.body.notifications.map((n: { change: string }) => n.change)).toEqual([
+      'max-orders-raised',
+      'min-holding-lowered',
+      'loss-stop-loosened',
+      'liquidity-lowered',
+    ]);
+    expect(telegram).toHaveBeenCalledTimes(4);
+  });
+  it('rejects out-of-range or malformed values and stores nothing', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    for (const patch of [
+      { maxOrdersPerDay: 0 },
+      { maxOrdersPerDay: 2.5 },
+      { maxGlobalOrdersPerDay: 1000 },
+      { minHoldingTradingDays: -1 },
+      { lossStopFraction: 0 },
+      { lossStopFraction: 0.9 },
+      { liquidityMinAvgValue: { KRW: 1, USD: 5_000_000 } },
+      { liquidityMinAvgValue: { KRW: 1_000_000_000 } },
+      { liquidityMinAvgValue: null },
+    ]) {
+      const response = await putSafeguards(app, cookie, patch);
+      expect(response.status, JSON.stringify(patch)).toBe(400);
+      expect(response.body.error.code).toBe('INVALID_SAFEGUARDS');
+    }
+    expect((await repository.getSafeguards()).updatedAt).toBeNull();
+    expect(telegram).not.toHaveBeenCalled();
+  });
+  it('saving over an invalid stored document always writes (repairs), even when the values equal the defaults', async () => {
+    const app = appWith();
+    const cookie = await login(app);
+    vi.spyOn(repository, 'getSafeguards').mockRejectedValueOnce(new Error('malformed'));
+    const response = await putSafeguards(app, cookie);
+    expect(response.status).toBe(200);
+    expect(response.body.changed).toBe(true);
+    expect(response.body.notifications).toEqual([]);
+    expect((await repository.getSafeguards()).updatedAt).not.toBeNull();
+    const events = await request(app).get('/api/algorithm-events').set('Cookie', cookie);
+    expect(events.body.events[0].kind).toBe('safeguards-updated');
+    // And a repair that RAISES risk compared with the defaults is still announced.
+    vi.spyOn(repository, 'getSafeguards').mockRejectedValueOnce(new Error('malformed'));
+    const risky = await putSafeguards(app, cookie, { maxOrdersPerDay: 5 });
+    expect(risky.body.notifications.map((n: { change: string }) => n.change)).toEqual([
+      'max-orders-raised',
+    ]);
+  });
+  it('a non-owner cannot read or change them', async () => {
+    const app = appWith({ owner: false });
+    const cookie = await login(app);
+    expect((await request(app).get('/api/algorithm-settings').set('Cookie', cookie)).status).toBe(
+      503,
+    );
+    expect((await putSafeguards(app, cookie, { maxOrdersPerDay: 9 })).status).toBe(503);
   });
 });
 

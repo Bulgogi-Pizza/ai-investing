@@ -205,3 +205,41 @@ gcloud run jobs execute investing-algo-paper --region=asia-northeast3 \
 ### 비용 메모
 
 Scheduler 작업이 4개가 되어 무료 3개를 넘는다(초과분 작업당 월 약 $0.10, 가격표 재확인 필요). Cloud Run Job은 하루 2회(국내 1, 미국 1) 몇 분, 일봉 500개 조회는 종목당 3쪽이라 알고리즘 수 × 종목 수 × 약 3회 호출을 0.25초 간격으로 보낸다. 토스 호출 한도의 실제 값은 아직 모른다(실호출 확인 대상).
+
+## 실전 작업 (algo-live, 7f)
+
+**실제 주문이 나가는 작업이다. 기본은 꺼져 있고, 켜는 순서를 지킨다.** 설계와 흐름은 [trading.md](../implementation/trading.md#연결-7e7f), 화면은 [algorithm.md](../implementation/algorithm.md#7f-실전-운용-구현-2026-10-21-운영-적용-전-실주문-미검증)에 있다. 이 PR은 합성 테스트와 `terraform validate`만 거쳤고 운영 적용·실주문은 하지 않았다.
+
+### 구성
+
+- Cloud Run Job `investing-algo-live`(배포 워크플로 `Deploy live algorithm job`): 같은 이미지 digest·`investing-jobs` 계정·VPC·토스 비밀 숫자 버전 + 텔레그램 비밀(없으면 경고 후 배포하지만 **작업이 시작을 거부한다**), `--command=node --args=--import,tsx,src/jobs/algo-live.ts`, `--max-retries=0`, 환경 변수 `ALGO_AI_ENABLED=false`, **`LIVE_TRADING_ENABLED`(이 작업에만, 값은 GitHub 저장소 변수 `LIVE_TRADING_ENABLED`에서 온다: 정확히 `true`일 때만 `true`, 변수가 없거나 다른 값이면 `false`로 배포)**. `investing-scheduler`에 이 job의 `run.invoker`를 부여한다.
+- **실전은 문이 세 개이고, 거기에 배포 스위치가 하나 더 있다.** (1) 사용자가 알고리즘마다 화면에서 "실전 켜기"를 누른다. (2) 운영자가 `live_schedules_enabled = true`로 Scheduler를 켠다. (3) 작업이 `LIVE_TRADING_ENABLED=true`로 배포되어 있다. 그리고 4번째로, 이 값은 코드나 배포 파일에 박혀 있지 않고 **저장소 변수**(Settings > Secrets and variables > Actions > Variables)다. 변수를 만들지 않으면 첫 배포는 스위치를 꺼 둔다. 켜려면 변수를 `true`로 만들고 `Deploy GCP`를 다시 실행(재배포)한다. 끄려면 변수를 지우거나 `false`로 바꾸고 재배포하거나, 즉시는 아래 `gcloud run jobs update`를 쓴다.
+- 킬 스위치: `LIVE_TRADING_ENABLED`가 정확히 `true`가 아니면 작업은 설정 오류(종료 코드 2)로 끝나고 토스·Firestore에 접근하지 않는다. 화면 설정과 무관한 배포 수준 스위치다. 끄려면 `gcloud run jobs update investing-algo-live --update-env-vars=LIVE_TRADING_ENABLED=false`(다음 배포는 저장소 변수 값으로 되돌리므로 영구히 끄려면 변수를 지우거나 `false`로 한다) 또는 Scheduler를 일시 정지한다.
+- Terraform `infra/gcp/jobs-live.tf`(변수 `live_schedules_enabled`, 기본 `false` = 일시 정지): `investing-algo-live-kr`(평일 09:05 KST), `investing-algo-live-us`(평일 22:35·23:35 KST, 서머타임은 달력이 정해 한 슬롯만 동작). 비밀 접근을 추가하지 않는다(`investing-jobs`가 이미 토스·텔레그램 접근을 가진다). **예상 `terraform plan`: Scheduler 작업 2개 추가(paused)만.** 변수를 `true`로 바꾸면 그 두 개의 `paused`만 바뀐다.
+- Cloud Run Job `investing-order-access-check`(`Deploy order access check job`): 토스 비밀만, `--args=--import,tsx,src/jobs/order-access-check.ts`, 일정·`run.invoker` 없음, `LIVE_TRADING_ENABLED` 없음.
+- CI `container` 작업이 새 파일(`algo-live.ts`, `algo-live-data.ts`, `order-access-check.ts`, `toss-transport.ts`, `executor.ts`, `lib/algo/live.ts`) 존재를 검사한다.
+
+### 감독·사용자가 지키는 순서 (하나라도 아니면 다음으로 가지 않는다)
+
+1. `node scripts/gcp.mjs plan`으로 위의 Scheduler 2개(paused)만 추가되는지 확인하고 `apply`. **`live_schedules_enabled`는 아직 `false`.**
+2. 이 PR 병합 → 배포. **저장소 변수 `LIVE_TRADING_ENABLED`는 아직 만들지 않는다(그러면 작업이 꺼진 채로 배포된다).** `gcloud run jobs describe investing-algo-live`와 `investing-order-access-check`(개인 계정·프로젝트 명시)로 서비스 계정, VPC, 비밀 버전, `ALGO_AI_ENABLED=false`, `LIVE_TRADING_ENABLED=false`(live 작업에만 있음)를 눈으로 확인한다. 텔레그램 비밀이 연결되어 있는지 확인한다(없으면 작업이 시작하지 않는다).
+3. **주문 권한 읽기 확인(주문을 내지 않는다)**: 고정 출구 IP를 쓰는 이 작업을 한 번 실행한다.
+
+```sh
+gcloud run jobs execute investing-order-access-check --region=asia-northeast3 \
+  --account=<개인 계정> --project=<개인 프로젝트> --wait
+# 같은 일을 명령을 명시해서: --args=--import,tsx,src/jobs/order-access-check.ts 를 덧붙여도 된다.
+```
+
+종료 코드 0이고 로그가 `status: all-ok`이면 통과다(`denied`는 권한 거부, `failed`는 그 밖의 실패. 로그에는 상태와 코드만 있다). 결과는 화면의 "주문 권한 확인"에도 나타난다. 통과하지 못하면 여기서 멈추고 원인을 확인한다. 4. **사용자가 토스증권 WTS 설정 > Open API 화면에서 주문 관련 설정을 직접 확인한다**(읽기 확인은 주문 권한 자체를 증명하지 않는다). 5. **사용자가 화면에서 알고리즘 하나를 골라 운용 금액을 작게 입력하고 "실전 켜기"를 누른다.** 텔레그램에 `실전 매매 켜기` 알림이 오는지 확인한다. 이때까지는 실전 일정이 꺼져 있어 주문이 나가지 않으며 화면이 그렇게 알린다. 6. **운영자가 먼저 저장소 변수 `LIVE_TRADING_ENABLED`를 `true`로 만들고 재배포해 `gcloud run jobs describe investing-algo-live`에서 `true`를 확인한 뒤, `terraform.tfvars`(gitignore 대상)에 `live_schedules_enabled = true`를 넣고 `plan`(Scheduler 두 개의 `paused`만 바뀌어야 한다)·`apply`.** 7. **첫 주문을 지켜본다**: 다음 개장 직후(한국 09:05 KST) 로그, 화면의 실전 주문·보류·차단 기록, 텔레그램(체결·거부·자동 정지·접수 여부 미확인), 토스증권 앱의 실제 주문을 서로 대조한다. 첫 주문이 거부되면 알고리즘이 자동 정지되고 알림이 온다. 이상하면 **긴급 정지**를 누르거나 `live_schedules_enabled`를 `false`로 되돌린다.
+
+### 문제 해결
+
+| 증상                               | 의미                                                                                                                                                                                                                                                                                                                                                           |
+| ---------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 종료 코드 2, `JOB_CONFIG_INVALID`  | `LIVE_TRADING_ENABLED`가 `true`가 아니거나 텔레그램·`APP_ORIGIN`·토스·시장 설정이 없다. 작업은 아무것도 하지 않았다                                                                                                                                                                                                                                            |
+| 하트비트 `OUTSIDE_OPEN_WINDOW`     | 개장 직후 20분 창 밖(미국 슬롯 두 개 중 해당 없는 쪽) 또는 이미 끝난 날. 정상                                                                                                                                                                                                                                                                                  |
+| 하트비트 `RUN_ALREADY_COMPLETE`    | 같은 시장·날짜는 한 번만 돈다. 정상                                                                                                                                                                                                                                                                                                                            |
+| 화면 "실전 일정이 아직 꺼져 있어…" | 4일 넘게(또는 한 번도) 실전 작업이 돌지 않았다(작업은 영업일마다 돌고 휴장일에도 기록을 남긴다). 순서 6을 했는지, Scheduler가 일시 정지가 아닌지 확인                                                                                                                                                                                                          |
+| 알고리즘 "정지"                    | 누적 손실 한도, 권한 거부(401/403), 첫 주문 거부 중 하나. 사유를 읽고 원인을 해결한 뒤 화면에서 "정지 해제"                                                                                                                                                                                                                                                    |
+| "접수 여부 미확인" 주문            | 응답을 받지 못한 주문. 동기화가 미체결·종결 주문에서 유일한 일치를 찾으면 이어받고, 못 찾으면 토스증권 앱에서 확인한 뒤 화면의 미확인 주문 정리로 결과를 기록한다. 한 세션이 지나도 남으면 알고리즘이 자동 정지된다. 마지막 실행이 실패·일부 실패면 화면이 오류 색으로 보여 주고, 긴급 정지·정지 상태를 읽지 못한 경우도 실패로 보고되어 작업 실패 알림이 간다 |
