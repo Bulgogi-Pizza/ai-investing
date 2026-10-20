@@ -6,20 +6,20 @@
 
 Git에 없는 파일이 있어서 저장소를 clone하는 것만으로는 이어서 작업할 수 없다. 아래 파일은 비밀번호 관리자나 암호화된 저장소처럼 안전한 경로로 직접 옮긴다. Git, 채팅, 메신저로 보내지 않는다.
 
-| 파일                                                      | 용도                                                               |
-| --------------------------------------------------------- | ------------------------------------------------------------------ |
-| `.local/deployment.json`                                  | 개인 GCP 계정·프로젝트 지정. 모든 운영 스크립트가 읽는다           |
-| `.local/deployment-account.md`                            | 사용 금지 회사 계정·프로젝트 명시. 없으면 운영 스크립트가 중단한다 |
-| `.local/owner-access.json`                                | 최초 관리자 로그인 정보와 소유자 ID                                |
-| `infra/gcp/terraform.tfstate`, `terraform.tfstate.backup` | 실제 인프라 상태. 없으면 Terraform이 리소스를 새로 만들려 한다     |
-| `infra/gcp/terraform.tfvars`                              | 프로젝트·저장소 변수(비밀 아님, gitignore 대상)                    |
+| 파일                           | 용도                                                                                                             |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------- |
+| `.local/deployment.json`       | 개인 GCP 계정·프로젝트 지정. 모든 운영 스크립트가 읽는다                                                         |
+| `.local/deployment-account.md` | 사용 금지 회사 계정·프로젝트 명시. 없으면 운영 스크립트가 중단한다                                               |
+| `.local/owner-access.json`     | 최초 관리자 로그인 정보와 소유자 ID                                                                              |
+| `.local/gcs-backend.hcl`       | Terraform 원격 state 위치(비공개 GCS 버킷·prefix). state 파일 자체는 2026-10-21부터 GCS에 있으므로 옮기지 않는다 |
+| `infra/gcp/terraform.tfvars`   | 프로젝트·저장소 변수(비밀 아님, gitignore 대상)                                                                  |
 
 새 컴퓨터에서 할 일:
 
 1. `gh auth login -h github.com` 후 저장소를 clone하고 `npm ci`를 실행한다.
 2. `gcloud auth login <.local/deployment.json의 account>`로 사용자가 지정한 개인 계정에 로그인한다. 기본 프로젝트 설정에 의존하지 않고, 모든 명령에 계정·프로젝트를 명시한다([AGENTS.md](../../AGENTS.md)의 Deployment identity boundary).
 3. 위 파일을 같은 경로에 둔 뒤 `node scripts/gcp.mjs doctor`와 `node scripts/connect-toss.mjs`(읽기 전용 사전 확인)로 접근을 확인한다.
-4. `cd infra/gcp && terraform init` 후 `node scripts/gcp.mjs plan` 결과가 "No changes"인지 확인한다. Terraform 버전은 state와 같은 1.14.3을 쓴다.
+4. `node scripts/gcp.mjs init`(원격 state 연결) 후 `node scripts/gcp.mjs plan` 결과가 "No changes"인지 확인한다. Terraform 버전은 state와 같은 1.14.3을 쓴다.
 
 Windows 참고(2026-10-21 확인):
 
@@ -244,6 +244,6 @@ Windows 참고(2026-10-21 확인):
 - (완료 2026-10-21) 운영 스크립트 세 개가 Windows에서도 gcloud를 셸 없이 실행한다. 비밀은 계속 stdin으로만 넘긴다. 위 Windows 참고를 본다.
 - `.gitattributes`에 `* text=auto eol=lf`를 추가해 Windows에서도 Prettier 검사가 통과하게 한다.
 
-- Terraform 상태 파일을 로컬에서 접근 제한된 원격 저장소(GCS backend)로 옮긴다. 지금은 한 컴퓨터에만 있어 분실 시 인프라 관리가 끊긴다.
+- (완료 2026-10-21) Terraform state를 개인 프로젝트의 비공개 GCS 버킷(버전 관리, 공개 접근 차단, 균일 접근)으로 옮겼다. 이전 직후 `plan`은 "No changes"였다. 이전 전 로컬 state는 `.local/tfstate-backup-20261021/`에 남겨 두었다.
 - `connect-toss.mjs` 사전 확인은 배포 이미지에 `toss-setup.ts`가 있는지 직접 검사하지 않는다. 읽기 전용으로 이미지 내용을 확인할 방법이 없고, CI `container` 작업이 모든 이미지에서 이 파일을 검증한다. 근거는 [토스 연결 문서](../operations/toss-setup.md)에 있다.
 - 2026-10-20 첫 사전 확인에서 gcloud 응답이 60초 넘게 지연되어 실패한 적이 있다. 재실행 시 정상이었고 원인은 확인하지 못했다.
