@@ -35,12 +35,22 @@ variable "billing_account" {
   type    = string
   default = ""
 }
-variable "monthly_budget_usd" {
+variable "monthly_budget_amount" {
   type    = number
   default = 10
 }
+
+variable "budget_currency" {
+  type    = string
+  default = "USD"
+  validation {
+    condition     = can(regex("^[A-Z]{3}$", var.budget_currency))
+    error_message = "Use the billing account currency code."
+  }
+}
+
 locals {
-  services = toset(["run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com"])
+  services = toset(["cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com"])
 }
 resource "google_project_service" "api" {
   for_each           = local.services
@@ -128,8 +138,8 @@ resource "google_billing_budget" "app" {
   }
   amount {
     specified_amount {
-      currency_code = "USD"
-      units         = tostring(var.monthly_budget_usd)
+      currency_code = var.budget_currency
+      units         = tostring(var.monthly_budget_amount)
     }
   }
   threshold_rules { threshold_percent = 0.5 }
