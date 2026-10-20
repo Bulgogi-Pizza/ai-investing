@@ -9,8 +9,10 @@ import { BacktestPanel } from './BacktestPanel';
 import { CostSettings } from './CostSettings';
 import { EmergencyStop } from './EmergencyStop';
 import { HistoryList, NotificationsList } from './HistoryAndNotifications';
+import { LivePanel } from './LivePanel';
 import { PaperPanel } from './PaperPanel';
-import { invalidResponse, isRecord, liveUnavailableText, modeLabels, money } from './shared';
+import { SafeguardSettings } from './SafeguardSettings';
+import { invalidResponse, isRecord, modeLabels, money } from './shared';
 import './algorithms.css';
 
 type ListData = { algorithms: AlgorithmRecord[] };
@@ -32,7 +34,10 @@ export function ModeBadge({ mode }: { mode: AlgorithmRecord['mode'] }) {
   );
 }
 
-/** 내 자산 > 알고리즘. Nothing here places an order; live mode is disabled until stage 7f. */
+/**
+ * 내 자산 > 알고리즘. Orders are placed only by the live job, never by this screen; the live-enable
+ * panel switches an algorithm to live mode (explicit confirmation, Telegram alert).
+ */
 export default function AlgorithmsScreen() {
   const { state, retry } = useApiResource('/api/algorithms', parseList);
   // History and notifications reload after anything that can add a record to them.
@@ -78,8 +83,10 @@ function Loaded({
       <p className="invest-connection algo-banner">
         <Info size={17} aria-hidden="true" />
         <span>
-          이 화면은 알고리즘의 설정과 <strong>시뮬레이션</strong>을 다룹니다. 주문을 내는 기능은
-          없습니다. {liveUnavailableText}
+          이 화면은 알고리즘의 설정, <strong>시뮬레이션</strong>, <strong>모의(가상) 운용</strong>과
+          사용자가 직접 켠 <strong>실전 자동 주문</strong>을 다룹니다. 주문은 이 화면이 아니라 운영
+          작업이 내며, 실전은 알고리즘마다 &quot;실전 켜기&quot;에서 켠 것만, 모든 안전장치를 통과한
+          주문만 나갑니다.
         </span>
       </p>
       <div className="algo-layout">
@@ -148,7 +155,7 @@ function Loaded({
             {record && <ModeBadge mode={record.mode} />}
           </div>
           <AlgorithmForm
-            key={record?.id ?? 'new'}
+            key={`${record?.id ?? 'new'}:${record?.mode ?? ''}`}
             record={record}
             onDirtyChange={setDirty}
             initialNotice={flash}
@@ -176,6 +183,17 @@ function Loaded({
         <>
           <BacktestPanel key={record.id} record={record} dirty={dirty} />
           <PaperPanel key={`paper-${record.id}`} record={record} refreshKey={refresh} />
+          <LivePanel
+            key={`live-${record.id}`}
+            record={record}
+            dirty={dirty}
+            refreshKey={refresh}
+            onChanged={(saved, message) => {
+              setFlash(message);
+              setAlgorithms((list) => list.map((a) => (a.id === saved.id ? saved : a)));
+              bumpRefresh();
+            }}
+          />
         </>
       ) : (
         <section className="invest-card">
@@ -184,6 +202,7 @@ function Loaded({
       )}
       <HistoryList algorithms={algorithms} refreshKey={refresh} />
       <CostSettings />
+      <SafeguardSettings onChanged={bumpRefresh} />
       <NotificationsList refreshKey={refresh} />
     </>
   );
