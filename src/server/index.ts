@@ -10,6 +10,7 @@ import { createApp } from './app.js';
 import { FirestoreAlgorithmRepository, MemoryAlgorithmRepository } from './algorithms.js';
 import { algorithmAiEnabled } from './algorithm-ai.js';
 import { FirestorePaperRepository, MemoryPaperRepository } from './paper.js';
+import { PaperAlgorithmFills } from './algorithm-fills.js';
 import {
   FirestoreNotificationRepository,
   MemoryNotificationRepository,
@@ -48,6 +49,10 @@ const notifications = validAppOrigin(appOrigin)
       appOrigin,
     })
   : undefined;
+const algorithmRepository = production
+  ? new FirestoreAlgorithmRepository()
+  : new MemoryAlgorithmRepository();
+const paperRepository = production ? new FirestorePaperRepository() : new MemoryPaperRepository();
 const app = createApp({
   store,
   production,
@@ -64,10 +69,10 @@ const app = createApp({
   ecos: ecosFromEnvironment(),
   // Same value the Toss client is bound to; owner-only routes fail closed when unset.
   ownerUserId: process.env.TOSS_OWNER_USER_ID,
-  algorithmRepository: production
-    ? new FirestoreAlgorithmRepository()
-    : new MemoryAlgorithmRepository(),
-  paperRepository: production ? new FirestorePaperRepository() : new MemoryPaperRepository(),
+  algorithmRepository,
+  paperRepository,
+  // Chart ▲▼ markers: stage 7c virtual fills (live fills join in stage 7f).
+  algorithmFills: new PaperAlgorithmFills(paperRepository, algorithmRepository),
   algorithmAiEnabled: algorithmAiEnabled(),
   notificationRepository,
   notifications,

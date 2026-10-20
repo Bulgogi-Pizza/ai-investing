@@ -93,3 +93,60 @@ export function cleanFills(
   }
   return result.sort((a, b) => a.filledAt.localeCompare(b.filledAt) || a.id.localeCompare(b.id));
 }
+
+/** Minimal reads the paper-backed source needs (PaperRepository and AlgorithmRepository satisfy them). */
+type PaperTradeReader = {
+  listTradesBySymbol(
+    symbol: string,
+    limit: number,
+  ): Promise<
+    {
+      id: string;
+      algorithmId: string;
+      market: 'KR' | 'US';
+      symbol: string;
+      side: 'buy' | 'sell';
+      quantity: number;
+      price: number;
+      date: string;
+      createdAt: string;
+      mode: 'paper';
+    }[]
+  >;
+};
+type AlgorithmNameReader = { list(): Promise<{ id: string; name: string }[]> };
+
+/**
+ * Stage 7c virtual fills (`paperTrades`) as chart markers. Live fills join here in stage 7f. Numbers
+ * are converted to decimal strings; the route's cleanFills re-validates every field afterwards.
+ */
+export class PaperAlgorithmFills implements AlgorithmFillSource {
+  readonly connected = true;
+  constructor(
+    private trades: PaperTradeReader,
+    private algorithms: AlgorithmNameReader,
+    private limit = 200,
+  ) {}
+  async listFills(symbol: string, from: string, to: string): Promise<AlgorithmFill[]> {
+    const [trades, algorithms] = await Promise.all([
+      this.trades.listTradesBySymbol(symbol.toUpperCase(), this.limit),
+      this.algorithms.list(),
+    ]);
+    const names = new Map(algorithms.map((a) => [a.id, a.name]));
+    return trades
+      .filter((t) => t.mode === 'paper' && t.date >= from && t.date <= to)
+      .map((t) => ({
+        id: t.id,
+        algorithmId: t.algorithmId,
+        algorithmName: names.get(t.algorithmId) ?? '(삭제된 알고리즘)',
+        symbol: t.symbol,
+        side: t.side,
+        mode: 'paper' as const,
+        date: t.date,
+        filledAt: t.createdAt,
+        price: String(t.price),
+        quantity: String(t.quantity),
+        currency: t.market === 'US' ? ('USD' as const) : ('KRW' as const),
+      }));
+  }
+}

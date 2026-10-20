@@ -837,3 +837,58 @@ describe('앱 연결(createApp)', () => {
     expect((await request(noToss).get(url).set('Cookie', cookie2)).status).toBe(503);
   });
 });
+
+describe('PaperAlgorithmFills (7c virtual fills as chart markers)', () => {
+  it('maps paper trades in the window to decimal-string fills with names and currency', async () => {
+    const { PaperAlgorithmFills } = await import('../src/server/algorithm-fills');
+    const trades = [
+      {
+        id: 't1',
+        algorithmId: 'a1',
+        market: 'US' as const,
+        symbol: 'AAPL',
+        side: 'buy' as const,
+        quantity: 3,
+        price: 101.25,
+        date: '2026-10-19',
+        createdAt: '2026-10-19T13:35:00.000Z',
+        mode: 'paper' as const,
+      },
+      {
+        id: 't2',
+        algorithmId: 'gone',
+        market: 'US' as const,
+        symbol: 'AAPL',
+        side: 'sell' as const,
+        quantity: 3,
+        price: 99.5,
+        date: '2026-09-01',
+        createdAt: '2026-09-01T13:35:00.000Z',
+        mode: 'paper' as const,
+      },
+    ];
+    const seen: string[] = [];
+    const source = new PaperAlgorithmFills(
+      { listTradesBySymbol: async (symbol) => (seen.push(symbol), trades) },
+      { list: async () => [{ id: 'a1', name: '모멘텀 A' }] },
+    );
+    expect(source.connected).toBe(true);
+    const fills = await source.listFills('aapl', '2026-10-01', '2026-10-31');
+    expect(seen).toEqual(['AAPL']);
+    expect(fills).toEqual([
+      {
+        id: 't1',
+        algorithmId: 'a1',
+        algorithmName: '모멘텀 A',
+        symbol: 'AAPL',
+        side: 'buy',
+        mode: 'paper',
+        date: '2026-10-19',
+        filledAt: '2026-10-19T13:35:00.000Z',
+        price: '101.25',
+        quantity: '3',
+        currency: 'USD',
+      },
+    ]);
+  });
+});
