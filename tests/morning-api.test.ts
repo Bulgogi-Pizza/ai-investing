@@ -185,7 +185,10 @@ describe('인프라 정의(정적 검사; terraform validate는 별도로 실행
     expect(tf).toContain('roles/aiplatform.user');
   });
   it('배포 단계는 AI를 명시적으로 끄고 토스 비밀 없이 같은 이미지·계정·VPC로 job을 만든다', () => {
-    const step = deploy.slice(deploy.indexOf('- name: Deploy morning calendar job'));
+    const start = deploy.indexOf('- name: Deploy morning calendar job');
+    const next = deploy.indexOf('- name: ', start + 1);
+    // Only this step: later job steps (e.g. the paper algorithm job) legitimately use Toss secrets.
+    const step = deploy.slice(start, next === -1 ? undefined : next);
     expect(step).toContain('MORNING_AI_ENABLED=false');
     expect(step).toContain('--image="$DEPLOY_IMAGE"');
     expect(step).toContain('--service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com"');
