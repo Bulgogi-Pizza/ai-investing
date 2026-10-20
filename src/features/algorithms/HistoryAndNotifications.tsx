@@ -12,6 +12,8 @@ const kindLabels: Record<AlgorithmEvent['kind'], string> = {
   'emergency-stop': '긴급 정지 켬',
   'emergency-release': '긴급 정지 해제',
   'costs-updated': '수수료·세금 설정 변경',
+  'safeguards-updated': '안전장치 설정 변경',
+  'live-stop-released': '알고리즘 자동 정지 해제',
 };
 const fieldLabels: Record<Change['field'], string> = {
   name: '이름',
@@ -26,6 +28,8 @@ const fieldLabels: Record<Change['field'], string> = {
   budget: '운용 금액',
   emergencyStop: '긴급 정지',
   costs: '수수료·세금',
+  safeguards: '안전장치',
+  liveStop: '실전 자동 정지',
 };
 const modeName = (value: string | null | undefined) =>
   value && value in modeLabels ? modeLabels[value as keyof typeof modeLabels] : (value ?? '없음');
@@ -181,6 +185,7 @@ const kindNames: Record<string, string> = {
   fill: '체결',
   'algorithm-auto-stop': '자동 정지',
   'order-rejected': '주문 거부',
+  'live-order-unconfirmed': '주문 접수 여부 미확인',
   'data-error': '데이터 오류',
   'job-failure': '작업 실패',
   'morning-brief': '아침 브리핑',

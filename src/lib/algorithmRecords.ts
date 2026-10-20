@@ -324,7 +324,9 @@ export type ChangeField =
   | 'mode'
   | 'budget'
   | 'emergencyStop'
-  | 'costs';
+  | 'costs'
+  | 'safeguards'
+  | 'liveStop';
 export type Change = {
   field: ChangeField;
   from?: string | null;
@@ -333,7 +335,14 @@ export type Change = {
   removed?: string[];
 };
 export type AlgorithmEventKind =
-  'created' | 'updated' | 'deleted' | 'emergency-stop' | 'emergency-release' | 'costs-updated';
+  | 'created'
+  | 'updated'
+  | 'deleted'
+  | 'emergency-stop'
+  | 'emergency-release'
+  | 'costs-updated'
+  | 'safeguards-updated'
+  | 'live-stop-released';
 export type AlgorithmEvent = {
   id: string;
   at: string;
@@ -457,4 +466,122 @@ export function parseCostSettings(body: unknown): ParsedCosts {
       capitalGainsTax,
     },
   };
+}
+
+// ---------------------------------------------------------------------------
+// Live safeguard settings (design section 4 "안전장치" 2, 4 and 8). The defaults are the
+// 2026-10-21 decisions; every risk-increasing change is announced on Telegram. The order value cap
+// (1e8 KRW) and the quote age limit (60 s) are hard limits that nothing here can change.
+// ---------------------------------------------------------------------------
+export type SafeguardSettings = {
+  /** Orders per algorithm per day. */
+  maxOrdersPerDay: number;
+  /** Orders per day over all live algorithms. */
+  maxGlobalOrdersPerDay: number;
+  /** Trading days a position is held before a sell signal may sell it. */
+  minHoldingTradingDays: number;
+  /** Cumulative loss as a fraction of the budget that stops the algorithm (0.2 = -20%). */
+  lossStopFraction: number;
+  /** Minimum 20-day average traded value, in each market's currency. */
+  liquidityMinAvgValue: Record<Currency, number>;
+};
+export type SafeguardSettingsRecord = SafeguardSettings & { updatedAt: string | null };
+export const defaultSafeguardSettings: SafeguardSettings = {
+  maxOrdersPerDay: 3,
+  maxGlobalOrdersPerDay: 10,
+  minHoldingTradingDays: 5,
+  lossStopFraction: 0.2,
+  liquidityMinAvgValue: { KRW: 1_000_000_000, USD: 5_000_000 },
+};
+export const safeguardLimits = {
+  maxOrdersPerDay: { min: 1, max: 20 },
+  maxGlobalOrdersPerDay: { min: 1, max: 50 },
+  minHoldingTradingDays: { min: 0, max: 60 },
+  lossStopFraction: { min: 0.01, max: 0.5 },
+  liquidityMinAvgValue: {
+    KRW: { min: 1_000_000, max: 1_000_000_000_000 },
+    USD: { min: 1_000, max: 1_000_000_000 },
+  },
+} as const;
+/** Fixed, not editable: shown on the screen so the limits are visible. */
+export const hardSafeguards = { maxOrderValueKrw: 100_000_000, maxQuoteAgeSeconds: 60 } as const;
+
+export type ParsedSafeguards =
+  { ok: true; value: SafeguardSettings } | ({ ok: false } & InputIssue);
+export function parseSafeguardSettings(body: unknown): ParsedSafeguards {
+  const bad = (field: string, message: string): ParsedSafeguards => ({
+    ok: false,
+    field,
+    message,
+  });
+  if (!isRecord(body)) return bad('body', '안전장치 설정이 필요합니다.');
+  const integer = (
+    key: 'maxOrdersPerDay' | 'maxGlobalOrdersPerDay' | 'minHoldingTradingDays',
+    label: string,
+  ) => {
+    const v = body[key];
+    const { min, max } = safeguardLimits[key];
+    return typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max
+      ? null
+      : bad(key, `${label}은(는) ${min}~${max} 사이 정수여야 합니다.`);
+  };
+  const failed =
+    integer('maxOrdersPerDay', '알고리즘당 하루 최대 주문 횟수') ??
+    integer('maxGlobalOrdersPerDay', '전체 하루 최대 주문 횟수') ??
+    integer('minHoldingTradingDays', '최소 보유 기간(거래일)');
+  if (failed) return failed;
+  const loss = body.lossStopFraction;
+  const lossLimits = safeguardLimits.lossStopFraction;
+  if (!finite(loss) || loss < lossLimits.min || loss > lossLimits.max)
+    return bad(
+      'lossStopFraction',
+      `누적 손실 정지 기준은 운용 금액의 ${Math.round(lossLimits.min * 100)}%~${Math.round(lossLimits.max * 100)}% 사이여야 합니다.`,
+    );
+  const liquidity = body.liquidityMinAvgValue;
+  if (!isRecord(liquidity)) return bad('liquidityMinAvgValue', '최소 거래대금 기준이 필요합니다.');
+  for (const currency of ['KRW', 'USD'] as const) {
+    const v = liquidity[currency];
+    const { min, max } = safeguardLimits.liquidityMinAvgValue[currency];
+    if (!finite(v) || v < min || v > max)
+      return bad(
+        'liquidityMinAvgValue',
+        `${currency} 최소 거래대금은 ${min.toLocaleString('ko-KR')}~${max.toLocaleString('ko-KR')} 사이여야 합니다.`,
+      );
+  }
+  return {
+    ok: true,
+    value: {
+      maxOrdersPerDay: body.maxOrdersPerDay as number,
+      maxGlobalOrdersPerDay: body.maxGlobalOrdersPerDay as number,
+      minHoldingTradingDays: body.minHoldingTradingDays as number,
+      lossStopFraction: loss,
+      liquidityMinAvgValue: {
+        KRW: liquidity.KRW as number,
+        USD: liquidity.USD as number,
+      },
+    },
+  };
+}
+
+/** The setting changes that raise risk (each one is announced). Pure. */
+export type SafeguardRisk =
+  'max-orders-raised' | 'min-holding-lowered' | 'loss-stop-loosened' | 'liquidity-lowered';
+export function safeguardRisks(
+  before: SafeguardSettings,
+  after: SafeguardSettings,
+): SafeguardRisk[] {
+  const out: SafeguardRisk[] = [];
+  if (
+    after.maxOrdersPerDay > before.maxOrdersPerDay ||
+    after.maxGlobalOrdersPerDay > before.maxGlobalOrdersPerDay
+  )
+    out.push('max-orders-raised');
+  if (after.minHoldingTradingDays < before.minHoldingTradingDays) out.push('min-holding-lowered');
+  if (after.lossStopFraction > before.lossStopFraction) out.push('loss-stop-loosened');
+  if (
+    after.liquidityMinAvgValue.KRW < before.liquidityMinAvgValue.KRW ||
+    after.liquidityMinAvgValue.USD < before.liquidityMinAvgValue.USD
+  )
+    out.push('liquidity-lowered');
+  return out;
 }
