@@ -1,6 +1,6 @@
 # 예약 작업 (Cloud Scheduler → Cloud Run Job)
 
-4단계에서 만든 예약 작업 기반이다. 6b(아침 캘린더 갱신)와 7c(시장별 알고리즘 판단)가 같은 틀을 다시 쓴다. 첫 작업은 일일 스냅샷(`investing-daily-snapshot`)이며 데이터 구조와 동작은 [일일 스냅샷](../implementation/snapshots.md)에 있다. 상태: **구현·검증 완료(합성 테스트와 `terraform validate`), 운영 적용 전**. 실제 클라우드 적용과 실호출 확인은 아래 순서로 감독이 한다.
+4단계에서 만든 예약 작업 기반이다. 6b(아침 캘린더 갱신, [아래](#아침-캘린더-작업-6b))가 같은 틀을 썼고 7c(시장별 알고리즘 판단)가 다시 쓴다. 첫 작업은 일일 스냅샷(`investing-daily-snapshot`)이며 데이터 구조와 동작은 [일일 스냅샷](../implementation/snapshots.md)에 있다. 상태: **구현·검증 완료(합성 테스트와 `terraform validate`), 운영 적용 전**. 실제 클라우드 적용과 실호출 확인은 아래 순서로 감독이 한다.
 
 ## 구성
 
@@ -43,14 +43,14 @@ Cloud Scheduler(시간만 알림) ──POST jobs:run──▶ Cloud Run Job inv
 
 ## IAM (최소 권한)
 
-| 주체                     | 권한                                                                                                                                                     |
-| ------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `investing-jobs` SA      | `datastore.user`(Firestore 읽기·쓰기), 토스 비밀 4개(`client-id`, `client-secret`, `account-seq`, `owner-user-id`)에 대해 **비밀 단위** `secretAccessor` |
-| `investing-scheduler` SA | 프로젝트 권한 없음. 배포 워크플로가 `investing-daily-snapshot` **job 하나**에만 `roles/run.invoker`를 부여한다                                           |
-| `investing-deploy` SA    | 기존 `run.admin`으로 job 생성·갱신, 새로 `investing-jobs`에 대한 `iam.serviceAccountUser`(job이 그 계정으로 돌게 함)                                     |
+| 주체                     | 권한                                                                                                                                                                                                                                                        |
+| ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `investing-jobs` SA      | `datastore.user`(Firestore 읽기·쓰기), 토스 비밀 4개(`client-id`, `client-secret`, `account-seq`, `owner-user-id`)에 대해 **비밀 단위** `secretAccessor`; 아침 작업: FRED·ECOS·텔레그램 비밀 4개(`jobs-morning.tf`), AI를 켠 뒤에만 `roles/aiplatform.user` |
+| `investing-scheduler` SA | 프로젝트 권한 없음. 배포 워크플로가 `investing-daily-snapshot`·`investing-morning-calendar` **job 각각**에만 `roles/run.invoker`를 부여한다                                                                                                                 |
+| `investing-deploy` SA    | 기존 `run.admin`으로 job 생성·갱신, 새로 `investing-jobs`에 대한 `iam.serviceAccountUser`(job이 그 계정으로 돌게 함)                                                                                                                                        |
 
-- 프로젝트 단위 `secretAccessor`는 주지 않는다. DART·FRED·ECOS·텔레그램 비밀은 이 작업에 필요 없어서 접근 권한이 없다(6b 이후에 필요한 비밀만 추가).
-- Firestore는 컬렉션 단위 IAM이 없어 `datastore.user`가 모든 컬렉션(계정·세션 포함)을 읽고 쓸 수 있다. 서비스(`investing-runtime`)와 같은 수준이며, 작업 코드는 `marketSnapshots`·`snapshotRuns`·`snapshotTargets`·`economicEvents`·`providerTokens`만 건드린다. 이 잔여 위험은 인지하고 있다.
+- 프로젝트 단위 `secretAccessor`는 주지 않는다. 스냅샷 작업에는 DART·FRED·ECOS·텔레그램 비밀이 필요 없다. 아침 작업(6b)의 FRED·ECOS·텔레그램 비밀 4개는 `jobs-morning.tf`가 같은 서비스 계정에 비밀 단위로 추가한다(같은 계정이므로 스냅샷 job에도 접근 권한이 생기지만 그 job은 연결하지 않으며, 계정 분리는 필요해지면 한다).
+- Firestore는 컬렉션 단위 IAM이 없어 `datastore.user`가 모든 컬렉션(계정·세션 포함)을 읽고 쓸 수 있다. 서비스(`investing-runtime`)와 같은 수준이며, 작업 코드는 `marketSnapshots`·`snapshotRuns`·`snapshotTargets`·`economicEvents`·`providerTokens`(스냅샷)와 `morningRuns`·`economicEvents`·`notifications`·`aiUsage`(아침 작업)만 건드린다. 이 잔여 위험은 인지하고 있다.
 - invoker 권한을 Terraform이 아니라 워크플로가 부여하는 이유: job이 Terraform 리소스가 아니라서 job 단위 IAM 바인딩을 Terraform에 쓸 수 없고, 프로젝트 단위 `run.invoker`는 일회성 `investing-toss-setup` 같은 다른 job까지 실행하게 해서 더 넓다.
 
 ## 배포
@@ -89,6 +89,53 @@ gcloud run jobs execute investing-daily-snapshot --region=asia-northeast3 \
 
 값이 없으면 스케줄러와 같은 자동 판단이다. 수동 실행 기록은 `trigger: manual`이다. 장이 안 닫혔으면 건너뛴다(`SESSION_NOT_CLOSED_YET`).
 
+## 아침 캘린더 작업 (6b)
+
+`investing-morning-calendar`: 매일 07:00 KST. 본문 `src/jobs/morning-calendar.ts`, 동작·데이터·화면은 [경제 캘린더 — 아침 갱신](../implementation/calendar.md#아침-갱신-6b), AI 계약은 [ai-provider.md](../implementation/ai-provider.md#아침-작업-계약-6b)에 있다. 상태: **구현·합성 테스트 완료, 운영 적용 전, AI 단계는 꺼짐**.
+
+| 항목            | 내용                                                                                                                                                                                              |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scheduler       | `investing-morning-calendar`, 크론 `0 7 * * *`(Asia/Seoul), 호출 실패(5xx)만 2회 재시도. 기본 **일시 정지**(`morning_schedule_enabled = false`, 스냅샷 트리거와 따로 켠다)                        |
+| 실행 계정       | 기존 `investing-jobs`(스냅샷과 같은 계정, 같은 이미지 digest, 같은 VPC·고정 출구 IP)                                                                                                              |
+| 비밀(비밀 단위) | `investing-fred-api-key`, `investing-ecos-api-key`, `investing-telegram-bot-token`, `investing-telegram-chat-id`의 `secretAccessor`. 토스·DART·SEC 비밀은 이 작업에 없다                          |
+| Vertex 권한     | `roles/aiplatform.user`는 Terraform 변수 `morning_ai_enabled = true`일 때만 `investing-jobs`에 부여한다(기본 `false`)                                                                             |
+| 환경변수        | `NODE_ENV=production`, `GOOGLE_CLOUD_PROJECT`, `APP_ORIGIN`(알림의 화면 링크), `MORNING_AI_ENABLED=false`, `AI_PROVIDER`·`AI_MODEL`·`AI_LOCATION`(워크플로 변수가 있을 때만)                      |
+| 종료 코드       | 스냅샷과 같다(`0` 정상, `1` 실패, `2` 설정 오류, `3` 일부 단계 실패). 키가 없거나 AI가 꺼진 것, AI 한도 소진, 아직 올라오지 않은 값은 실패가 아니라 단계 기록의 코드다                            |
+| 실행 기록       | Firestore `morningRuns/{KST 날짜}`. 같은 날 `complete`면 다음 실행은 건너뛴다(`RUN_ALREADY_COMPLETE`). `partial`·`failed`인 날은 다음 실행이 다시 시도하고, 이미 보낸 브리핑은 다시 보내지 않는다 |
+| 실패 알림       | 실행이 `failed`로 끝나면 텔레그램 `job-failure` 알림을 남긴다(전송 실패는 화면 알림 목록에 기록)                                                                                                  |
+
+**수동 실행**(로컬에서는 불가, Cloud Run Job 한 번 실행에 환경변수만 덮어쓴다):
+
+```sh
+gcloud run jobs execute investing-morning-calendar --region=asia-northeast3 \
+  --account=<개인 계정> --project=<개인 프로젝트> \
+  --update-env-vars=MORNING_FORCE=1 --wait
+```
+
+| 변수            | 값           | 효과                                                       |
+| --------------- | ------------ | ---------------------------------------------------------- |
+| `MORNING_DATE`  | `YYYY-MM-DD` | 이 KST 날짜를 "오늘"로 보고 실행(과거 날짜 보충)           |
+| `MORNING_FORCE` | `1`          | 이미 `complete`인 날도 다시 실행한다. 브리핑도 다시 보낸다 |
+
+### 감독이 적용하는 순서 (6b)
+
+1. 사용자가 FRED·ECOS 키와 텔레그램 봇 토큰·chat ID를 저장하고 서비스에 연결했는지 확인한다([provider-setup.md](provider-setup.md)). 없어도 배포는 깨지지 않으며 해당 단계가 `*_NOT_CONFIGURED`로 건너뛰어진다.
+2. `node scripts/gcp.mjs plan`. 기대 변경은 **추가만**이다: `secretAccessor` 바인딩 4개(`jobs_morning`), Scheduler 작업 1개(`investing-morning-calendar`, 일시 정지). `google_project_iam_member.jobs_ai`는 **나오면 안 된다**(변수 기본값 `false`). 기존 리소스의 교체·삭제가 있으면 적용하지 않는다. `apply`.
+3. PR을 `main`에 병합하면 `Deploy morning calendar job` 단계가 job을 만든다(`MORNING_AI_ENABLED=false`, 연결된 숫자 버전의 FRED·ECOS·텔레그램 비밀만 붙인다. 연결되지 않은 비밀은 경고만 남긴다). `gcloud run jobs describe investing-morning-calendar …`로 계정·VPC·비밀 버전·환경변수를 눈으로 확인한다.
+4. **수동 실행 한 번**(위). 정제된 로그와 `morningRuns/{날짜}` 문서, 캘린더의 새 이벤트·값, 텔레그램 브리핑을 확인한다. 값이 `VALUE_NOT_AVAILABLE_YET`로만 나오면 신선도 임계값과 FRED 응답을 점검한다([캘린더 문서](../implementation/calendar.md#작업-단계-모두-멱등-한-단계의-실패가-다음-단계를-막지-않는다)).
+5. `terraform.tfvars`에 `morning_schedule_enabled = true`를 넣고 `plan`(Scheduler `paused`만 바뀌어야 한다)·`apply`.
+6. 이틀 연속 자동 실행을 확인한다(6b 완료 기준).
+
+### 아침 작업 AI 켜기
+
+**사용자 승인 전에는 하지 않는다.** 남은 일:
+
+1. 사용자가 월 AI 비용 상한을 승인한다(근거 계산: [ai-provider.md](../implementation/ai-provider.md#비용-상한-계산-근거-가격-미확인)의 호출 수·토큰 상한에 공식 가격표 단가를 곱한 값을 설계 문서 5절에 기록).
+2. `terraform.tfvars`에 `morning_ai_enabled = true`, `plan`(추가: `google_project_iam_member.jobs_ai` 1개만)·`apply`.
+3. 변경 PR에서 `.github/workflows/deploy.yml`의 morning 단계 `MORNING_AI_ENABLED=false`를 `true`로 바꾸고, 저장소 변수 `AI_PROVIDER=vertex`·`AI_MODEL=gemini-3.8-flash`가 설정되어 있는지 확인한다(없으면 `true`로 설정이 오류가 나 job이 시작하지 않는다). 병합·배포.
+4. 수동 실행(`MORNING_FORCE=1`)으로 한 번 확인한다: `morningRuns/{날짜}.ai`의 호출 수·토큰, 이벤트의 `aiSummary`, 번역 제목. Vertex가 `thinkingLevel: LOW`를 거부하면(400) `ai-morning.ts`의 `MORNING_AI_TASKS`만 고친다.
+5. 끄려면 3번의 값을 `false`로 되돌려 배포하면 된다(IAM은 남아도 호출이 없다).
+
 ## 확인과 문제 해결
 
 - 상태 API(소유자 전용): `GET /api/snapshots/status`. 시장별 최근 5회의 상태, 시도 횟수, 대상·기록 건수, 단계별 상태 코드.
@@ -97,7 +144,8 @@ gcloud run jobs execute investing-daily-snapshot --region=asia-northeast3 \
 
 ## 비용 메모 (2026-10-21 추정, 공식 가격표 재확인 필요)
 
-- Cloud Scheduler: 작업 2개. 결제 계정당 3개까지 무료라서 현재는 0원이다. 6b·7c가 작업을 더하면 3개를 넘을 수 있고 초과분은 작업당 월 약 $0.10이다(가격표로 다시 확인).
+- Cloud Scheduler: 작업 3개(스냅샷 2개 + 아침 1개). 결제 계정당 3개까지 무료라서 현재는 0원이고, 7c가 작업을 더하면 3개를 넘고 초과분은 작업당 월 약 $0.10이다(가격표로 다시 확인).
+- 아침 작업: Cloud Run Job 하루 1회 1~2분, FRED·ECOS·RSS 호출 수십 회, Firestore 쓰기 하루 수십 건으로 무료 구간 안이다. Vertex는 꺼져 있어 0원이며 켜면 [AI 비용 상한](../implementation/ai-provider.md#비용-상한-계산-근거-가격-미확인)을 따른다.
 - Cloud Run Job: 1 vCPU·512MiB, 실행 1분 안팎(보유·목록 20종목 기준 호출 약 120회 × 0.25초 간격), 하루 3~4회. 무료 구간 안이다.
 - Firestore: 문서 쓰기 하루 수백 건, 저장은 연 150MB 안팎([스냅샷 문서](../implementation/snapshots.md#저장-용량-추정)). 무료 구간 안이다.
 - 네트워크: 기존 고정 IP·Cloud NAT를 공유한다. 추가 고정비는 없다.
@@ -108,3 +156,52 @@ gcloud run jobs execute investing-daily-snapshot --region=asia-northeast3 \
 - `gcloud run jobs deploy --set-secrets`가 배포 계정에 비밀 접근 권한 없이 되는지(서비스 계정의 접근만 검사한다고 알려져 있으나 실제 배포에서 확인).
 - 배포 워크플로의 `jq` 식(서비스 JSON에서 비밀 버전 추출)은 로컬에서 실행하지 못했다. 첫 실행 로그의 경고 여부로 확인한다.
 - 토스 호출 한도의 실제 값과 `PROVIDER_FORBIDDEN`의 실제 응답은 실호출로 확인한다.
+
+## 모의 운용 작업 (algo-paper)
+
+7c에서 같은 틀 위에 추가한 두 번째 작업이다. 판단·저장·안전장치 의미는 [알고리즘 7c](../implementation/algorithm.md#7c-모의-운용-작업-구현-2026-10-21-운영-적용-전)에 있다. 이 작업은 가상 기록만 만들고 **주문을 내지 않는다**. 상태: 합성 테스트와 `terraform validate`까지 완료, 운영 적용 전.
+
+```
+Cloud Scheduler 2개 ──POST jobs:run (overrides: ALGO_MARKET=KR|US)──▶ Cloud Run Job investing-algo-paper
+  investing-algo-paper-kr  09:05 KST 월~금                              investing-jobs SA(스냅샷 작업과 같은 계정), 같은 이미지 digest
+  investing-algo-paper-us  22:35·23:35 KST 월~금                         고정 출구 IP → 토스(캘린더·일봉·현재가)
+                                                                         Firestore: algorithmRuns, paperLedgers, paperTrades, notifications
+```
+
+- 진입점 `node --import tsx src/jobs/algo-paper.ts`. 시장은 실행마다 `ALGO_MARKET`(Scheduler가 덮어쓴다)으로 받는다. 값이 없으면 설정 오류로 종료 `2`.
+- 어느 슬롯이 유효한지는 작업이 장 운영 캘린더로 정한다(개장 후 20분 이내). 미국 서머타임에는 22:35, 아닐 때는 23:35만 실제로 돈다. 휴장일은 하루 한 번 `skipped`로 기록한다. 같은 시장·날짜는 `algorithmRuns/{market}_{date}`로 한 번만 돈다.
+- 종료 코드: `0` 정상(할 일 없음·건너뜀 포함), `3` 일부 알고리즘 실패, `1` 전부 실패·캘린더 오류·기록 오류, `2` 설정 오류. `3`·`1`이면 텔레그램 `job-failure`를 보낸다. `--max-retries=0`이고 Scheduler 재시도는 호출 실패만 2회 한다.
+- 환경 변수(배포 워크플로가 설정): `NODE_ENV=production`, `GOOGLE_CLOUD_PROJECT`, `APP_ORIGIN`(알림 링크), `ALGO_AI_ENABLED=false`. 수동 실행에서만 쓰는 값: `ALGO_PAPER_SLIPPAGE_BPS`(0~500, 기본 10), `ALGO_OPEN_WINDOW_MINUTES`(1~120, 기본 20; 쓰면 기록의 `trigger`가 `manual`).
+- 비밀: 토스 4개(스냅샷 작업과 같은 숫자 버전)와, 서비스에 숫자 버전으로 연결되어 있을 때만 `TELEGRAM_BOT_TOKEN`·`TELEGRAM_CHAT_ID`. 텔레그램이 없으면 알림은 화면 목록에 `disabled`로만 남고 판단은 그대로 돈다. Terraform이 `investing-jobs`에 텔레그램 비밀 두 개의 비밀 단위 `secretAccessor`를 준다(`infra/gcp/jobs-algo.tf`).
+
+### Terraform (`infra/gcp/jobs-algo.tf`, 변수 `algo_schedules_enabled`, 기본 `false` = 일시 정지)
+
+기대하는 `plan`은 **추가만** 2개다: `google_cloud_scheduler_job.algo_paper_kr`, `google_cloud_scheduler_job.algo_paper_us`(둘 다 `paused=true`). 텔레그램 비밀 접근은 같은 `investing-jobs` 계정에 `jobs-morning.tf`가 이미 준다. Cloud Run Job 자체와 `run.invoker` 바인딩은 배포 워크플로가 만든다. 기존 리소스의 교체·삭제가 있으면 적용하지 않는다. 일정: KR `5 9 * * 1-5`, US `35 22,23 * * 1-5`(Asia/Seoul).
+
+### 배포 (`deploy.yml`의 `Deploy paper algorithm job` 단계)
+
+스냅샷 단계 뒤에, 서비스를 실제로 배포한 실행에서만 돈다. 같은 digest·`investing-jobs` 계정·VPC(`vpc-egress=all-traffic`)·토스 비밀의 숫자 버전(`jq`)을 쓰고 `--command=node --args=--import,tsx,src/jobs/algo-paper.ts`, `--max-retries=0 --task-timeout=900s --cpu=1 --memory=512Mi`, 환경 변수에 `ALGO_AI_ENABLED=false`를 명시한다. 토스 비밀 네 개가 숫자 버전으로 없으면 경고만 하고 건너뛴다. 이어서 `investing-scheduler`에 이 job 하나의 `run.invoker`를 부여한다. 런타임 이미지에는 이제 `src/lib`도 들어간다(`Dockerfile`; 알고리즘 엔진을 서버와 이 작업이 공유한다). CI 컨테이너 검사도 `algo-paper.ts`와 `src/lib/algo/paper.ts`의 존재를 확인한다.
+
+### 감독이 적용하는 순서
+
+1. `node scripts/gcp.mjs plan`으로 위의 추가 5개만 있는지 확인하고 `apply`한다.
+2. 이 PR을 병합한다. CI를 통과한 SHA가 배포되며 job이 생긴다(이미 병합된 뒤라면 `Deploy GCP`를 다시 실행).
+3. `gcloud run jobs describe investing-algo-paper`(개인 계정·프로젝트 명시)로 서비스 계정, VPC, 비밀 버전, `ALGO_AI_ENABLED=false`를 눈으로 확인한다.
+4. **수동 실행 한 번**: 모의 알고리즘을 하나 만들어 모드를 "모의"로 저장하고, 개장 직후 거래일에 아래처럼 실행한다. 개장 창 밖이면 `OUTSIDE_OPEN_WINDOW`로 아무것도 하지 않는다(창을 넓히려면 `ALGO_OPEN_WINDOW_MINUTES`).
+
+```sh
+gcloud run jobs execute investing-algo-paper --region=asia-northeast3 \
+  --account=<개인 계정> --project=<개인 프로젝트> \
+  --update-env-vars=ALGO_MARKET=KR,ALGO_OPEN_WINDOW_MINUTES=120 --wait
+```
+
+5. 결과 확인: 정제된 로그, 화면의 "모의 운용" 구역, `algorithmRuns/KR_<날짜>` 문서. 실제 `/prices`의 `timestamp`가 신선도(60초) 판정에 맞는지, 일봉이 직전 거래일까지 오는지 먼저 확인한다(알고리즘 문서의 "확인하지 못한 것").
+6. `terraform.tfvars`에 `algo_schedules_enabled = true`를 넣고 `plan`(Scheduler 두 개의 `paused`만 바뀌어야 한다)·`apply`로 켠다. 영업일마다 모의 판단이 쌓이는지 이틀 이상 지켜본다.
+
+### AI형 켜기 (비용 승인 뒤에만)
+
+`ALGO_AI_ENABLED`는 정확히 문자열 `true`일 때만 켜진다. 사용자가 월 비용을 승인하면: Vertex 접근 권한(`investing-jobs`에 `aiplatform.user`)과 모델 가격·생각 토큰 설정을 확인하고, 배포 단계의 `ALGO_AI_ENABLED=false`를 `true`로 바꿔 병합한다. 하루 호출은 기능별 12회로 제한된다(`aiUsage/algorithm_{KST날짜}`). 그 전에는 AI형이 "AI 비용 승인 대기"로 건너뛰어진다.
+
+### 비용 메모
+
+Scheduler 작업이 4개가 되어 무료 3개를 넘는다(초과분 작업당 월 약 $0.10, 가격표 재확인 필요). Cloud Run Job은 하루 2회(국내 1, 미국 1) 몇 분, 일봉 500개 조회는 종목당 3쪽이라 알고리즘 수 × 종목 수 × 약 3회 호출을 0.25초 간격으로 보낸다. 토스 호출 한도의 실제 값은 아직 모른다(실호출 확인 대상).

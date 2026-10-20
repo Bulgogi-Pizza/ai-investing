@@ -16,6 +16,11 @@ import {
   MemoryCalendarRepository,
   type CalendarRepository,
 } from './calendar.js';
+import {
+  createMorningRouter,
+  MemoryMorningRunRepository,
+  type MorningRunRepository,
+} from './morning.js';
 import { createNewsRouter } from './news.js';
 import {
   createAlgorithmsRouter,
@@ -29,9 +34,15 @@ import {
   validAppOrigin,
   type NotificationRepository,
 } from './notify.js';
+import { createPaperRouter, MemoryPaperRepository, type PaperRepository } from './paper.js';
 import { createAnalysisRouter } from './analysis.js';
+import { createAnalysisEventsRouter } from './analysis-events.js';
+import type { AlgorithmFillSource } from './algorithm-fills.js';
+import { createMacroRouter, type EcosAdapter, type FredAdapter } from './macro/index.js';
 import { createFundamentalsRouter } from './fundamentals/index.js';
 import type { FundamentalsRouterOptions } from './fundamentals/router.js';
+import type { DartAdapter } from './fundamentals/dart.js';
+import type { SecAdapter } from './fundamentals/sec.js';
 import { ownerGate } from './owner.js';
 import {
   createSnapshotRouter,
@@ -42,7 +53,13 @@ import type { aiFromEnvironment } from './ai.js';
 import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
 import { TossAnalysis } from './toss-analysis.js';
-import { ProviderError, parsePriceSymbols, validBefore, type TossClient } from './toss.js';
+import {
+  MARKET_INDICATOR_CATALOG,
+  ProviderError,
+  parsePriceSymbols,
+  validBefore,
+  type TossClient,
+} from './toss.js';
 import { MemoryStore, type Store, type Strategy, type User } from './store.js';
 
 export type AppOptions = {
@@ -54,15 +71,26 @@ export type AppOptions = {
   /** Same TOSS_OWNER_USER_ID the Toss client is bound to. Missing => owner routes fail closed. */
   ownerUserId?: string;
   /** DART / SEC EDGAR adapters from the environment; a missing one answers 503 for its market. */
-  dart?: FundamentalsRouterOptions['dart'];
-  sec?: FundamentalsRouterOptions['sec'];
+  dart?: FundamentalsRouterOptions['dart'] & Partial<Pick<DartAdapter, 'disclosures'>>;
+  sec?: FundamentalsRouterOptions['sec'] & Partial<Pick<SecAdapter, 'filings'>>;
+  /** FRED / ECOS adapters from the environment; a missing one answers 503 (macro routes) or is reported "미연결" (events). */
+  fred?: Pick<FredAdapter, 'observations' | 'upcomingReleases'>;
+  ecos?: Pick<EcosAdapter, 'observations'>;
+  /** Algorithm fills for the chart markers. Defaults to "not connected" until stage 7c writes paperTrades. */
+  algorithmFills?: AlgorithmFillSource;
   calendarRepository?: CalendarRepository;
   snapshotRepository?: SnapshotRepository;
+  /** Morning calendar job records (the stored brief is read from here). */
+  morningRepository?: MorningRunRepository;
   loginThrottle?: LoginThrottle;
   /** Algorithm models, change history, emergency-stop flag and cost settings (owner-only API). */
   algorithmRepository?: AlgorithmRepository;
   /** Stage 7a keeps live mode off. Only tests set this, to exercise the live-overlap rule. */
   algorithmLiveEnabled?: boolean;
+  /** Paper (virtual) ledger, fills and run history for the 모의 운용 section (owner-only API). */
+  paperRepository?: PaperRepository;
+  /** Mirrors the job's ALGO_AI_ENABLED so the screen can explain idle AI algorithms. */
+  algorithmAiEnabled?: boolean;
   notificationRepository?: NotificationRepository;
   notifications?: NotificationService;
   ai?: ReturnType<typeof aiFromEnvironment>;
@@ -370,6 +398,45 @@ export function createApp(options: AppOptions = {}) {
     }
     res.json(await options.toss!.prices(symbols));
   });
+  // Toss market-indicator daily candles (KOSPI, KOSDAQ and the KR bond yields) for the chart's
+  // comparison overlay. Same shape as /api/market/candles: oldest first, decimal strings.
+  app.get('/api/market/indicator-candles', requireOwner, async (req, res) => {
+    const { symbol, count, before } = req.query;
+    if (
+      Object.keys(req.query).some((key) => !['symbol', 'count', 'before'].includes(key)) ||
+      typeof symbol !== 'string' ||
+      !MARKET_INDICATOR_CATALOG.some((item) => item.symbol === symbol) ||
+      (count !== undefined && (typeof count !== 'string' || !/^\d{1,3}$/.test(count))) ||
+      (before !== undefined && (typeof before !== 'string' || !validBefore(before)))
+    ) {
+      failure(res, 400, 'INVALID_MARKET_QUERY', '시장 지표 코드와 조회 조건을 확인하세요.');
+      return;
+    }
+    const wanted = count === undefined ? 200 : Number(count);
+    if (wanted < 1 || wanted > 200) {
+      failure(res, 400, 'INVALID_MARKET_QUERY', '조회 개수는 1~200입니다.');
+      return;
+    }
+    const page = await options.toss!.marketIndicatorCandlePage(symbol, {
+      count: wanted,
+      ...(before === undefined ? {} : { before }),
+    });
+    res.json({
+      source: 'Toss Securities OpenAPI',
+      asOf: new Date().toISOString(),
+      symbol,
+      interval: '1d',
+      candles: [...page.candles].reverse().map((candle) => ({
+        timestamp: candle.timestamp,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+        volume: candle.volume,
+      })),
+      ...(page.nextBefore ? { nextBefore: page.nextBefore } : {}),
+    });
+  });
   app.get('/api/market/indicators', requireOwner, async (_req, res) => {
     res.json(await options.toss!.marketIndicators());
   });
@@ -413,6 +480,18 @@ export function createApp(options: AppOptions = {}) {
       ownerUserId: options.ownerUserId,
     }),
   );
+  // Event lines and algorithm fills need only the owner id (not the Toss client), so this router
+  // is mounted first and answers /api/analysis/events and /api/analysis/algorithm-fills itself.
+  app.use(
+    createAnalysisEventsRouter({
+      calendar: calendarRepository,
+      fred: options.fred,
+      dart: options.dart,
+      sec: options.sec,
+      fills: options.algorithmFills,
+      ownerUserId: options.ownerUserId,
+    }),
+  );
   app.use(
     createAnalysisRouter({
       analysis: options.toss ? new TossAnalysis(options.toss) : undefined,
@@ -428,7 +507,22 @@ export function createApp(options: AppOptions = {}) {
       ownerUserId: options.ownerUserId ?? '',
     }),
   );
+  // Owner-only FRED / ECOS reads (series for the comparison overlay, release dates).
+  app.use('/api/macro', ownerAccount);
+  app.use(
+    createMacroRouter({
+      fred: options.fred,
+      ecos: options.ecos,
+      ownerUserId: options.ownerUserId ?? '',
+    }),
+  );
   app.use(createNewsRouter({ repository: calendarRepository, ownerUserId: options.ownerUserId }));
+  app.use(
+    createMorningRouter({
+      repository: options.morningRepository ?? new MemoryMorningRunRepository(),
+      ownerUserId: options.ownerUserId,
+    }),
+  );
   app.use(
     createCalendarRouter({
       repository: calendarRepository,
@@ -452,6 +546,14 @@ export function createApp(options: AppOptions = {}) {
         : undefined,
       notify: notifications ? (event) => notifications.notify(event) : undefined,
       liveEnabled: options.algorithmLiveEnabled,
+    }),
+  );
+  app.use(
+    createPaperRouter({
+      repository: options.paperRepository ?? new MemoryPaperRepository(),
+      algorithmRepository,
+      ownerUserId: options.ownerUserId,
+      aiEnabled: options.algorithmAiEnabled,
     }),
   );
   app.use('/api', (_req, res) => failure(res, 404, 'NOT_FOUND', '요청한 API를 찾을 수 없습니다.'));

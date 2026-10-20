@@ -100,8 +100,13 @@ export function issueOf(error: unknown): DataIssue {
   if (error instanceof ApiError) {
     if (error.code === 'TOSS_INTEGRATION_UNAVAILABLE')
       return { kind: 'not-connected', message: error.message, retryable: true, code: error.code };
-    // Fundamentals providers (DART / SEC EDGAR) that the server has no key for.
-    if (error.code === 'DART_UNAVAILABLE' || error.code === 'SEC_UNAVAILABLE')
+    // Providers (DART / SEC EDGAR / FRED / ECOS) that the server has no key for.
+    if (
+      error.code === 'DART_UNAVAILABLE' ||
+      error.code === 'SEC_UNAVAILABLE' ||
+      error.code === 'FRED_UNAVAILABLE' ||
+      error.code === 'ECOS_UNAVAILABLE'
+    )
       return { kind: 'not-connected', message: error.message, retryable: true, code: error.code };
     // The Toss Open API key is valid but lacks permission for this data group (HTTP 403).
     if (error.code === 'TOSS_PERMISSION_DENIED')

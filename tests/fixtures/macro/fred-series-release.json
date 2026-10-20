@@ -1,0 +1,14 @@
+{
+  "realtime_start": "2026-10-21",
+  "realtime_end": "2026-10-21",
+  "releases": [
+    {
+      "id": 10,
+      "realtime_start": "2026-10-21",
+      "realtime_end": "2026-10-21",
+      "name": "Consumer Price Index",
+      "press_release": true,
+      "link": "https://example.invalid/synthetic"
+    }
+  ]
+}

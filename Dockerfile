@@ -14,6 +14,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/dist ./dist
 COPY src/server ./src/server
 COPY src/jobs ./src/jobs
+# Pure algorithm engine and record types: imported by src/server/algorithms.ts and the algo-paper job.
 COPY src/lib ./src/lib
 COPY scripts/admin-user.ts ./scripts/admin-user.ts
 USER node

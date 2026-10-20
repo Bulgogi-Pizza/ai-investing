@@ -241,3 +241,7 @@ EPS·BPS는 부호 있는 값으로 노출하고, 비율(PER·PBR·ROE)만 0 이
 - 여전히 남은 것: Terraform의 `investing-dart-api-key` 비밀과 `SEC_USER_AGENT` 배포 변수([계획 2단계](../planning/next-phase-plan.md), 이 단계는 infra를 건드리지 않음), 실제 DART·SEC 호출 검증(첫 호출 전까지 위 "문서에 없어서 확인해야 하는 것"은 가정), 일일 한도를 고려한 업종 일괄 계산(서버 쪽 사전 계산·저장은 4단계 이후).
 - 7b 백테스트의 과거 연도 확장: DART는 기본 3년(현재 연도와 앞 2년)만 받는다(`yearsBack` 옵션). 더 긴 과거가 필요하면 호출 수(연도당 8건)와 일일 한도를 계산한 뒤 늘린다. 일일 데이터 적재(4단계)가 재무제표를 저장하는 방식은 정해지지 않았다.
 - 결산월이 12월이 아닌 한국 회사의 정확한 `periodEnd`, 우선주를 제외한 보통주 EPS, SEC 정정 공시(`10-K/A`) 반영, 외국 발행사(20-F/40-F, IFRS)는 지원하지 않는다.
+
+## 이벤트용 공시 목록 (5d)
+
+`DartAdapter.disclosures(symbol, from, to)`는 `list.json`을 분류(`pblntf_ty` A·B·I)별로 읽어 정기공시·주요사항보고·잠정실적을 차트 이벤트로 분류하고(`filings.ts`), `SecAdapter.filings(symbol, from, to)`는 submissions의 `filings.recent`에서 10-K·10-Q·8-K를 읽는다. 분류 규칙·날짜 기준·한계는 [charts.md](charts.md) 5d절이다. 재무 계산과 캐시·한도(DART 150ms, SEC 250ms 간격)를 공유하고 목록은 10분 캐시한다. 응답 필드명(특히 SEC `accessionNumber`·`filingDate`·`form`·`items`)은 첫 실호출에서 확인한다.

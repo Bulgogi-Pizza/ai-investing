@@ -95,3 +95,16 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 - `src/server/index.ts`는 `dartFromEnvironment()`(`DART_API_KEY`)·`secFromEnvironment()`(`SEC_USER_AGENT`)를 `createApp`에 넘긴다. 없으면 해당 시장은 503 `DART_UNAVAILABLE`/`SEC_UNAVAILABLE`이다. `/api/fundamentals`는 `ownerAccount` 뒤에 마운트된다(소유자 미설정 503, 다른 계정 403, 라우터도 재검사).
 
 검증: `npx vitest run tests/analysis-api.test.ts`.
+
+## 이벤트·비교·체결 API와 매크로 마운트 (5d·5e)
+
+모두 로그인 → 소유자 → 사용자당 분당 제한 → 입력 검증(알 수 없는·반복·객체 파라미터 400) 순서다. 세부 규칙은 [charts.md](charts.md) 5d·5e절이다.
+
+| 경로(GET)                                                                 | 게이트                                                              | 설명                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `/api/analysis/events?market=KR\|US&symbol=&from=&to=`                    | 소유자 ID만 필요(토스 불필요, 미설정 503, 다른 계정 403), 분당 60회 | 등록 일정·FRED 발표일·DART(국내)·SEC(미국) 이벤트를 병합. 창 최대 400일(초과 400 `INVALID_EVENTS_QUERY`), 최대 300건, 소스별 `sources[]` 상태(한 소스 실패는 200). 5분 캐시(오류 있는 응답은 캐시 안 함). `app.ts`가 토스 게이트가 붙은 분석 라우터보다 먼저 마운트한다 |
+| `/api/analysis/algorithm-fills?symbol&from&to`                            | 위와 같음                                                           | `AlgorithmFillSource`의 알고리즘 체결(가상/실제). 저장소가 없으면 `connected:false`와 빈 목록. 7c 전에는 이 상태                                                                                                                                                        |
+| `/api/market/indicator-candles?symbol=KOSPI\|KOSDAQ&count=1..200&before=` | `requireOwner`(토스 필요)                                           | 토스 `/market-indicators/{symbol}/candles` 일봉 한 쪽. 카탈로그 8종만, `{source, asOf, symbol, interval:'1d', candles:[{timestamp, open, high, low, close, volume}] 과거→최신, nextBefore?}`. 통화 필드 없음, 캐시 없음                                                 |
+| `/api/macro/series`·`/api/macro/releases`                                 | `ownerAccount`(소유자 ID) + 라우터 재검사, 분당 30회                | FRED·ECOS 어댑터([macro-data.md](macro-data.md)). `createApp` 옵션 `fred`·`ecos`, `index.ts`가 환경 변수 `FRED_API_KEY`·`ECOS_API_KEY`로 만든다. 키가 없으면 503 `FRED_UNAVAILABLE`/`ECOS_UNAVAILABLE`                                                                  |
+
+`createApp` 옵션 `dart`·`sec`는 `statements` 외에 `disclosures`(DART `list.json` A·B·I)·`filings`(SEC submissions)를 가진다. 없으면 이벤트 소스가 `unavailable`이다(DART_UNAVAILABLE·SEC_UNAVAILABLE 코드).

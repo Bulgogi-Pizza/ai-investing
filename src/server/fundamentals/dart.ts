@@ -18,6 +18,7 @@ import {
   text,
 } from './shared.js';
 import { extractZipEntry, type ZipLimits } from './zip.js';
+import { dartCategories, parseDartList, type Filing } from './filings.js';
 
 // Official contract: https://opendart.fss.or.kr/guide (checked 2026-10-21). See docs/implementation/fundamentals.md.
 const base = 'https://opendart.fss.or.kr/api/';
@@ -46,6 +47,9 @@ export const dartLimits = {
   corpMapTtlMs: 24 * 3600 * 1000,
   statementsTtlMs: 6 * 3600 * 1000,
   minimumIntervalMs: 150,
+  /** Event lines: pages of 100 read per category, and how long a list is reused. */
+  disclosurePages: 3,
+  disclosureTtlMs: 10 * 60 * 1000,
 };
 const stockCodePattern = /^[0-9A-Z]{6}$/;
 
@@ -300,6 +304,14 @@ interface Period {
 
 const numberString = (value: bigint | null) => (value === null ? null : value.toString());
 
+export interface DisclosureList {
+  /** Classified for the chart; oldest first within each category. */
+  filings: Filing[];
+  /** True when a category had more pages than `disclosurePages` allows. */
+  truncated: boolean;
+  asOf: string;
+}
+
 export interface DartOptions {
   apiKey: string;
   transport?: typeof fetch;
@@ -319,6 +331,7 @@ export class DartAdapter {
   private cooldownUntil = 0;
   private corpMaps: SingleFlightCache<Map<string, CorpEntry>>;
   private results: SingleFlightCache<FundamentalsResult>;
+  private disclosureCache: SingleFlightCache<DisclosureList>;
   constructor(options: DartOptions) {
     if (!/^[0-9A-Za-z]{40}$/.test(options.apiKey)) throw new Error('Invalid DART configuration');
     this.apiKey = options.apiKey;
@@ -329,6 +342,9 @@ export class DartAdapter {
     const clock = () => this.now().getTime();
     this.corpMaps = new SingleFlightCache(new TtlCache(dartLimits.corpMapTtlMs, 1, clock));
     this.results = new SingleFlightCache(new TtlCache(dartLimits.statementsTtlMs, 100, clock));
+    this.disclosureCache = new SingleFlightCache(
+      new TtlCache(dartLimits.disclosureTtlMs, 100, clock),
+    );
   }
 
   private url(endpoint: string, params: Record<string, string>) {
@@ -453,6 +469,44 @@ export class DartAdapter {
       extracted: statementJson ? extractStatement(parseRows(statementJson.list), warnings) : null,
       shares: sharesJson ? extractShares(sharesJson.list) : { shares: null, settlementDate: null },
     };
+  }
+
+  /**
+   * Disclosures of one listed company in [from, to] (receipt dates, KST), for the chart's event
+   * lines. Reads `list.json` for 정기공시(A), 주요사항보고(B) and 거래소공시(I, only 잠정실적 rows are
+   * kept), at most `disclosurePages` pages of 100 each.
+   */
+  async disclosures(symbol: string, from: string, to: string): Promise<DisclosureList> {
+    if (!stockCodePattern.test(symbol)) throw new RangeError('INVALID_SYMBOL');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from > to)
+      throw new RangeError('INVALID_WINDOW');
+    return this.disclosureCache.get(`kr:${symbol}:${from}:${to}`, async () => {
+      const corp = await this.corpForSymbol(symbol);
+      const fetchedAt = this.now();
+      const filings: Filing[] = [];
+      let truncated = false;
+      for (const category of dartCategories) {
+        for (let page = 1; page <= dartLimits.disclosurePages; page++) {
+          const json = await this.listOrNull('list.json', {
+            corp_code: corp.corpCode,
+            bgn_de: from.replaceAll('-', ''),
+            end_de: to.replaceAll('-', ''),
+            pblntf_ty: category,
+            sort: 'date',
+            sort_mth: 'asc',
+            page_no: String(page),
+            page_count: '100',
+          });
+          if (!json) break;
+          if (!Array.isArray(json.list)) throw schemaInvalid();
+          filings.push(...parseDartList(json.list, category));
+          const totalPage = typeof json.total_page === 'number' ? json.total_page : 1;
+          if (page >= totalPage) break;
+          if (page === dartLimits.disclosurePages) truncated = true;
+        }
+      }
+      return { filings, truncated, asOf: fetchedAt.toISOString() };
+    });
   }
 
   async statements(symbol: string): Promise<FundamentalsResult> {

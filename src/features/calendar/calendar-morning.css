@@ -1,0 +1,98 @@
+/* Morning-job additions to the calendar (stage 6b): brief, released values, AI summary, original title. */
+.morning-brief {
+  background: #fcfbff;
+  border: 1px solid #e9e4f2;
+  border-radius: 10px;
+  padding: 14px 18px;
+  margin-bottom: 16px;
+  display: grid;
+  gap: 6px;
+}
+.morning-brief > strong {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: #8670ac;
+}
+.morning-brief p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #4a4d5b;
+  overflow-wrap: anywhere;
+}
+.morning-brief small,
+.event-values small,
+.ai-summary small,
+.original-title small {
+  font-size: 10px;
+  color: #8f94a3;
+  line-height: 1.6;
+}
+.event-values {
+  list-style: none;
+  margin: 0 0 14px;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.event-values li {
+  display: grid;
+  gap: 2px;
+  border-left: 2px solid #e4def2;
+  padding-left: 10px;
+  font-size: 12px;
+}
+.event-values li > strong {
+  font-size: 11px;
+  font-weight: 600;
+  color: #4a4d5b;
+}
+.event-values b {
+  font-weight: 600;
+}
+.ai-summary {
+  background: #f8f5ff;
+  border: 1px solid #e9e0f6;
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin-bottom: 14px;
+  display: grid;
+  gap: 4px;
+}
+.ai-summary > strong {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #8670ac;
+}
+.ai-summary p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #4a4d5b;
+  overflow-wrap: anywhere;
+}
+.original-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  margin-top: 4px;
+}
+.original-title button {
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  font-size: 11px;
+  color: #8670ac;
+  text-decoration: underline;
+}
+.original-title q {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: #6b6f7d;
+  overflow-wrap: anywhere;
+}

@@ -565,3 +565,235 @@
     font-size: 26px;
   }
 }
+
+/* event lines (5d) */
+.event-filters {
+  display: grid;
+  gap: 8px;
+}
+.event-filter-group {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.event-filter-label {
+  min-width: 52px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.event-filter-group button {
+  border: 1px solid #e0e3ee;
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-size: 12px;
+  background: #fff;
+  color: var(--muted);
+}
+.event-filter-group button[aria-pressed='true'] {
+  background: var(--accent-soft);
+  border-color: #cfc2f3;
+  color: #5a43b8;
+  font-weight: 600;
+}
+.event-sources {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 12px 0 4px;
+  padding: 0;
+}
+.event-source-chip {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #e0e3ee;
+  border-radius: 8px;
+  padding: 4px 10px;
+  font-size: 12px;
+  background: #fbfbfe;
+  color: var(--ink);
+}
+.event-source-chip.unavailable,
+.event-source-chip.no-data {
+  color: var(--muted);
+}
+.event-source-chip.error {
+  background: #fdf1f3;
+  border-color: #f0cdd4;
+  color: #a3364b;
+}
+.event-source-chip small {
+  color: var(--muted);
+  font-size: 11px;
+}
+.event-list {
+  margin-top: 8px;
+}
+.event-list summary {
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--ink);
+}
+.event-list ul,
+.event-tooltip ul {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: grid;
+  gap: 10px;
+}
+.event-item {
+  min-width: 0;
+}
+.event-item-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.event-badge {
+  border: 2px solid;
+  border-radius: 999px;
+  padding: 0 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--ink);
+  background: #fff;
+}
+.event-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+.event-title {
+  margin-top: 2px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.event-title small {
+  font-weight: 400;
+  color: var(--muted);
+}
+.event-source {
+  font-size: 12px;
+  color: var(--muted);
+}
+.event-source a {
+  color: #4a31a8;
+  text-decoration: underline;
+}
+.analysis-chart-wrap {
+  position: relative;
+}
+.event-tooltip {
+  position: absolute;
+  z-index: 30;
+  width: min(340px, calc(100% - 8px));
+  max-height: 260px;
+  overflow: auto;
+  padding: 10px 12px;
+  border: 1px solid #d9dcea;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 8px 24px rgba(30, 30, 60, 0.18);
+  font-size: 12px;
+}
+.event-tooltip:focus {
+  outline: 2px solid #7460df;
+}
+.event-tooltip-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 13px;
+}
+.event-close {
+  width: 28px;
+  height: 28px;
+  font-size: 18px;
+  line-height: 1;
+  color: var(--muted);
+}
+.event-label:focus,
+.event-label:focus-visible {
+  outline: none;
+}
+.event-label:focus-visible rect,
+.event-label:focus-visible circle:last-child {
+  stroke: #7460df;
+  stroke-width: 2.5;
+}
+
+/* comparison and own trades (5e) */
+.overlay-controls {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+  margin-bottom: 6px;
+}
+.overlay-group h3 {
+  margin: 0 0 8px;
+  font-size: 13px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.overlay-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.overlay-item button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #e0e3ee;
+  border-radius: 8px;
+  padding: 6px 10px;
+  font-size: 13px;
+  background: #fff;
+  color: var(--muted);
+  text-align: left;
+}
+.overlay-item.on button {
+  background: var(--accent-soft);
+  border-color: #cfc2f3;
+  color: #5a43b8;
+  font-weight: 600;
+}
+.overlay-item button i {
+  width: 10px;
+  height: 10px;
+  border-radius: 3px;
+  flex: none;
+}
+.overlay-item button small {
+  font-weight: 400;
+  font-size: 11px;
+  color: #a3364b;
+}
+.compare-notes,
+.fill-list {
+  list-style: none;
+  margin: 6px 0 0;
+  padding: 0;
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1.7;
+  display: grid;
+  gap: 4px;
+}
+.trade-note p {
+  margin: 6px 0 0;
+}
+@media (max-width: 720px) {
+  .overlay-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}

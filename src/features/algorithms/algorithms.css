@@ -542,6 +542,51 @@
   flex: none;
   margin-top: 2px;
 }
+/* Paper (virtual) trading: amber, never the blue of simulation or the red of live. */
+.algo-paper-banner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin: 0;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #fdf3d8;
+  color: #7a5a12;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.algo-paper-banner svg {
+  flex: none;
+  margin-top: 2px;
+}
+.algo-subtitle {
+  margin: 0 0 8px;
+  font-size: 13px;
+}
+.algo-runs {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.algo-runs > li {
+  padding: 10px 12px;
+  border: 1px solid #eceef4;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.7;
+}
+.algo-runs p {
+  margin: 4px 0 0;
+}
+.algo-runs ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  color: #5b6073;
+  overflow-wrap: anywhere;
+}
 .algo-source {
   display: grid;
   gap: 8px;

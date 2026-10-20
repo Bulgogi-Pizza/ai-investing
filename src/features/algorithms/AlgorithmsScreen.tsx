@@ -9,6 +9,7 @@ import { BacktestPanel } from './BacktestPanel';
 import { CostSettings } from './CostSettings';
 import { EmergencyStop } from './EmergencyStop';
 import { HistoryList, NotificationsList } from './HistoryAndNotifications';
+import { PaperPanel } from './PaperPanel';
 import { invalidResponse, isRecord, liveUnavailableText, modeLabels, money } from './shared';
 import './algorithms.css';
 
@@ -172,7 +173,10 @@ function Loaded({
         </section>
       </div>
       {record ? (
-        <BacktestPanel key={record.id} record={record} dirty={dirty} />
+        <>
+          <BacktestPanel key={record.id} record={record} dirty={dirty} />
+          <PaperPanel key={`paper-${record.id}`} record={record} refreshKey={refresh} />
+        </>
       ) : (
         <section className="invest-card">
           <p className="invest-muted">알고리즘을 저장하면 과거 시뮬레이션을 실행할 수 있습니다.</p>

@@ -2,11 +2,46 @@ import { Router } from 'express';
 import { ownerGate } from './owner.js';
 import { Firestore } from '@google-cloud/firestore';
 
+/** Released value attached by the morning job (stage 6b). Always carries its source and fetch time. */
+export interface EventValue {
+  /** Code-fixed macro catalog id (src/server/macro/catalog.ts). */
+  indicatorId: string;
+  label: string;
+  /** Decimal string exactly as the provider delivered it. */
+  actual: string;
+  previous: string | null;
+  unit: string;
+  /** First calendar day of the observation period the value belongs to. */
+  period: string;
+  previousPeriod: string | null;
+  source: string;
+  /** When the job received the value (UTC ISO). */
+  observedAt: string;
+}
+/** AI text attached by the morning job; absent or null when the AI step is off or failed. */
+export interface EventAiSummary {
+  text: string;
+  model: string;
+  generatedAt: string;
+}
+export interface EventTranslation {
+  model: string;
+  translatedAt: string;
+}
 export interface EconomicEvent {
   id: number;
   eventKind?: 'scheduled' | 'news-release';
   date: string;
+  /** HH:mm KST, or '' when the provider gives no release time (shown as "발표 시각 미확인"). */
   time: string;
+  /** Catalog indicators whose released values belong to this event (morning job attaches them). */
+  indicatorIds?: string[];
+  values?: EventValue[];
+  /** null = the AI step ran (or was disabled) and there is no summary; undefined = never processed. */
+  aiSummary?: EventAiSummary | null;
+  /** Provider's own title when `title` is a Korean translation of it. */
+  titleOriginal?: string;
+  translation?: EventTranslation;
   title: string;
   country: '한국' | '미국' | '글로벌';
   category: string;
@@ -96,9 +131,11 @@ export function cleanEvent(input: unknown): EconomicEvent | null {
     Number(item.id) <= 0 ||
     !realDate(item.date) ||
     typeof item.time !== 'string' ||
-    !/^([01]\d|2[0-3]):[0-5]\d$/.test(item.time)
+    (item.time !== '' && !/^([01]\d|2[0-3]):[0-5]\d$/.test(item.time))
   )
     return null;
+  const extras = cleanExtras(item);
+  if (extras === null) return null;
   if (
     !text(item.title, 300) ||
     !['한국', '미국', '글로벌'].includes(item.country as string) ||
@@ -168,7 +205,104 @@ export function cleanEvent(input: unknown): EconomicEvent | null {
     factualObservedAt: item.factualObservedAt,
     ...(item.forecast === undefined ? {} : { forecast: item.forecast as string }),
     ...(item.previous === undefined ? {} : { previous: item.previous as string }),
+    ...extras,
   };
+}
+const isoInstant =
+  /^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d{2})$/;
+const instant = (value: unknown): value is string =>
+  typeof value === 'string' && isoInstant.test(value) && Number.isFinite(Date.parse(value));
+const catalogToken = (value: unknown): value is string =>
+  typeof value === 'string' && /^[a-z0-9][a-z0-9-]{0,39}$/.test(value);
+const decimal = (value: unknown): value is string =>
+  typeof value === 'string' && /^-?\d{1,20}(?:\.\d{1,12})?$/.test(value);
+type Extras = Pick<
+  EconomicEvent,
+  'indicatorIds' | 'values' | 'aiSummary' | 'titleOriginal' | 'translation'
+>;
+/** Validates the optional morning-job fields; null means "reject the whole event". */
+function cleanExtras(item: Record<string, unknown>): Extras | null {
+  const extras: Extras = {};
+  if (item.indicatorIds !== undefined) {
+    const ids = item.indicatorIds;
+    if (
+      !Array.isArray(ids) ||
+      ids.length < 1 ||
+      ids.length > 8 ||
+      !ids.every(catalogToken) ||
+      new Set(ids).size !== ids.length
+    )
+      return null;
+    extras.indicatorIds = ids as string[];
+  }
+  if (item.values !== undefined) {
+    const rows = item.values;
+    if (!Array.isArray(rows) || rows.length > 8) return null;
+    const values: EventValue[] = [];
+    for (const raw of rows) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+      const row = raw as Record<string, unknown>;
+      if (
+        !catalogToken(row.indicatorId) ||
+        !text(row.label, 120) ||
+        !decimal(row.actual) ||
+        !(row.previous === null || decimal(row.previous)) ||
+        !text(row.unit, 80, true) ||
+        !realDate(row.period) ||
+        !(row.previousPeriod === null || realDate(row.previousPeriod)) ||
+        !text(row.source, 80) ||
+        !instant(row.observedAt)
+      )
+        return null;
+      values.push({
+        indicatorId: row.indicatorId,
+        label: row.label,
+        actual: row.actual,
+        previous: row.previous as string | null,
+        unit: row.unit as string,
+        period: row.period,
+        previousPeriod: row.previousPeriod as string | null,
+        source: row.source,
+        observedAt: row.observedAt,
+      });
+    }
+    if (new Set(values.map((value) => value.indicatorId)).size !== values.length) return null;
+    extras.values = values;
+  }
+  if (item.aiSummary !== undefined) {
+    if (item.aiSummary === null) extras.aiSummary = null;
+    else {
+      const summary = item.aiSummary as Record<string, unknown>;
+      if (
+        typeof summary !== 'object' ||
+        Array.isArray(summary) ||
+        !text(summary.text, 1200) ||
+        !text(summary.model, 100) ||
+        !instant(summary.generatedAt)
+      )
+        return null;
+      extras.aiSummary = {
+        text: summary.text,
+        model: summary.model,
+        generatedAt: summary.generatedAt,
+      };
+    }
+  }
+  if (item.titleOriginal !== undefined) {
+    const translation = item.translation as Record<string, unknown> | undefined;
+    if (
+      !text(item.titleOriginal, 300) ||
+      !translation ||
+      typeof translation !== 'object' ||
+      Array.isArray(translation) ||
+      !text(translation.model, 100) ||
+      !instant(translation.translatedAt)
+    )
+      return null;
+    extras.titleOriginal = item.titleOriginal;
+    extras.translation = { model: translation.model, translatedAt: translation.translatedAt };
+  } else if (item.translation !== undefined) return null;
+  return extras;
 }
 export function createCalendarRouter({
   repository,

@@ -12,14 +12,18 @@ import {
   text,
   type FundamentalsResult,
 } from './shared.js';
+import { parseSecSubmissions, secRecentCoverage, type Filing } from './filings.js';
 
 // Official contract: SEC "Accessing EDGAR Data", "EDGAR APIs" and the webmaster developer FAQ
 // (checked 2026-10-21). See docs/implementation/fundamentals.md.
 const tickersUrl = 'https://www.sec.gov/files/company_tickers.json';
 const factsBase = 'https://data.sec.gov/api/xbrl/companyfacts/';
+const submissionsBase = 'https://data.sec.gov/submissions/';
 export const secLimits = {
   tickersBytes: 3 * 1024 * 1024,
   factsBytes: 40 * 1024 * 1024,
+  submissionsBytes: 12 * 1024 * 1024,
+  submissionsTtlMs: 10 * 60 * 1000,
   timeoutMs: 15000,
   tickersTtlMs: 24 * 3600 * 1000,
   statementsTtlMs: 6 * 3600 * 1000,
@@ -345,6 +349,16 @@ export function buildSecStatements(
   );
 }
 
+export interface SecFilingList {
+  /** 10-K, 10-Q and 8-K filings dated within the requested window (filing date, US Eastern). */
+  filings: Filing[];
+  /** Oldest filing date the `recent` list holds; null when it is empty. */
+  oldestCovered: string | null;
+  /** True when the window starts before `oldestCovered` and older filings exist in extra files. */
+  incomplete: boolean;
+  asOf: string;
+}
+
 export interface SecOptions {
   userAgent: string;
   transport?: typeof fetch;
@@ -360,6 +374,11 @@ export class SecAdapter {
   private userAgent: string;
   private tickers: SingleFlightCache<Map<string, TickerEntry>>;
   private results: SingleFlightCache<FundamentalsResult>;
+  private filingCache: SingleFlightCache<{
+    all: Filing[];
+    coverage: { oldest: string | null; hasOlder: boolean };
+    asOf: string;
+  }>;
   constructor(options: SecOptions) {
     if (!validSecUserAgent(options.userAgent)) throw new Error('Invalid SEC configuration');
     this.userAgent = options.userAgent;
@@ -369,6 +388,7 @@ export class SecAdapter {
     const clock = () => this.now().getTime();
     this.tickers = new SingleFlightCache(new TtlCache(secLimits.tickersTtlMs, 1, clock));
     this.results = new SingleFlightCache(new TtlCache(secLimits.statementsTtlMs, 100, clock));
+    this.filingCache = new SingleFlightCache(new TtlCache(secLimits.submissionsTtlMs, 100, clock));
   }
 
   private async getJson(url: string, maxBytes: number) {
@@ -384,6 +404,39 @@ export class SecAdapter {
     return this.tickers.get('tickers', async () =>
       parseTickers(await this.getJson(tickersUrl, secLimits.tickersBytes)),
     );
+  }
+
+  /**
+   * 10-K / 10-Q / 8-K filings of one company in [from, to] from the submissions API, for the
+   * chart's event lines. Only `filings.recent` is read ("at least one year or 1,000 filings"); when
+   * the window reaches further back than that, `incomplete` says so instead of guessing.
+   */
+  async filings(symbol: string, from: string, to: string): Promise<SecFilingList> {
+    const normalized = normalizeUsSymbol(symbol);
+    if (!normalized) throw new RangeError('INVALID_SYMBOL');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(from) || !/^\d{4}-\d{2}-\d{2}$/.test(to) || from > to)
+      throw new RangeError('INVALID_WINDOW');
+    const result = await this.filingCache.get(`us:${normalized}`, async () => {
+      const entry = (await this.tickerMap()).get(normalized);
+      if (!entry) throw notFound();
+      const url = `${submissionsBase}CIK${String(entry.cik).padStart(10, '0')}.json`;
+      const fetchedAt = this.now();
+      const json = await this.getJson(url, secLimits.submissionsBytes);
+      return {
+        all: parseSecSubmissions(json, entry.cik),
+        coverage: secRecentCoverage(json),
+        asOf: fetchedAt.toISOString(),
+      };
+    });
+    return {
+      filings: result.all.filter((filing) => filing.date >= from && filing.date <= to),
+      oldestCovered: result.coverage.oldest,
+      incomplete:
+        result.coverage.hasOlder &&
+        result.coverage.oldest !== null &&
+        from < result.coverage.oldest,
+      asOf: result.asOf,
+    };
   }
 
   async statements(symbol: string): Promise<FundamentalsResult> {

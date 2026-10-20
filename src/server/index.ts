@@ -1,11 +1,16 @@
 import { aiFromEnvironment } from './ai.js';
 import { FirestoreLoginThrottle, MemoryLoginThrottle } from './login-throttle.js';
 import { FirestoreCalendarRepository, MemoryCalendarRepository } from './calendar.js';
+import { FirestoreMorningRunRepository, MemoryMorningRunRepository } from './morning.js';
 import { FirestoreSnapshotRepository, MemorySnapshotRepository } from './snapshots.js';
 import { dartFromEnvironment, secFromEnvironment } from './fundamentals/index.js';
+import { ecosFromEnvironment, fredFromEnvironment } from './macro/index.js';
 import { tossFromEnvironment } from './toss.js';
 import { createApp } from './app.js';
 import { FirestoreAlgorithmRepository, MemoryAlgorithmRepository } from './algorithms.js';
+import { algorithmAiEnabled } from './algorithm-ai.js';
+import { FirestorePaperRepository, MemoryPaperRepository } from './paper.js';
+import { PaperAlgorithmFills } from './algorithm-fills.js';
 import {
   FirestoreNotificationRepository,
   MemoryNotificationRepository,
@@ -44,6 +49,10 @@ const notifications = validAppOrigin(appOrigin)
       appOrigin,
     })
   : undefined;
+const algorithmRepository = production
+  ? new FirestoreAlgorithmRepository()
+  : new MemoryAlgorithmRepository();
+const paperRepository = production ? new FirestorePaperRepository() : new MemoryPaperRepository();
 const app = createApp({
   store,
   production,
@@ -55,11 +64,16 @@ const app = createApp({
   // A missing or malformed value leaves that market answering 503 instead of guessing.
   dart: dartFromEnvironment(),
   sec: secFromEnvironment(),
+  // Macro providers: FRED_API_KEY and ECOS_API_KEY (secrets). Missing or malformed => 503 / "미연결".
+  fred: fredFromEnvironment(),
+  ecos: ecosFromEnvironment(),
   // Same value the Toss client is bound to; owner-only routes fail closed when unset.
   ownerUserId: process.env.TOSS_OWNER_USER_ID,
-  algorithmRepository: production
-    ? new FirestoreAlgorithmRepository()
-    : new MemoryAlgorithmRepository(),
+  algorithmRepository,
+  paperRepository,
+  // Chart ▲▼ markers: stage 7c virtual fills (live fills join in stage 7f).
+  algorithmFills: new PaperAlgorithmFills(paperRepository, algorithmRepository),
+  algorithmAiEnabled: algorithmAiEnabled(),
   notificationRepository,
   notifications,
   calendarRepository: production
@@ -68,6 +82,9 @@ const app = createApp({
   snapshotRepository: production
     ? new FirestoreSnapshotRepository()
     : new MemorySnapshotRepository(),
+  morningRepository: production
+    ? new FirestoreMorningRunRepository()
+    : new MemoryMorningRunRepository(),
 });
 const port = Number(process.env.PORT ?? 8080);
 app.listen(port, '0.0.0.0', () => console.info(`Application listening on port ${port}`));

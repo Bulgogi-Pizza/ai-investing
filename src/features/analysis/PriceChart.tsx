@@ -1,10 +1,11 @@
-import type { ReactElement, SVGProps } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactElement, type SVGProps } from 'react';
 import {
   Area,
   Bar,
   CartesianGrid,
   ComposedChart,
   Line,
+  ReferenceDot,
   ReferenceLine,
   ResponsiveContainer,
   Tooltip,
@@ -14,6 +15,18 @@ import {
 import type { ChartModel, ChartRow } from '../../lib/chartData';
 import { indicatorDescriptions, type IndicatorId } from '../../lib/indicators';
 import { formatPrice, type Currency } from '../../lib/format';
+import type { EventCluster } from '../../lib/chartEvents';
+import {
+  compareKey,
+  modeLabel,
+  rebaseRows,
+  sideLabel,
+  type CompareDef,
+  type Comparison,
+  type FillMark,
+} from '../../lib/compare';
+import { EventLayer, type EventAnchor } from './EventLayer';
+import { EventTooltip } from './EventTooltip';
 
 const SYNC = 'analysis-chart';
 const axisTick = { fontSize: 11, fill: '#6b7186' };
@@ -82,7 +95,43 @@ function sarDot(props: unknown): ReactElement<SVGProps<SVGElement>> {
   );
 }
 
-/** The price pane: close line, overlay indicators, the Ichimoku cloud and Fibonacci lines. */
+export type CompareView = {
+  comparison: Comparison;
+  series: Pick<CompareDef, 'id' | 'label' | 'color'>[];
+};
+
+const markerPath = (side: 'buy' | 'sell') =>
+  side === 'buy' ? 'M0,-7 L6,5 L-6,5 Z' : 'M0,7 L6,-5 L-6,-5 Z';
+/** ▲ buy / ▼ sell. Virtual (paper) fills are hollow, real ones are filled. */
+function fillShape(mark: FillMark) {
+  return function Shape(props: unknown): ReactElement<SVGElement> {
+    const { cx, cy } = props as { cx?: number; cy?: number };
+    if (cx === undefined || cy === undefined) return <g />;
+    const color = mark.side === 'buy' ? '#c8374f' : '#2f64c8';
+    return (
+      <g
+        transform={`translate(${cx},${cy})`}
+        data-testid="fill-mark"
+        data-mode={mark.mode}
+        data-side={mark.side}
+      >
+        <title>{`${modeLabel(mark.mode)} ${sideLabel(mark.side)} ${mark.date} ${mark.quantity}주 @ ${mark.price}`}</title>
+        <path
+          d={markerPath(mark.side)}
+          fill={mark.mode === 'paper' ? '#fff' : color}
+          stroke={color}
+          strokeWidth={1.8}
+        />
+      </g>
+    );
+  };
+}
+
+/**
+ * The price pane: close line, overlay indicators, the Ichimoku cloud and Fibonacci lines, plus the
+ * 5d event lines and the 5e comparison overlay and own-trade marks. With `compare` set every
+ * price-unit value is rebased to 100 at the comparison's base date.
+ */
 export function PriceChart({
   model,
   selected,
@@ -90,6 +139,10 @@ export function PriceChart({
   buyLine,
   sellLine,
   summary,
+  compare = null,
+  costLine = null,
+  fillMarks = [],
+  eventClusters = [],
 }: {
   model: ChartModel;
   selected: ReadonlySet<IndicatorId>;
@@ -97,13 +150,66 @@ export function PriceChart({
   buyLine: number | null;
   sellLine: number | null;
   summary: string;
+  compare?: CompareView | null;
+  /** Average purchase price in price units (the page passes it only when it is near the prices). */
+  costLine?: number | null;
+  fillMarks?: FillMark[];
+  eventClusters?: EventCluster[];
 }) {
-  const fmt = priceFormatter(currency);
+  const scale = compare ? compare.comparison.priceScale : 1;
+  const rows = useMemo(
+    () => (compare ? rebaseRows(model.rows, scale, compare.comparison) : model.rows),
+    [compare, model.rows, scale],
+  );
+  const fmt = compare ? plain(2) : priceFormatter(currency);
+  const wrap = useRef<HTMLDivElement>(null);
+  const tooltip = useRef<HTMLDivElement>(null);
+  const hideTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [active, setActive] = useState<(EventAnchor & { pinned: boolean }) | null>(null);
+  const labels = rows.map((row) => row.label);
+  const clearHide = () => {
+    if (hideTimer.current) clearTimeout(hideTimer.current);
+    hideTimer.current = null;
+  };
+  const leave = () => {
+    clearHide();
+    hideTimer.current = setTimeout(
+      () => setActive((current) => (current?.pinned ? current : null)),
+      180,
+    );
+  };
+  const returningFocus = useRef(false);
+  const show = (anchor: EventAnchor) => {
+    // Focus handed back after Esc must not reopen the tooltip it just closed.
+    if (returningFocus.current) return;
+    clearHide();
+    setActive((current) => (current?.pinned ? current : { ...anchor, pinned: false }));
+  };
+  const pin = (anchor: EventAnchor) => {
+    clearHide();
+    setActive({ ...anchor, pinned: true });
+  };
+  const close = () => {
+    const date = active ? eventClusters[active.index]?.rowDate : null;
+    setActive(null);
+    returningFocus.current = true;
+    if (date) wrap.current?.querySelector<SVGElement>(`[data-event-date="${date}"]`)?.focus();
+    returningFocus.current = false;
+  };
+  useEffect(() => {
+    if (active?.pinned) tooltip.current?.focus();
+  }, [active?.pinned, active?.index]);
+  useEffect(() => clearHide, []);
+  // A new event list or chart invalidates an open tooltip.
+  useEffect(() => setActive(null), [eventClusters]);
+  const wrapWidth = wrap.current?.clientWidth ?? 600;
+  const tooltipWidth = Math.min(340, wrapWidth - 8);
+  const activeCluster = active ? eventClusters[active.index] : undefined;
   const lines = (Object.keys(overlayLines) as IndicatorId[])
     .filter((id) => selected.has(id))
     .flatMap((id) => overlayLines[id] ?? []);
   const legend = [
-    { name: '종가', color: '#7460df' },
+    { name: compare ? '종가(기준 100)' : '종가', color: '#7460df' },
     ...lines.map((l) => ({ name: l.name, color: l.color })),
     ...(selected.has('ichimoku')
       ? [
@@ -112,121 +218,192 @@ export function PriceChart({
         ]
       : []),
     ...(selected.has('parabolicSar') ? [{ name: '파라볼릭 SAR(점)', color: '#2f8f6b' }] : []),
+    ...(compare?.series.map((item) => ({ name: item.label, color: item.color })) ?? []),
+    ...(costLine !== null ? [{ name: '내 평균 매수가', color: '#1f7a5c' }] : []),
+    ...(fillMarks.length
+      ? [{ name: '▲ 매수 ▼ 매도 (속이 빈 표시는 가상, 채운 표시는 실제)', color: '#c8374f' }]
+      : []),
+    ...(eventClusters.length ? [{ name: '점선 = 이벤트(색: 중요도)', color: '#d9822b' }] : []),
   ];
   const fib = model.fibonacci;
   return (
     <>
-      <div className="analysis-chart-main" role="img" aria-label={summary}>
-        <ResponsiveContainer width="100%" height="100%">
-          <ComposedChart
-            data={model.rows}
-            syncId={SYNC}
-            margin={{ top: 12, right: 6, left: 0, bottom: 0 }}
-          >
-            {grid}
-            <XAxis
-              dataKey="label"
-              minTickGap={36}
-              interval="preserveStartEnd"
-              tickLine={false}
-              axisLine={false}
-              tick={axisTick}
-            />
-            <YAxis
-              domain={['auto', 'auto']}
-              orientation="right"
-              width={64}
-              tickLine={false}
-              axisLine={false}
-              tick={axisTick}
-              tickFormatter={axisPrice(currency)}
-            />
-            <Tooltip
-              formatter={(value) => fmt(value)}
-              contentStyle={{ borderRadius: 10, border: '1px solid #e9eaf0', fontSize: 12 }}
-            />
-            {selected.has('ichimoku') && (
-              <>
-                <Area
-                  dataKey="cloudUp"
-                  name="구름대(선행스팬 1≥2)"
-                  stroke="none"
-                  fill="#2f8f6b"
-                  fillOpacity={0.16}
-                  isAnimationActive={false}
-                />
-                <Area
-                  dataKey="cloudDown"
-                  name="구름대(선행스팬 1<2)"
-                  stroke="none"
-                  fill="#c8374f"
-                  fillOpacity={0.16}
-                  isAnimationActive={false}
-                />
-              </>
-            )}
-            <Line
-              dataKey="close"
-              name="종가"
-              stroke="#7460df"
-              strokeWidth={2.4}
-              dot={false}
-              isAnimationActive={false}
-            />
-            {lines.map((l) => (
+      <div className="analysis-chart-wrap" ref={wrap}>
+        <div className="analysis-chart-main" role="group" aria-label={summary}>
+          <ResponsiveContainer width="100%" height="100%">
+            <ComposedChart
+              data={rows}
+              syncId={SYNC}
+              margin={{ top: 12, right: 6, left: 0, bottom: 0 }}
+            >
+              {grid}
+              <XAxis
+                dataKey="label"
+                minTickGap={36}
+                interval="preserveStartEnd"
+                tickLine={false}
+                axisLine={false}
+                tick={axisTick}
+              />
+              <YAxis
+                domain={['auto', 'auto']}
+                orientation="right"
+                width={64}
+                tickLine={false}
+                axisLine={false}
+                tick={axisTick}
+                tickFormatter={compare ? (v: number) => v.toFixed(0) : axisPrice(currency)}
+              />
+              <Tooltip
+                formatter={(value) => fmt(value)}
+                contentStyle={{ borderRadius: 10, border: '1px solid #e9eaf0', fontSize: 12 }}
+              />
+              {selected.has('ichimoku') && (
+                <>
+                  <Area
+                    dataKey="cloudUp"
+                    name="구름대(선행스팬 1≥2)"
+                    stroke="none"
+                    fill="#2f8f6b"
+                    fillOpacity={0.16}
+                    isAnimationActive={false}
+                  />
+                  <Area
+                    dataKey="cloudDown"
+                    name="구름대(선행스팬 1<2)"
+                    stroke="none"
+                    fill="#c8374f"
+                    fillOpacity={0.16}
+                    isAnimationActive={false}
+                  />
+                </>
+              )}
               <Line
-                key={l.key}
-                dataKey={l.key}
-                name={l.name}
-                stroke={l.color}
-                strokeWidth={l.width ?? 1.2}
-                strokeDasharray={l.dash}
+                dataKey="close"
+                name="종가"
+                stroke="#7460df"
+                strokeWidth={2.4}
                 dot={false}
                 isAnimationActive={false}
               />
-            ))}
-            {selected.has('parabolicSar') && (
-              <Line
-                dataKey="sar"
-                name="파라볼릭 SAR"
-                stroke="none"
-                dot={sarDot}
-                activeDot={false}
-                isAnimationActive={false}
-              />
-            )}
-            {fib?.levels.map((level) => (
-              <ReferenceLine
-                key={level.ratio}
-                y={level.price}
-                stroke="#9b8bd0"
-                strokeDasharray="2 4"
-                label={{
-                  value: `${level.label} ${fmt(level.price)}`,
-                  position: 'insideTopLeft',
-                  fontSize: 11,
-                  fill: '#6a58b5',
-                }}
-              />
-            ))}
-            {buyLine !== null && (
-              <ReferenceLine
-                y={buyLine}
-                label={{ value: '매수 검토선', position: 'insideBottomLeft', fontSize: 11 }}
-                stroke="#26a18b"
-                strokeDasharray="5 5"
-              />
-            )}
-            {sellLine !== null && (
-              <ReferenceLine
-                y={sellLine}
-                label={{ value: '매도 검토선', position: 'insideTopLeft', fontSize: 11 }}
-                stroke="#ef7b7e"
-                strokeDasharray="5 5"
-              />
-            )}
-          </ComposedChart>
-        </ResponsiveContainer>
+              {compare?.series.map((item) => (
+                <Line
+                  key={item.id}
+                  dataKey={compareKey(item.id)}
+                  name={item.label}
+                  stroke={item.color}
+                  strokeWidth={1.8}
+                  dot={false}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+              ))}
+              {lines.map((l) => (
+                <Line
+                  key={l.key}
+                  dataKey={l.key}
+                  name={l.name}
+                  stroke={l.color}
+                  strokeWidth={l.width ?? 1.2}
+                  strokeDasharray={l.dash}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              ))}
+              {selected.has('parabolicSar') && (
+                <Line
+                  dataKey="sar"
+                  name="파라볼릭 SAR"
+                  stroke="none"
+                  dot={sarDot}
+                  activeDot={false}
+                  isAnimationActive={false}
+                />
+              )}
+              {fib?.levels.map((level) => (
+                <ReferenceLine
+                  key={level.ratio}
+                  y={level.price * scale}
+                  stroke="#9b8bd0"
+                  strokeDasharray="2 4"
+                  label={{
+                    value: `${level.label} ${fmt(level.price * scale)}`,
+                    position: 'insideTopLeft',
+                    fontSize: 11,
+                    fill: '#6a58b5',
+                  }}
+                />
+              ))}
+              {buyLine !== null && (
+                <ReferenceLine
+                  y={buyLine * scale}
+                  label={{ value: '매수 검토선', position: 'insideBottomLeft', fontSize: 11 }}
+                  stroke="#26a18b"
+                  strokeDasharray="5 5"
+                />
+              )}
+              {sellLine !== null && (
+                <ReferenceLine
+                  y={sellLine * scale}
+                  label={{ value: '매도 검토선', position: 'insideTopLeft', fontSize: 11 }}
+                  stroke="#ef7b7e"
+                  strokeDasharray="5 5"
+                />
+              )}
+              {costLine !== null && (
+                <ReferenceLine
+                  y={costLine * scale}
+                  ifOverflow="extendDomain"
+                  stroke="#1f7a5c"
+                  strokeWidth={1.6}
+                  strokeDasharray="8 3"
+                  label={{
+                    value: `내 평균 매수가 ${compare ? fmt(costLine * scale) : fmt(costLine)}`,
+                    position: 'insideBottomRight',
+                    fontSize: 11,
+                    fill: '#1f7a5c',
+                  }}
+                />
+              )}
+              {fillMarks.map((mark) => {
+                const row = rows[mark.rowIndex];
+                if (!row) return null;
+                return (
+                  <ReferenceDot
+                    key={mark.id}
+                    x={row.label}
+                    y={mark.priceNumber * scale}
+                    ifOverflow="extendDomain"
+                    r={6}
+                    shape={fillShape(mark)}
+                  />
+                );
+              })}
+              {eventClusters.length > 0 && (
+                <EventLayer
+                  clusters={eventClusters}
+                  labels={labels}
+                  activeIndex={active?.index ?? null}
+                  onActivate={show}
+                  onLeave={leave}
+                  onPin={pin}
+                />
+              )}
+            </ComposedChart>
+          </ResponsiveContainer>
+        </div>
+        {activeCluster && active && (
+          <EventTooltip
+            ref={tooltip}
+            cluster={activeCluster}
+            left={Math.max(4, Math.min(active.x - tooltipWidth / 2, wrapWidth - tooltipWidth - 4))}
+            top={active.y + 6}
+            pinned={active.pinned}
+            onEnter={clearHide}
+            onLeave={leave}
+            onClose={close}
+          />
+        )}
       </div>
       <ul className="legend-row" aria-label="범례">
         {legend.map((item) => (

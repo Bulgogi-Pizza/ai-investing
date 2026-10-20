@@ -1,5 +1,15 @@
 import type { Page, Route } from '@playwright/test';
-import { analysisReply, candlePage, quotes } from './analysis-mock';
+import {
+  analysisReply,
+  candlePage,
+  eventsReply,
+  fillsReply,
+  indicatorCandlePage,
+  macroSeriesReply,
+  quotes,
+  type EventsMode,
+  type FillsMode,
+} from './analysis-mock';
 
 /**
  * Synthetic API for browser tests. Every number, name and event here is invented test data;
@@ -28,6 +38,14 @@ export type MockOptions = {
   events?: unknown[];
   strategy?: unknown;
   insight?: unknown;
+  /** 종목 분석 event lines (GET /api/analysis/events). */
+  chartEvents?: EventsMode;
+  /** Algorithm fill markers (GET /api/analysis/algorithm-fills). Default: not connected. */
+  fills?: FillsMode;
+  /** ECOS USD/KRW series (GET /api/macro/series). Default: ok. */
+  ecos?: 'ok' | 'unavailable' | 'error';
+  /** Market-indicator / SPY candle requests that fail with a provider error. */
+  compareFail?: ('KOSPI' | 'KOSDAQ' | 'SPY')[];
 };
 
 export const registeredEvents = [
@@ -87,6 +105,7 @@ export const portfolioBody = {
       currency: 'KRW',
       quantity: '100',
       lastPrice: '72000',
+      averagePurchasePrice: '68000',
       marketValue: '7200000',
       profitLoss: '700000',
       profitLossRate: '0.1077',
@@ -251,9 +270,24 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
       return method === 'PUT'
         ? json({ strategy: route.request().postDataJSON().strategy })
         : json({ strategy: options.strategy ?? null });
+    if (path === '/api/macro/series') {
+      if (options.ecos === 'unavailable')
+        return json(
+          errorBody('ECOS_UNAVAILABLE', '한국 경제지표(한국은행 ECOS)가 설정되지 않았습니다.'),
+          503,
+        );
+      if (options.ecos === 'error')
+        return json(
+          errorBody('PROVIDER_UNAVAILABLE', '거시 지표 제공자 서비스를 사용할 수 없습니다.'),
+          503,
+        );
+      const reply = macroSeriesReply(url.searchParams);
+      return json(reply.body, reply.status);
+    }
     if (path === '/api/admin/users') return json({ users: [{ ...adminUser, active: true }] });
     const marketPaths = [
       '/api/market/candles',
+      '/api/market/indicator-candles',
       '/api/market/prices',
       '/api/market/indicators',
       '/api/portfolio',
@@ -279,7 +313,15 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
         503,
       );
     const empty = market === 'empty';
+    if (path === '/api/market/indicator-candles') {
+      const symbol = url.searchParams.get('symbol') ?? '';
+      if (options.compareFail?.includes(symbol as 'KOSPI'))
+        return json(errorBody('PROVIDER_UNAVAILABLE', '제공자 서비스를 사용할 수 없습니다.'), 503);
+      return json(indicatorCandlePage(symbol, url.searchParams.get('before')));
+    }
     if (path === '/api/market/candles') {
+      if (url.searchParams.get('symbol') === 'SPY' && options.compareFail?.includes('SPY'))
+        return json(errorBody('PROVIDER_UNAVAILABLE', '제공자 서비스를 사용할 수 없습니다.'), 503);
       const symbol = url.searchParams.get('symbol') ?? '';
       const page = candlesFor(symbol, url.searchParams.get('before'));
       return json(empty ? { ...page, candles: [] } : page);
@@ -293,6 +335,14 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
           ? []
           : wanted.filter((s) => quotes[s]).map((symbol) => ({ symbol, ...quotes[symbol] })),
       });
+    }
+    if (path === '/api/analysis/events') {
+      const reply = eventsReply(url.searchParams, options.chartEvents ?? 'ok');
+      return json(reply.body, reply.status);
+    }
+    if (path === '/api/analysis/algorithm-fills') {
+      const reply = fillsReply(url.searchParams, options.fills ?? 'unconnected');
+      return json(reply.body, reply.status);
     }
     if (path === '/api/fundamentals' || isAnalysis) {
       if (empty && path !== '/api/analysis/sector-peers')
