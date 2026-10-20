@@ -17,6 +17,7 @@ import {
   type CalendarRepository,
 } from './calendar.js';
 import { createNewsRouter } from './news.js';
+import { ownerGate } from './owner.js';
 import type { aiFromEnvironment } from './ai.js';
 import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
@@ -82,10 +83,11 @@ export function createApp(options: AppOptions = {}) {
   const loginThrottle = options.loginThrottle ?? new MemoryLoginThrottle();
   const store = options.store ?? new MemoryStore();
   const calendarRepository = options.calendarRepository ?? new MemoryCalendarRepository();
-  // Owner-only gate for data that comes from the single Toss owner account. Authentication has
-  // already run; this checks the server-side session user, never a client-supplied value.
-  const requireOwner = (_req: Request, res: Response, next: NextFunction) => {
-    if (!options.toss || !options.ownerUserId) {
+  // Owner-only gates. Authentication has already run; both read the server-side session user.
+  // Toss-backed data additionally needs the Toss client; owner-account data needs only the id.
+  const ownerAccount = ownerGate(options.ownerUserId);
+  const requireOwner = (req: Request, res: Response, next: NextFunction) => {
+    if (!options.toss) {
       failure(
         res,
         503,
@@ -94,11 +96,7 @@ export function createApp(options: AppOptions = {}) {
       );
       return;
     }
-    if (res.locals.user.id !== options.ownerUserId) {
-      failure(res, 403, 'OWNER_REQUIRED', '소유자 계정 전용 기능입니다.');
-      return;
-    }
-    next();
+    ownerAccount(req, res, next);
   };
   const app = express();
   app.disable('x-powered-by');
@@ -272,10 +270,10 @@ export function createApp(options: AppOptions = {}) {
     }
     res.sendStatus(204);
   });
-  app.get('/api/strategy', async (_req, res) =>
+  app.get('/api/strategy', ownerAccount, async (_req, res) =>
     res.json({ strategy: await store.getStrategy(res.locals.user.id) }),
   );
-  app.put('/api/strategy', async (req, res) => {
+  app.put('/api/strategy', ownerAccount, async (req, res) => {
     const input = req.body?.strategy;
     if (!validStrategy(input)) {
       failure(
@@ -365,10 +363,11 @@ export function createApp(options: AppOptions = {}) {
       res.json(options.ai ? await options.ai.enrich(rules, res.locals.user.id) : rules);
     },
   );
-  app.use(createNewsRouter({ repository: calendarRepository }));
+  app.use(createNewsRouter({ repository: calendarRepository, ownerUserId: options.ownerUserId }));
   app.use(
     createCalendarRouter({
       repository: calendarRepository,
+      ownerUserId: options.ownerUserId,
     }),
   );
   app.use('/api', (_req, res) => failure(res, 404, 'NOT_FOUND', '요청한 API를 찾을 수 없습니다.'));

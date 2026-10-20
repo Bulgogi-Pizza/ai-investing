@@ -8,7 +8,7 @@ SOT: docs/planning/requirements.md. 구현: src/features/calendar/CalendarPage.t
 
 상태: 로딩, 조회 실패(경고 + 다시 시도), 등록 일정 없음("등록된 일정이 없습니다", 예시로 대체하지 않음), 조회 한도 초과(`truncated`)를 각각 명시한다.
 
-범위: 이 API는 토스 소유자 계정에 의존하지 않는 공유 등록 자료라 이번 단계에서 소유자 전용으로 제한하지 않았다(로그인한 모든 등록 계정이 읽는다). 등록·수집은 관리자 전용이다. 소유자 전용으로 바꿀지는 아침 갱신(6b) 설계에서 정한다.
+범위(소유자 전용): 확정 설계 결정 9에 따라 `GET /api/calendar/events`, `GET /api/news/sources`, 관리자 쓰기 경로(`POST /api/admin/calendar/events`, `POST /api/admin/news/sync`)는 로그인에 더해 **소유자 검사**(`TOSS_OWNER_USER_ID`)를 서버에서 한다. 쓰기 경로는 관리자이면서 소유자여야 한다. 라우터(`calendar.ts`, `news.ts`)도 `ownerUserId`를 받아 장착 순서에 의존하지 않고 다시 검사하며, 소유자 ID가 없으면 503으로 닫는다. 소유자가 아닌 계정은 403 `OWNER_REQUIRED`이며 화면은 일정·관리 도구 없이 "소유자 계정 전용 기능입니다" 안내만 보여 준다(관리자 계정 관리 대화상자는 관리자 전용 경로라 유지).
 
 ## 기간 이동
 

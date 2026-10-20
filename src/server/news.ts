@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { cleanEvent, type CalendarRepository, type EconomicEvent } from './calendar.js';
+import { ownerGate } from './owner.js';
 
 export const officialNewsSources = [
   {
@@ -279,9 +280,11 @@ export async function syncOfficialNews(
 }
 export function createNewsRouter({
   repository,
+  ownerUserId,
   options = {},
 }: {
   repository: CalendarRepository;
+  ownerUserId?: string;
   options?: Omit<NewsSyncOptions, 'sourceIds' | 'authorId'>;
 }) {
   const router = Router();
@@ -292,6 +295,8 @@ export function createNewsRouter({
     }
     next();
   });
+  // News sources and sync are owner-only (sync additionally requires admin); re-checked here.
+  router.use(['/api/news/sources', '/api/admin/news/sync'], ownerGate(ownerUserId));
   router.get('/api/news/sources', (_req, res) =>
     res.json({ sources: officialNewsSources, warnings: [newsCoverageWarning] }),
   );

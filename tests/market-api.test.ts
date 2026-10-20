@@ -86,12 +86,19 @@ beforeEach(async () => {
     })
   ).id;
 });
-const endpoints = [
+const tossEndpoints = [
   '/api/market/prices?symbols=005930,AAPL',
   '/api/market/indicators',
   '/api/market/candles?symbol=005930',
   '/api/portfolio',
   '/api/recommendations',
+];
+// Owner-account data that does not call Toss but is still owner-only.
+const endpoints = [
+  ...tossEndpoints,
+  '/api/strategy',
+  '/api/calendar/events?from=2026-10-01&to=2026-10-31',
+  '/api/news/sources',
 ];
 describe('owner-only market endpoints', () => {
   it('rejects anonymous requests before any provider call', async () => {
@@ -113,7 +120,7 @@ describe('owner-only market endpoints', () => {
   it('returns 503 TOSS_INTEGRATION_UNAVAILABLE when Toss is not configured', async () => {
     const app = appWith(undefined, { toss: false });
     const cookie = await login(app, 'owner@example.test');
-    for (const path of endpoints) {
+    for (const path of tossEndpoints) {
       const response = await request(app).get(path).set('Cookie', cookie);
       expect(response.status, path).toBe(503);
       expect(response.body.error.code, path).toBe('TOSS_INTEGRATION_UNAVAILABLE');

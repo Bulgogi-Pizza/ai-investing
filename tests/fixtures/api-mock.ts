@@ -264,6 +264,11 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
       return route.fulfill({ status: 204 });
     }
     if (!state.user) return json(errorBody('AUTH_REQUIRED', '로그인이 필요합니다.'), 401);
+    if (
+      market === 'owner-only' &&
+      ['/api/calendar/events', '/api/news/sources', '/api/strategy'].includes(path)
+    )
+      return json(errorBody('OWNER_REQUIRED', '소유자 계정 전용 기능입니다.'), 403);
     if (path === '/api/calendar/events')
       return json({ events: options.events ?? registeredEvents, truncated: false });
     if (path === '/api/news/sources') return json({ sources: [], warnings: [] });

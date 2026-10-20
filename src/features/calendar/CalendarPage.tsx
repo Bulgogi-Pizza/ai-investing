@@ -27,6 +27,7 @@ import {
 } from '../../lib/market';
 import { DataState, LoadingState } from '../../components/DataState';
 import { formatKst, kstToday } from '../../lib/kst';
+import { ApiError, issueOf, type DataIssue } from '../../lib/api';
 const flag = (country: string) => (country === '한국' ? '🇰🇷' : country === '미국' ? '🇺🇸' : '🌐');
 export default function CalendarPage({ search, isAdmin }: { search: string; isAdmin: boolean }) {
   const [view, setView] = useState('월간');
@@ -49,7 +50,11 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok)
-          throw new Error(body.error?.message ?? '공식 뉴스 출처를 불러오지 못했습니다.');
+          throw new ApiError(
+            response.status,
+            body.error?.code ?? 'REQUEST_FAILED',
+            body.error?.message ?? '공식 뉴스 출처를 불러오지 못했습니다.',
+          );
         if (!Array.isArray(body.sources)) throw new Error('뉴스 출처 응답을 확인하지 못했습니다.');
         if (!controller.signal.aborted) {
           setNewsSources(body.sources);
@@ -57,7 +62,8 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
         }
       })
       .catch((error) => {
-        if (!controller.signal.aborted)
+        // Owner-only is reported once by the calendar request, not as a news error.
+        if (!controller.signal.aborted && issueOf(error).kind !== 'owner-only')
           setNewsError(error instanceof Error ? error.message : '뉴스 출처 조회 실패');
       });
     return () => {
@@ -105,7 +111,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
 
   const [registered, setRegistered] = useState<MarketEvent[]>([]);
   const [calendarLoading, setCalendarLoading] = useState(true);
-  const [calendarError, setCalendarError] = useState('');
+  const [calendarIssue, setCalendarIssue] = useState<DataIssue | null>(null);
   const [calendarTruncated, setCalendarTruncated] = useState(false);
   const [calendarReload, setCalendarReload] = useState(0);
   const [importOpen, setImportOpen] = useState(false);
@@ -128,7 +134,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
   );
   useEffect(() => {
     setRegistered([]);
-    setCalendarError('');
+    setCalendarIssue(null);
     setCalendarTruncated(false);
     const controller = new AbortController();
     setCalendarLoading(true);
@@ -140,7 +146,11 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
       .then(async (response) => {
         const body = await response.json();
         if (!response.ok)
-          throw new Error(body.error?.message ?? '등록 일정을 불러오지 못했습니다.');
+          throw new ApiError(
+            response.status,
+            body?.error?.code ?? 'REQUEST_FAILED',
+            body?.error?.message ?? '등록 일정을 불러오지 못했습니다.',
+          );
         if (!Array.isArray(body.events)) throw new Error('일정 응답을 확인하지 못했습니다.');
         const mapped = body.events.map(
           (event: MarketEvent & { date: string; assets: string[] }) => {
@@ -167,8 +177,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
         }
       })
       .catch((error) => {
-        if (!controller.signal.aborted)
-          setCalendarError(error instanceof Error ? error.message : '일정 연결 실패');
+        if (!controller.signal.aborted) setCalendarIssue(issueOf(error));
       })
       .finally(() => {
         if (!controller.signal.aborted) setCalendarLoading(false);
@@ -261,6 +270,19 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     setAsset('전체 자산');
     setMarket('전체 시장');
   }
+  if (calendarIssue?.kind === 'owner-only')
+    return (
+      <>
+        <div className="page-heading">
+          <div className="eyebrow">MARKET INTELLIGENCE</div>
+          <h1>
+            경제 캘린더
+            <span className="title-dot" />
+          </h1>
+        </div>
+        <DataState issue={calendarIssue} />
+      </>
+    );
   return (
     <>
       <div className="page-heading">
@@ -421,13 +443,10 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
         </section>
       )}
       {calendarLoading && <LoadingState label="등록 일정을 불러오는 중…" />}
-      {calendarError && (
-        <DataState
-          issue={{ kind: 'error', message: calendarError, retryable: true }}
-          onRetry={() => setCalendarReload((v) => v + 1)}
-        />
+      {calendarIssue && (
+        <DataState issue={calendarIssue} onRetry={() => setCalendarReload((v) => v + 1)} />
       )}
-      {!calendarLoading && !calendarError && registered.length === 0 && (
+      {!calendarLoading && !calendarIssue && registered.length === 0 && (
         <DataState
           issue={{
             kind: 'no-data',

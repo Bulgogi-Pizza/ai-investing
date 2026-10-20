@@ -51,12 +51,18 @@ export default function Portfolio() {
   const [strategy, setStrategy] = useState<Strategy>(structuredClone(initialStrategy));
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
+  const [strategyOwnerOnly, setStrategyOwnerOnly] = useState(false);
   const { state, retry } = useApiResource('/api/portfolio', parsePortfolio);
   useEffect(() => {
     const controller = new AbortController();
     fetch('/api/strategy', { signal: controller.signal })
       .then(async (saved) => {
-        if (!saved.ok) return;
+        if (!saved.ok) {
+          const body = await saved.json().catch(() => null);
+          if (body?.error?.code === 'OWNER_REQUIRED' && !controller.signal.aborted)
+            setStrategyOwnerOnly(true);
+          return;
+        }
         const parsed = parseStoredStrategy((await saved.json()).strategy);
         if (parsed && !controller.signal.aborted) setStrategy(parsed);
       })
@@ -228,7 +234,12 @@ export default function Portfolio() {
       )}
       {state.status === 'issue' && <DataState issue={state.issue} onRetry={retry} />}
       {holdingsView}
-      {strategyEditor}
+      {strategyOwnerOnly && state.status !== 'issue' && (
+        <DataState issue={{ kind: 'owner-only', message: '', retryable: false }} />
+      )}
+      {!strategyOwnerOnly &&
+        !(state.status === 'issue' && state.issue.kind === 'owner-only') &&
+        strategyEditor}
     </div>
   );
 }

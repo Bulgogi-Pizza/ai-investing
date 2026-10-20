@@ -21,14 +21,18 @@ const event = {
   confidence: 'low',
   factualObservedAt: '2026-10-20T00:00:00Z',
 };
-function app(role: 'admin' | 'member' | null, repository = new MemoryCalendarRepository()) {
+function app(
+  role: 'admin' | 'member' | null,
+  repository = new MemoryCalendarRepository(),
+  userId = 'test-user',
+) {
   const server = express();
   server.use(express.json());
   server.use((_req, res, next) => {
-    if (role) res.locals.user = { id: 'test-user', role, active: true };
+    if (role) res.locals.user = { id: userId, role, active: true };
     next();
   });
-  server.use(createCalendarRouter({ repository }));
+  server.use(createCalendarRouter({ repository, ownerUserId: 'test-user' }));
   return server;
 }
 const query = '/api/calendar/events?from=2026-10-01&to=2026-10-31';
@@ -110,5 +114,30 @@ describe('검증된 실제 일정 API 경계', () => {
     const result = await request(app('member', repository)).get(query);
     expect(result.headers['content-type']).toContain('application/json');
     expect(result.body.events[0].title).toBe(title);
+  });
+  it('소유자가 아닌 계정은 조회·등록 모두 403이고 소유자 미설정이면 닫는다', async () => {
+    const repository = new MemoryCalendarRepository();
+    await repository.upsert([event as never], 'test-user');
+    const other = app('member', repository, 'someone-else');
+    const read = await request(other).get(query);
+    expect(read.status).toBe(403);
+    expect(read.body.error.code).toBe('OWNER_REQUIRED');
+    expect(JSON.stringify(read.body)).not.toContain('물가 발표');
+    const otherAdmin = app('admin', repository, 'someone-else');
+    expect(
+      (
+        await request(otherAdmin)
+          .post('/api/admin/calendar/events')
+          .send({ events: [event] })
+      ).status,
+    ).toBe(403);
+    expect((await request(app('member', repository)).get(query)).status).toBe(200);
+    const unconfigured = express();
+    unconfigured.use((_req, res, next) => {
+      res.locals.user = { id: 'test-user', role: 'admin', active: true };
+      next();
+    });
+    unconfigured.use(createCalendarRouter({ repository }));
+    expect((await request(unconfigured).get(query)).status).toBe(503);
   });
 });

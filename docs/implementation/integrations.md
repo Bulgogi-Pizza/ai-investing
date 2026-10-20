@@ -45,9 +45,9 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 
 ### 소유자 검사
 
-`createApp({ ownerUserId })`의 `requireOwner` 미들웨어가 인증 뒤에 서버 세션의 사용자 ID를 `ownerUserId`와 비교한다. `src/server/index.ts`는 토스 클라이언트와 같은 `TOSS_OWNER_USER_ID`를 넘긴다. 적용 대상: `/api/portfolio`, `/api/market/*`, `/api/recommendations`. 관리자 경로(`/api/admin/*`), 인증, 전략, 캘린더·뉴스 경로는 기존과 같다. 순서와 응답:
+`createApp({ ownerUserId })`의 `requireOwner` 미들웨어가 인증 뒤에 서버 세션의 사용자 ID를 `ownerUserId`와 비교한다. `src/server/index.ts`는 토스 클라이언트와 같은 `TOSS_OWNER_USER_ID`를 넘긴다. 적용 대상: `/api/portfolio`, `/api/market/*`, `/api/recommendations`(토스 클라이언트 필요)와 `GET/PUT /api/strategy`, `GET /api/calendar/events`, `GET /api/news/sources`, `POST /api/admin/calendar/events`, `POST /api/admin/news/sync`(소유자 ID만 필요, `src/server/owner.ts`의 `ownerGate`, 캘린더·뉴스 라우터가 `ownerUserId`를 받아 자체 재검사). 관리자 쓰기 경로는 관리자이면서 소유자여야 한다. 계정 관리(`/api/admin/users*`)와 인증 경로는 기존과 같다. 순서와 응답:
 
-1. 토스 클라이언트나 `ownerUserId`가 없으면 503 `TOSS_INTEGRATION_UNAVAILABLE`(소유자를 알 수 없으면 닫는다).
+1. 토스 클라이언트나 `ownerUserId`가 없으면(소유자 ID 전용 경로는 `ownerUserId`만 없으면) 503 `TOSS_INTEGRATION_UNAVAILABLE`(소유자를 알 수 없으면 닫는다).
 2. 로그인 사용자가 소유자가 아니면 403 `OWNER_REQUIRED`("소유자 계정 전용 기능입니다."). 제공자를 호출하지 않는다.
 3. `TossClient.portfolio`의 자체 소유자 검사(`PORTFOLIO_OWNER_REQUIRED`)는 이중 방어로 유지한다.
 

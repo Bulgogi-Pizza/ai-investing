@@ -8,7 +8,7 @@
 
 - `GET /api/portfolio`: 로그인 + **소유자 검사**(`requireOwner`, 서버). 토스 클라이언트도 소유자를 다시 검사한다. 성공 시 `source`, `asOf`(KST 표시)와 함께 통화별 원래 단위로 표시하며 합산·환산하지 않는다. `scope:'stocks-only'`이므로 현금·채권·금·다른 계좌는 포함하지 않고 전체 자산 비중이나 리밸런싱 금액을 계산하지 않는다. 공식 `profitLoss.rate`는 비율(0.1077)이라 화면은 100을 곱해 10.77%로 표시한다.
 - 상태는 공통 컴포넌트가 구분한다: 503 `TOSS_INTEGRATION_UNAVAILABLE` 토스 미연결, 403 `OWNER_REQUIRED` 소유자 전용 안내(다른 등록 계정은 이 안내만 본다), 보유 종목 0개는 "보유 중인 주식이 없습니다", 그 밖의 오류는 경고 + 다시 시도. 어떤 경우에도 예시 자산으로 대체하지 않는다.
-- 전략 편집은 소유자 전용이 아니다(계정별 저장). `GET /api/strategy`로 읽고 `PUT /api/strategy`에 `{strategy:{name,horizon,benchmark,riskTolerance,targetAllocations,notes}}`를 보낸다. 실제 계좌·주문은 변경하지 않는다. 자산 데이터를 받지 못해도 전략 편집은 가능하다.
+- 전략 편집도 소유자 전용이다(`GET/PUT /api/strategy`에 소유자 검사). 소유자가 아니면 403 `OWNER_REQUIRED`이고 화면은 편집기 대신 소유자 전용 안내만 보인다. `GET /api/strategy`로 읽고 `PUT /api/strategy`에 `{strategy:{name,horizon,benchmark,riskTolerance,targetAllocations,notes}}`를 보낸다. 실제 계좌·주문은 변경하지 않는다. 자산 데이터를 받지 못해도(미연결·일시 오류) 소유자는 전략 편집이 가능하다.
 
 ## 규칙 및 한계
 

@@ -189,6 +189,12 @@ test.describe('signed-in member who is not the owner', () => {
   test('sees the owner-only notice on every Toss-backed screen and no data', async ({ page }) => {
     await expect(page.getByRole('region', { name: '시장 지표' })).toHaveCount(0);
     await expect(page.locator('.market-strip-state [data-state="owner-only"]')).toBeVisible();
+    // Calendar and strategy are owner-only too: only the notice, no events and no editor.
+    await expect(page.locator('main [data-state="owner-only"]').last()).toContainText(
+      '소유자 계정 전용 기능입니다',
+    );
+    await expect(page.locator('.calendar-card')).toHaveCount(0);
+    await expect(page.locator('.event-chip')).toHaveCount(0);
     for (const name of ['차트 분석', '내 자산', 'AI 인사이트']) {
       await open(page, name);
       const state = page.locator(
@@ -196,6 +202,7 @@ test.describe('signed-in member who is not the owner', () => {
       );
       await expect(state.first()).toContainText('소유자 계정 전용 기능입니다');
       await expect(page.getByText('계약 테스트 종목')).toHaveCount(0);
+      await expect(page.getByLabel('주식 목표 비중')).toHaveCount(0);
       expect(await fits(page), `${name}: overflow`).toBe(true);
     }
     await expect(page.getByRole('button', { name: '다시 시도' })).toHaveCount(0);
@@ -283,6 +290,8 @@ test('administrator without the owner connection keeps account tools but sees th
   await page.getByRole('button', { name: '계정 등록', exact: true }).click();
   await expect(page.getByRole('dialog', { name: '계정 등록' })).toBeVisible();
   await page.getByRole('button', { name: '닫기', exact: true }).click();
+  await expect(page.locator('.calendar-card')).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '공식 뉴스 수집' })).toHaveCount(0);
   await open(page, '내 자산');
   await expect(page.locator('[data-state="owner-only"]').last()).toBeVisible();
 });

@@ -1,5 +1,5 @@
 import { test, expect } from '@playwright/test';
-import { adminUser, event, memberUser, mockApi, ownerUser } from './fixtures/api-mock';
+import { adminUser, event, mockApi, ownerUser } from './fixtures/api-mock';
 
 const registered = (id: number, date: string, title: string, importance = 1) => ({
   ...event(id, date, '09:00', title, '한국', '물가', ['원화', '채권'], importance),
@@ -32,7 +32,7 @@ test('low importance remains low in details and truncated results are disclosed'
   await expect(page.locator('.agenda-event .badge')).toHaveText('낮음');
 });
 test('weekly agenda preserves chronology through the year boundary', async ({ page }) => {
-  await mockApi(page, { user: memberUser, market: 'owner-only' });
+  await mockApi(page, { user: ownerUser });
   await page.route('**/api/calendar/events?**', (route) =>
     route.fulfill({
       json: {
