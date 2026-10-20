@@ -3,7 +3,7 @@
 Read this file, docs/planning/requirements.md, and the feature's documentation before changes. These rules apply equally to Codex, Claude, Gemini and humans.
 
 - Keep planning, implementation, operations and tests organized by feature. Update feature documentation with code changes. Requirements SOT: docs/planning/requirements.md; architecture SOT: docs/architecture/system.md; delivery status SOT: docs/implementation/status.md.
-- No community or order execution. Never present demo quotes, events or recommendations as live facts. Every financial suggestion must show provenance, horizon, assumptions and uncertainty.
+- No community. Real orders are allowed only in the owner-only algorithm live mode, after every safeguard in docs/planning/next-phase-design.md section 4 passes in one pre-trade check. No other feature (recommendations, rebalancing, AI explanations) places orders, and tests never place real orders. Never present demo quotes, events or recommendations as live facts. Every financial suggestion must show provenance, horizon, assumptions and uncertainty.
 - Only administrator-created active accounts may authenticate. Authorization is enforced on the server for every private endpoint. Never expose provider credentials to browser code.
 - Public repository: never commit secrets, local environment files, customer data, logs, credentials or account identifiers. Use .env.example placeholders and cloud secret management. No token printing.
 - Use reusable accessible components, responsive layouts, explicit loading/error/empty states, Korean language and KST dates.

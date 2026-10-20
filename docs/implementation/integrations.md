@@ -21,7 +21,7 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 - `GET /api/recommendations`: 인증·소유자·저장 전략 필수. 토스 일봉·주식 잔고·등록 일정 기반 rules-v1 분석을 반환한다. 전략없음409, 제공자미설정503, 소유자외403. 선택적 Vertex 해설과 관리자 실행 공식 RSS 수집을 연결한다. 예약 뉴스 수집은 구성하지 않았다. 상세는 recommendation-engine.md 참조.
 - `GET /api/strategy`: `{strategy:null}` 또는 계정별 전략. `PUT /api/strategy`는 `{strategy:{name,horizon,benchmark,riskTolerance,targetAllocations,notes}}`. name/horizon/benchmark/notes는 문자열, riskTolerance는 low/medium/high, targetAllocations는 `{asset:string,percentage:number}[]`. 중복 자산 금지, 합계100%, 각 비중0–100, 최대30개. 서버에서 검사하고 허용 필드만 저장한다.
 
-운영 전략은 Firestore strategies/{userId}에 저장한다. 브라우저 데모 전략은 메모리 전용이며 실제 계정 API에 저장하지 않는다. 주문 엔드포인트는 구현 범위에 없다.
+운영 전략은 Firestore strategies/{userId}에 저장한다. 브라우저 데모 전략은 메모리 전용이며 실제 계정 API에 저장하지 않는다. 주문은 [next-phase-design.md](../planning/next-phase-design.md) 4절의 조건부 허용 규칙을 따르며 주문 엔드포인트는 아직 구현되지 않았다.
 
 ## 최초 계좌 식별값 연결 작업
 

@@ -46,7 +46,7 @@ Cloud Run URL이 아직 없으면 로컬에서 첫 검증 이미지를 Artifact 
 
 ## 런타임 비밀
 
-토스 환경변수 네 개(`TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `TOSS_ACCOUNT_SEQ`, `TOSS_OWNER_USER_ID`)는 모두 Secret Manager에만 두고 서비스에는 비밀 참조로 연결한다. 키 발급, 허용 IP 등록, 키 저장, 계좌 연결, 실조회 검증 절차는 [토스 키 입력 및 계좌 연결](toss-setup.md)을 따른다. 실제 주문은 지원하지 않는다.
+토스 환경변수 네 개(`TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `TOSS_ACCOUNT_SEQ`, `TOSS_OWNER_USER_ID`)는 모두 Secret Manager에만 두고 서비스에는 비밀 참조로 연결한다. 키 발급, 허용 IP 등록, 키 저장, 계좌 연결, 실조회 검증 절차는 [토스 키 입력 및 계좌 연결](toss-setup.md)을 따른다. 실제 주문은 소유자 전용 알고리즘 실전 운용에서만, [설계](../planning/next-phase-design.md) 4절의 안전장치를 모두 통과할 때 허용한다. 아직 구현되지 않았다.
 
 ## 운영
 
