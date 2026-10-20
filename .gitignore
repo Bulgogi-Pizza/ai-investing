@@ -17,6 +17,9 @@ test-results/
 gha-creds-*.json
 *.tfplan
 
+# Brainstorming mockups (local only)
+.superpowers/
+
 # Python operator-tool bytecode
 __pycache__/
 *.py[cod]
