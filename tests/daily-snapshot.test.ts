@@ -349,6 +349,40 @@ describe('daily snapshot job', () => {
     ).toBeUndefined();
     expect(h.repository.documents.get('KR_2026-10-21_005930')!.sections.candle).toBeDefined();
   });
+  it('treats a one-business-day lag of KR bond yields as normal but a longer one as stale', async () => {
+    const indicatorBars = (latest: (symbol: string) => string) =>
+      vi.fn(async (symbol: string, options: { count?: number } = {}) => ({
+        candles: datesBackFrom(latest(symbol), options.count ?? 5).map((d) => {
+          const { currency: _ignored, ...indicatorBar } = bar(d, 'KRW');
+          return indicatorBar;
+        }),
+        nextBefore: null,
+      }));
+    // Session is 2026-10-21: indices have it, bonds end on the previous business day.
+    const lagged = harness({
+      toss: fakeToss({
+        marketIndicatorCandlePage: indicatorBars((s) =>
+          s.startsWith('KR_BOND') ? '2026-10-20' : '2026-10-21',
+        ),
+      } as never),
+    });
+    await lagged.run();
+    expect(kstRun(lagged.repository).steps.indicators).toMatchObject({ status: 'OK', ok: 8 });
+    // A bond a week behind is still a stale step.
+    const old = harness({
+      toss: fakeToss({
+        marketIndicatorCandlePage: indicatorBars((s) =>
+          s === 'KR_BOND_3Y' ? '2026-10-14' : '2026-10-21',
+        ),
+      } as never),
+    });
+    await old.run();
+    expect(kstRun(old.repository).steps.indicators).toMatchObject({
+      status: 'STALE',
+      stale: 1,
+      codes: { CANDLE_NOT_YET_PUBLISHED: 1 },
+    });
+  });
   it('flags a missing session bar as stale so the next slot retries, and still stores older bars', async () => {
     const toss = fakeToss({}, { '005930': '2026-10-20' });
     const h = harness({ toss });
