@@ -17,7 +17,7 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 ## 웹 API 계약
 
 - `GET /api/portfolio`: 인증+소유자 검사. `{source,asOf,scope:'stocks-only',totals:{KRW:{marketValue,purchaseAmount,profitLoss},USD:{동일}},holdings:[{symbol,name,market,currency,quantity,lastPrice,averagePurchasePrice,marketValue,profitLoss,profitLossRate}]}`. 금액/수량/비율은 정밀도 보존용 십진문자열. 통화별 요약은 null이 가능하다. asOf는 서버 조회시각이며 체결시각이 아니다. API는 국내/미국 주식만 포함하므로 현금·채권·해외옵션·전체 순자산으로 표시하지 않는다. KRW와 USD는 환율 없이는 합산하지 않는다. profitLossRate는 비율(0.1=10%)이다.
-- `GET /api/market/candles?symbol=005930&interval=1d&count=100`: 인증 필수, interval1m/1d, count1–200, 심볼 영숫자/점/하이픈 최대30자. 공식 `/api/v1/candles` 수정주가 기준 조회. `{source,asOf,symbol,interval,adjusted:true,candles:[{timestamp,open,high,low,close,volume,currency}]}`. 수치는 십진문자열이며 과거→최신으로 정렬한다. pagination은 아직 웹API에 노출하지 않는다.
+- `GET /api/market/candles?symbol=005930&interval=1d&count=100`: 인증+소유자 검사(아래 "소유자 전용 API"), interval1m/1d, count1–200, 심볼 영숫자/점/하이픈 최대30자. 공식 `/api/v1/candles` 수정주가 기준 조회. `{source,asOf,symbol,interval,adjusted:true,candles:[{timestamp,open,high,low,close,volume,currency}]}`. 수치는 십진문자열이며 과거→최신으로 정렬한다. pagination은 아직 웹API에 노출하지 않는다.
 - `GET /api/recommendations`: 인증·소유자·저장 전략 필수. 토스 일봉·주식 잔고·등록 일정 기반 rules-v1 분석을 반환한다. 전략없음409, 제공자미설정503, 소유자외403. 선택적 Vertex 해설과 관리자 실행 공식 RSS 수집을 연결한다. 예약 뉴스 수집은 구성하지 않았다. 상세는 recommendation-engine.md 참조.
 - `GET /api/strategy`: `{strategy:null}` 또는 계정별 전략. `PUT /api/strategy`는 `{strategy:{name,horizon,benchmark,riskTolerance,targetAllocations,notes}}`. name/horizon/benchmark/notes는 문자열, riskTolerance는 low/medium/high, targetAllocations는 `{asset:string,percentage:number}[]`. 중복 자산 금지, 합계100%, 각 비중0–100, 최대30개. 서버에서 검사하고 허용 필드만 저장한다.
 
@@ -38,3 +38,31 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 ## 실제 데이터 기반 추천 갱신
 
 `GET /api/recommendations?period=daily|weekly|monthly&symbol=005930`는 저장된 전략·토스 일봉·주식 잔고·출처 등록 일정으로 rules-v1 분석을 반환한다. 전략없음409, 제공자미설정503, 연결소유자외403. 상세 계약은 recommendation-engine.md 참조. 선택적 Vertex 해설 및 관리자 실행 한국은행·연준 RSS 수집의 계약은 ai-provider.md/news-provider.md를 따른다. 실제 연결 상태는 status.md가 원본이다.
+
+## 소유자 전용 API와 시장 데이터 어댑터 (3단계)
+
+확인: [Toss Securities OpenAPI v1.2.24](https://openapi.tossinvest.com/openapi-docs/latest/openapi.json) `info.version` 1.2.24, 2026-10-21 KST에 `/api/v1/prices`, `/api/v1/market-indicators/prices`, `/api/v1/exchange-rate`와 Market Indicators 심볼 카탈로그를 다시 읽고 구현했다. 명세에 없는 필드는 만들지 않았다. 테스트 fixture(`tests/fixtures/toss-prices.json`, `toss-market-indicators.json`, `toss-exchange-rate.json`)는 명세 예시 모양의 합성 값이며 실데이터 검증이 아니다. 실제 호출 확인은 별도로 기록한다.
+
+### 소유자 검사
+
+`createApp({ ownerUserId })`의 `requireOwner` 미들웨어가 인증 뒤에 서버 세션의 사용자 ID를 `ownerUserId`와 비교한다. `src/server/index.ts`는 토스 클라이언트와 같은 `TOSS_OWNER_USER_ID`를 넘긴다. 적용 대상: `/api/portfolio`, `/api/market/*`, `/api/recommendations`. 관리자 경로(`/api/admin/*`), 인증, 전략, 캘린더·뉴스 경로는 기존과 같다. 순서와 응답:
+
+1. 토스 클라이언트나 `ownerUserId`가 없으면 503 `TOSS_INTEGRATION_UNAVAILABLE`(소유자를 알 수 없으면 닫는다).
+2. 로그인 사용자가 소유자가 아니면 403 `OWNER_REQUIRED`("소유자 계정 전용 기능입니다."). 제공자를 호출하지 않는다.
+3. `TossClient.portfolio`의 자체 소유자 검사(`PORTFOLIO_OWNER_REQUIRED`)는 이중 방어로 유지한다.
+
+관리자라도 소유자가 아니면 403이다.
+
+### `GET /api/market/prices?symbols=005930,AAPL`
+
+토스 `GET /api/v1/prices?symbols=`(Market Data, `MARKET_DATA` 한도 그룹)를 호출한다. 입력: `symbols`는 단일 문자열, 쉼표 구분, 항목은 `^[A-Za-z0-9.\-]{1,30}$`, 최대 50개(명세 상한 200보다 작게 제한), 중복은 제거하고 빈 항목·반복 파라미터·객체형은 400 `INVALID_MARKET_QUERY`. 응답: `{source:'Toss Securities OpenAPI', asOf, prices:[{symbol, lastPrice, currency:'KRW'|'USD', timestamp:string|null}]}`. 명세 필수 필드 `symbol`, `lastPrice`(십진 문자열), `currency`, 선택 `timestamp`(date-time 또는 null)만 사용한다. 응답이 배열이 아니거나, 요청하지 않은·중복 심볼, 십진수가 아닌 값, 알 수 없는 통화, 잘못된 시각, 요청 수보다 많은 행이면 502 `PROVIDER_SCHEMA_INVALID`. 제공자 404(`stock-not-found`)는 404 `PROVIDER_NOT_FOUND`(화면의 "해당 종목 데이터 없음")이며 제공자 오류 본문은 전달하지 않는다. 기존 30초 캐시·동시 요청 합치기(키는 검증된 심볼 목록)를 쓴다.
+
+### `GET /api/market/indicators`
+
+토스 `GET /api/v1/market-indicators/prices?symbols=`(`MARKET_INDICATOR` 그룹)에 카탈로그 8종 `KOSPI, KOSDAQ, KR_BOND_2Y/3Y/5Y/10Y/20Y/30Y`를 요청하고, `GET /api/v1/exchange-rate?baseCurrency=USD&quoteCurrency=KRW`(`MARKET_INFO` 그룹)를 함께 조회한다. 입력 파라미터는 없다. 응답: `{source, asOf, indicators:[{symbol, name, kind:'INDEX'|'BOND', unit:'point'|'percent', lastPrice, timestamp:string|null}], exchangeRate:{baseCurrency:'USD', quoteCurrency:'KRW', midRate, rate, rateChangeType:'UP'|'EQUAL'|'DOWN'|null, validFrom, validUntil}}`. `name`, `kind`, `unit`은 카탈로그 상수이고 값은 제공자가 준 `lastPrice`뿐이다(국채는 수익률 %). 명세의 `midRate`는 매매기준율, `rate`는 매수 환율이며 참고용 표시 환율로 실제 주문 환율과 다를 수 있다. 상단 띠는 `midRate`를 보여 준다. 이 API는 등락률을 주지 않으므로 화면도 등락률을 표시하지 않는다. 카탈로그에 없는 심볼, 십진수가 아닌 값, 환율 통화쌍 불일치, `midRate`/`rate`/`validFrom`/`validUntil` 누락·형식 오류는 502 `PROVIDER_SCHEMA_INVALID`이고 두 호출 중 하나라도 실패하면 전체가 실패한다. 알 수 없는 `rateChangeType`은 null로 둔다. 캐시 키는 `market-indicators`(30초). S&P 500과 원/달러 일별 이력은 이 API로 받을 수 없다([계획 설계 정정](../planning/next-phase-plan.md)).
+
+### 공통 오류 매핑
+
+제공자 404는 404 `PROVIDER_NOT_FOUND`로, 401/403은 503 `PROVIDER_ACCESS_DENIED`, 429·5xx·통신 실패는 기존 코드(`PROVIDER_RATE_LIMITED`, `PROVIDER_UNAVAILABLE`, `PROVIDER_UNREACHABLE`)로 정제한다. 화면 상태 구분은 [차트](charts.md)의 표를 따른다.
+
+검증: `npx vitest run tests/market-api.test.ts tests/server.test.ts tests/recommendations.test.ts`. 비로그인 401, 일반 회원 403, 소유자 200, 토스 미설정·소유자 미설정 503, 입력 검증 400, 스키마 위반 502, 404 매핑, 캐시를 합성 transport로 검사한다. 실제 토스 호출은 하지 않는다.
