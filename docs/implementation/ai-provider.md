@@ -22,6 +22,8 @@
 
 ready 계약: `{status:'ready',type:'llm',provider:'vertex',model,asOf,summary,actions,counterScenario,dataGaps,confidenceExplanation,sourceIds,sources:[{id,title,url?}]}`. unavailable/disabled는 `{status,type:'llm',provider:'vertex',model?,message}`이고 생성된 것처럼 보이는 문장을 넣지 않는다. 예외·토큰·원문 공급자 오류를 로그/응답에 출력하지 않는다.
 
+알고리즘 판단용 AI 호출은 이 해설 계약과 별도의 계약을 쓴다(구현 계획 7c, [next-phase-design.md](../planning/next-phase-design.md) 4·5절). 위의 주문/목표가격/비중 변경 문구 거부는 이 해설 계약의 출력에만 적용한다. 판단 계약의 입출력 형식·검사·한도는 구현 때 따로 정의하며, 해설 기능은 계속 주문·목표가·비중을 만들지 않는다.
+
 ## 비용과 실패 처리
 
 온도0.2, 출력최대1600토큰, 공급자 응답최대64KiB, 총 생성 처리12초 제한을 적용한다. 입력12,000바이트는 토큰 상한과 같지 않다. Firestore aiUsage/{KST날짜} 트랜잭션에서 모든 인스턴스·모델의 시도를 하루25회로 제한한다. 발급 직전 차감하고 실패해도 돌려주지 않는다. ttlAt Timestamp를 TTL 정책에 연결해 정리한다. TTL 삭제와 별개로 날짜별 문서로 창을 구분한다. 할당량 저장소 오류는 호출하지 않고 unavailable로 처리한다. 개발은 MemoryAiQuota를 사용한다.

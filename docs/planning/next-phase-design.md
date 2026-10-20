@@ -39,9 +39,9 @@ Windows 참고(2026-10-21 확인):
 
 실패로 볼 상황(사용자가 가장 꺼리는 것): 과도한 매매로 수수료·환전 비용이 수익을 잠식하는 것.
 
-## 기존 규칙 변경 (구현 첫 단계에서 반영)
+## 기존 규칙 변경 (2026-10-21 반영)
 
-사용자가 2026-10-20에 주문 실행 허용을 결정했다. 지금 문서는 주문을 금지하므로 구현 첫 단계에서 아래 문서를 함께 고친다. 고치기 전에는 주문 코드를 만들지 않는다.
+사용자가 2026-10-20에 주문 실행 허용을 결정했다. 구현 계획 1단계에서 아래 문서와 [deployment.md](../operations/deployment.md), [toss-setup.md](../operations/toss-setup.md), [feature-instructions.md](../agents/feature-instructions.md), [system.md](../architecture/system.md), README를 함께 고쳤다(2026-10-21). 이 변경이 main에 병합되기 전에는 주문 코드를 만들지 않는다.
 
 - [AGENTS.md](../../AGENTS.md): "No community or order execution" 중 주문 금지를 이 문서의 안전장치 조건부 허용으로 바꾼다. 커뮤니티 제외는 유지한다.
 - [requirements.md](requirements.md): "실제 주문 실행은 제외" 문구와 기능 표를 바꾼다.
@@ -230,7 +230,7 @@ Windows 참고(2026-10-21 확인):
 
 ## 남은 작업 순서
 
-1. ~~미결정 질문 답변~~(2026-10-21 완료) → 구현 계획 작성: [next-phase-plan.md](next-phase-plan.md)(2026-10-21 초안, 사용자 승인 대기). 아래 순서의 세부 단계와 진행 상태는 계획 문서가 관리한다.
+1. ~~미결정 질문 답변~~(2026-10-21 완료) → 구현 계획 작성: [next-phase-plan.md](next-phase-plan.md)(2026-10-21 승인, 실행 중). 아래 순서의 세부 단계와 진행 상태는 계획 문서가 관리한다.
 2. 규칙 문서 변경([기존 규칙 변경](#기존-규칙-변경-구현-첫-단계에서-반영)).
 3. 사용자: DART·FRED·ECOS 키 발급, 텔레그램 봇 생성(봇 토큰·chat ID). 저장 스크립트 확장 후 Secret Manager에 저장.
 4. 데모 제거, 소유자 전용 검사, E2E 테스트 전환.
