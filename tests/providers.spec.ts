@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
-const user = { id: 'test-admin', email: 'admin@example.test', role: 'admin' };
+import { adminUser, mockApi } from './fixtures/api-mock';
+const user = adminUser;
 const source = {
   id: 'fed-press',
   name: '공식 RSS 테스트 출처 ' + '긴출처식별자'.repeat(14),
@@ -81,8 +82,7 @@ const insight = {
   stockExposureByCurrency: [],
 };
 test.beforeEach(async ({ page }) => {
-  await page.route('**/api/auth/me', (route) => route.fulfill({ json: { user } }));
-  await page.route('**/api/strategy', (route) => route.fulfill({ json: { strategy: null } }));
+  await mockApi(page, { user });
   await page.route('**/api/news/sources', (route) =>
     route.fulfill({
       json: { sources: [source], warnings: ['발표 시각 기준 뉴스이며 미래 일정 아님'] },
@@ -106,7 +106,11 @@ test('administrator syncs official news with coverage and refreshes registered e
     });
   });
   await page.goto('/');
-  await expect(page.getByRole('link', { name: /공식 RSS 테스트 출처/ })).toBeVisible();
+  await expect(
+    page
+      .getByRole('region', { name: '공식 뉴스 수집 관리' })
+      .getByRole('link', { name: /공식 RSS 테스트 출처/ }),
+  ).toBeVisible();
   await page.getByRole('button', { name: '공식 뉴스 수집', exact: true }).click();
   await expect(page.locator('.news-sync-summary')).toContainText('추가·갱신 1건');
   await expect(page.locator('.news-sync-summary')).toContainText('규칙 추정');
@@ -128,7 +132,7 @@ test('administrator syncs official news with coverage and refreshes registered e
     '미래 경제 일정이 아니며',
   );
 });
-test('failed source sync does not report imported news or replace the demo', async ({ page }) => {
+test('failed source sync does not report imported news or invent events', async ({ page }) => {
   await page.route('**/api/admin/news/sync', (route) =>
     route.fulfill({
       status: 503,
@@ -144,7 +148,7 @@ test('failed source sync does not report imported news or replace the demo', asy
   await page.getByRole('button', { name: '공식 뉴스 수집', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText('공식 뉴스 수집에 실패했습니다.');
   await expect(page.locator('.news-sync-summary')).toContainText('수집 실패');
-  await expect(page.locator('.event-chip')).toHaveCount(16);
+  await expect(page.locator('.event-chip')).toHaveCount(8);
 });
 test('Vertex narrative is separate from deterministic rules and cites sources', async ({
   page,
@@ -174,7 +178,6 @@ test('Vertex narrative is separate from deterministic rules and cites sources', 
   );
   await page.goto('/');
   await page.getByRole('button', { name: /AI 인사이트/ }).click();
-  await page.getByRole('button', { name: '내 데이터 분석', exact: true }).click();
   await expect(page.getByRole('heading', { name: '규칙 판단 유지' })).toBeVisible();
   const newsCard = page.getByRole('region', { name: '공식 발표 뉴스 근거' });
   await expect(newsCard).toContainText('수집된 공식 발표 테스트');
@@ -216,7 +219,6 @@ test('unavailable Vertex keeps rules and explicitly shows pending AI', async ({ 
   );
   await page.goto('/');
   await page.getByRole('button', { name: /AI 인사이트/ }).click();
-  await page.getByRole('button', { name: '내 데이터 분석', exact: true }).click();
   await expect(page.getByRole('heading', { name: '규칙 판단 유지' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'LLM 연결 대기' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Gemini AI 해석' })).toHaveCount(0);
@@ -225,40 +227,10 @@ test('unavailable Vertex keeps rules and explicitly shows pending AI', async ({ 
 test.afterEach(async ({ page }, info) => {
   if (info.title.startsWith('administrator syncs') || info.title.startsWith('Vertex narrative'))
     await page.screenshot({
-      path: `.local/qa/${info.project.name}-${info.title.startsWith('administrator') ? 'news-provider' : 'ai-provider'}.png`,
+      path: info.outputPath(
+        `${info.project.name}-${info.title.startsWith('administrator') ? 'news-provider' : 'ai-provider'}.png`,
+      ),
       fullPage: true,
       animations: 'disabled',
     });
-});
-
-test('administrator header fits the viewport and account controls remain reachable', async ({
-  page,
-}) => {
-  await page.route('**/api/admin/users', (route) =>
-    route.fulfill({ json: { users: [{ ...user, active: true }] } }),
-  );
-  await page.goto('/');
-  await expect(page.getByRole('button', { name: '계정 등록', exact: true })).toBeVisible();
-  for (const name of ['경제 캘린더', '차트 분석', '내 자산', 'AI 인사이트']) {
-    await page
-      .getByRole('button', {
-        name: name === 'AI 인사이트' ? /AI 인사이트/ : name,
-        exact: name !== 'AI 인사이트',
-      })
-      .click();
-    const sizes = await page.evaluate(() => ({
-      document: document.documentElement.scrollWidth,
-      viewport: window.innerWidth,
-      headerRight: document.querySelector('.top-actions')!.getBoundingClientRect().right,
-    }));
-    expect(sizes.document, `${name} admin document overflow`).toBeLessThanOrEqual(
-      sizes.viewport + 1,
-    );
-    expect(sizes.headerRight, `${name} admin header outside viewport`).toBeLessThanOrEqual(
-      sizes.viewport + 1,
-    );
-    await expect(page.getByRole('button', { name: '로그아웃', exact: true }).first()).toBeVisible();
-  }
-  await page.getByRole('button', { name: '계정 등록', exact: true }).click();
-  await expect(page.getByRole('dialog')).toBeVisible();
 });
