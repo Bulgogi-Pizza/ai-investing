@@ -41,9 +41,10 @@ import {
   type RunDataProvider,
   type RunReport,
 } from '../server/trading/executor.js';
+import { liveAlertEvent } from '../server/trading/alerts.js';
 import { FALLBACK_COMMISSION_RATE, liveCumulativePnl } from '../server/trading/ledger-pnl.js';
 import type { PreTradeMarketFacts, PreTradeSettings } from '../server/trading/pre-trade.js';
-import { summarizeLedger, type TradingStore } from '../server/trading/stores.js';
+import { kstDateKey, summarizeLedger, type TradingStore } from '../server/trading/stores.js';
 import {
   TossOrderClient,
   type Commission,
@@ -139,7 +140,10 @@ export type LiveJobDependencies = {
   client: ExecutorClient;
   store: TradingStore;
   paper: Pick<PaperRepository, 'beginRun' | 'finishRun' | 'getLedger'>;
-  algorithms: Pick<AlgorithmRepository, 'list' | 'getControl' | 'getCosts' | 'getSafeguards'>;
+  algorithms: Pick<
+    AlgorithmRepository,
+    'list' | 'get' | 'getControl' | 'getCosts' | 'getSafeguards'
+  >;
   supply?: SupplySource;
   notify?: (event: NotificationEvent) => Promise<unknown>;
   /** AI-method algorithms run only when `enabled` and a decider exist. */
@@ -283,7 +287,8 @@ async function runLiveAlgorithm(
     if ((await deps.algorithms.getControl()).emergencyStop)
       return skipped('EMERGENCY_STOP', '긴급 정지 중이라 아무것도 하지 않았습니다.');
   } catch {
-    return skipped('CONTROL_UNAVAILABLE', '긴급 정지 상태를 확인하지 못해 건너뛰었습니다.');
+    // A failed read is a failed algorithm (not a quiet skip): the run is reported and alerted.
+    return failed('CONTROL_UNAVAILABLE', '긴급 정지 상태를 확인하지 못해 주문하지 않았습니다.');
   }
   try {
     if (await deps.store.isAlgorithmStopped(record.id))
@@ -292,7 +297,7 @@ async function runLiveAlgorithm(
         '정지된 알고리즘입니다. 화면에서 정지를 해제하기 전에는 주문하지 않습니다.',
       );
   } catch {
-    return skipped('STORE_UNAVAILABLE', '정지 상태를 확인하지 못해 건너뛰었습니다.');
+    return failed('STORE_UNAVAILABLE', '정지 상태를 확인하지 못해 주문하지 않았습니다.');
   }
   if (record.budget === null || !(record.budget > 0))
     return skipped('BUDGET_NOT_SET', '운용 금액 한도가 없어 주문하지 않습니다.');
@@ -314,8 +319,42 @@ async function runLiveAlgorithm(
   if (context.commissionRate === null)
     notes.push('증권사 수수료율을 확인하지 못해 매수는 하지 않습니다.');
 
+  const currency = record.currency;
+  const pnlCosts = {
+    commissionRate: context.commissionRate ?? FALLBACK_COMMISSION_RATE,
+    sellTaxRate: record.market === 'KR' ? (context.rawSellTaxRate ?? 0) : 0,
+  };
+  // Marks for held symbols come from a fresh quote taken now. There is deliberately no fallback to an
+  // old close: a held symbol that cannot be marked makes the P&L unknown, and unknown refuses orders.
+  const decisionMarks: Record<string, number | undefined> = {};
+  const markedPnl = async () => {
+    const orders = await deps.store.listOrders({ algorithmId: record.id });
+    const marks: Record<string, number | undefined> = {};
+    for (const p of summarizeLedger(orders).positions.values()) {
+      if (!(p.quantity > 0)) continue;
+      const fresh = await fetchFreshQuote(deps.transport, p.symbol, currency);
+      marks[p.symbol] = fresh?.price ?? decisionMarks[p.symbol];
+    }
+    return liveCumulativePnl(orders, marks, pnlCosts);
+  };
+  const stopNow = async (why: 'loss-limit' | 'unconfirmed-order') => {
+    try {
+      await deps.store.stopAlgorithm(record.id, why);
+    } catch {
+      // Still stopped for this run: nothing below runs.
+    }
+    try {
+      await deps.notify?.(
+        liveAlertEvent({ type: 'algorithm-stopped', why, algorithmName: record.name }),
+      );
+    } catch {
+      /* delivery problems are recorded by the notification service itself */
+    }
+  };
+
   // The algorithm's own live ledger (after reconciliation): what it owns and has committed.
-  const ledger = summarizeLedger(await deps.store.listOrders({ algorithmId: record.id }));
+  const orders = await deps.store.listOrders({ algorithmId: record.id });
+  const ledger = summarizeLedger(orders);
   const held: Record<string, { entryDate: string }> = {};
   const owned: Record<string, number> = {};
   for (const p of ledger.positions.values()) {
@@ -324,6 +363,44 @@ async function runLiveAlgorithm(
     const available = Math.max(0, Math.floor(p.quantity - p.pendingSellQuantity));
     if (available > 0) owned[p.symbol] = available;
   }
+
+  // An order whose outcome is still unknown after a whole session (and after today's reconciliation
+  // above) stops the algorithm: its committed budget would otherwise stay locked forever. The owner
+  // clears it in the live panel once they have looked in the broker app.
+  const today = kstDateKey(deps.now());
+  if (
+    orders.some((o) => (o.status === 'unknown' || o.status === 'reserved') && o.dateKey < today)
+  ) {
+    await stopNow('unconfirmed-order');
+    return {
+      ...skipped(
+        'UNCONFIRMED_ORDER_STOP',
+        '접수 여부를 확인하지 못한 주문이 한 세션 넘게 남아 알고리즘을 정지했습니다. 토스증권 앱에서 확인한 뒤 화면에서 정리하세요.',
+      ),
+      stoppedNow: true,
+    };
+  }
+
+  // The cumulative-loss stop is evaluated for every live algorithm on every run, before any intent
+  // is built: it must fire even on a day without a single order. A stop does not sell anything.
+  let pnl: number | null = null;
+  try {
+    pnl = await markedPnl();
+  } catch {
+    pnl = null;
+  }
+  if (pnl !== null && pnl <= -context.safeguards.lossStopFraction * budget) {
+    await stopNow('loss-limit');
+    return {
+      ...skipped(
+        'LOSS_LIMIT_STOP',
+        '누적 손실이 한도에 닿아 알고리즘을 정지했습니다. 보유 종목은 자동으로 팔지 않으니 직접 관리하세요.',
+      ),
+      stoppedNow: true,
+    };
+  }
+  if (pnl === null && Object.keys(held).length > 0)
+    notes.push('보유 종목의 평가가격을 확인하지 못해 누적 손익을 알 수 없어 주문하지 않습니다.');
 
   const prepared = await prepareDecisionInputs(
     deps,
@@ -365,16 +442,10 @@ async function runLiveAlgorithm(
     : simulatedSamples(record, barsBy, used, paperLedger?.startedOn ?? date, budget, notes);
   const stats = buildBucketStats([...simulated, ...(paperLedger?.samples ?? [])], { asOf: date });
 
-  // Marks for the cumulative-loss check: today's decision quote, else the last completed close.
-  const marks: Record<string, number | undefined> = {};
-  for (const q of quotes) marks[q.symbol] = q.price ?? q.completed[q.completed.length - 1]?.close;
+  // Today's decision quotes are only the fallback when the order-time quote cannot be read.
+  for (const q of quotes) decisionMarks[q.symbol] = q.price ?? undefined;
   const scoreOf = new Map(built.decisions.map((d) => [d.symbol, d.score]));
-  const pnlCosts = {
-    commissionRate: context.commissionRate ?? FALLBACK_COMMISSION_RATE,
-    sellTaxRate: record.market === 'KR' ? (context.rawSellTaxRate ?? 0) : 0,
-  };
 
-  const currency = record.currency;
   let fxCache: { at: number; value: FreshFx | null } | null = null;
   const tradingDates = [
     ...new Set(Object.values(barsBy).flatMap((bars: DailyBar[]) => bars.map((b) => b.date))),
@@ -402,11 +473,7 @@ async function runLiveAlgorithm(
       };
     },
     async cumulativePnl() {
-      return liveCumulativePnl(
-        await deps.store.listOrders({ algorithmId: record.id }),
-        marks,
-        pnlCosts,
-      );
+      return markedPnl();
     },
     async expectedProfit(symbol) {
       if (aiMethod) {
@@ -460,6 +527,17 @@ async function runLiveAlgorithm(
     },
     decisions,
     data,
+    // Re-read before each order: the algorithm must still be live and the session window open.
+    guard: async () => {
+      const t = deps.now().getTime();
+      if (
+        t >= session.close.getTime() ||
+        t > session.open.getTime() + (options.openWindowMinutes + 10) * 60_000
+      )
+        return 'RUN_WINDOW_CLOSED';
+      const current = await deps.algorithms.get(record.id);
+      return current && current.mode === 'live' ? null : 'ALGORITHM_NOT_LIVE';
+    },
   });
   return summarizeReport(report, counts, notes, excluded);
 }

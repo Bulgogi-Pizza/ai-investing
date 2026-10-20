@@ -115,7 +115,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     try {
       const toss = new TossClient(config.toss, new FirestoreTokenCache(config.toss.clientId, db));
       return await runOrderAccessCheck({
-        client: new TossOrderClient(new TossOrderTransport(toss)),
+        // Read-only transport: the allow-list has no write path at all (defence in depth).
+        client: new TossOrderClient(new TossOrderTransport(toss, { readOnly: true })),
         status: new FirestoreTradingStore(db),
         log,
       });

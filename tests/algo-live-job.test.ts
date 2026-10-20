@@ -194,6 +194,7 @@ function harness(s: Scenario = {}) {
   };
   const algorithms = {
     list: async () => s.records ?? [krRecord()],
+    get: async (id: string) => (s.records ?? [krRecord()]).find((r) => r.id === id) ?? null,
     // The one emergency-stop flag: the same value the order path reads from its store.
     getControl: vi.fn(async () => {
       if (s.failControl) throw new Error('control unreadable');
@@ -1081,5 +1082,245 @@ describe('algo-live job: selling only what the algorithm bought', () => {
     expect(await h.store.isAlgorithmStopped(ID1)).toBe(true);
     expect(h.store.stoppedReason(ID1)).toBe('loss-limit');
     expect(h.events.at(-1)).toMatchObject({ kind: 'algorithm-auto-stop', reason: 'loss-limit' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('algo-live job: unconfirmed orders (lost answers)', () => {
+  const unknownOrder = {
+    clientOrderId: 'ai-lost',
+    algorithmId: ID1,
+    quantity: 20,
+    price: '70000',
+    createdAt: '2026-10-20T01:00:00.000Z',
+  };
+  const closedFill = (over: Record<string, unknown> = {}) => ({
+    orderId: 'broker-1',
+    clientOrderId: null,
+    symbol: '005930',
+    side: 'BUY' as const,
+    orderType: 'LIMIT',
+    timeInForce: 'DAY',
+    status: 'FILLED',
+    price: '70000',
+    quantity: '20',
+    currency: 'KRW' as const,
+    orderedAt: '2026-10-20T01:00:05.000Z',
+    filledQuantity: '20',
+    averageFilledPrice: '69900',
+    ...over,
+  });
+
+  it('adopts an exact unique CLOSED match: an unknown order that actually filled becomes a position', async () => {
+    const h = harness();
+    await h.seedPaperRecord();
+    await seedOrder(h.store, unknownOrder, 'unknown');
+    h.fake.orders.push(closedFill());
+    await h.run();
+    const closedCall = h.fake.calls.find(
+      (c) => c.path === '/api/v1/orders' && c.query?.status === 'CLOSED',
+    );
+    expect(closedCall?.query).toMatchObject({ status: 'CLOSED', symbol: '005930', limit: '100' });
+    expect(await h.store.getOrder('ai-lost')).toMatchObject({
+      status: 'filled',
+      orderId: 'broker-1',
+      filledQuantity: 20,
+      averageFilledPrice: 69_900,
+    });
+    expect(await h.store.isAlgorithmStopped(ID1)).toBe(false);
+    expect(orderPosts(h.fake)).toHaveLength(0); // now owned: no second buy
+    expect(h.events).toContainEqual(expect.objectContaining({ kind: 'fill', status: 'filled' }));
+  });
+  it('adopts a CLOSED cancellation (an expired DAY order) so the symbol is free again', async () => {
+    const h = harness();
+    await h.seedPaperRecord();
+    await seedOrder(h.store, unknownOrder, 'unknown');
+    h.fake.orders.push(
+      closedFill({ status: 'CANCELED', filledQuantity: '0', averageFilledPrice: null }),
+    );
+    await h.run();
+    expect(await h.store.getOrder('ai-lost')).toMatchObject({
+      status: 'canceled',
+      filledQuantity: 0,
+    });
+    expect(orderPosts(h.fake)).toHaveLength(1); // the symbol is unlocked: today's buy goes out
+  });
+  it('never adopts an ambiguous or look-alike match', async () => {
+    for (const orders of [
+      [closedFill(), closedFill({ orderId: 'broker-2' })], // two identical candidates
+      [closedFill({ orderedAt: '2026-10-19T23:00:00.000Z' })], // placed before the record existed
+      [closedFill({ quantity: '21' })],
+      [closedFill({ price: '70100' })],
+      [closedFill({ side: 'SELL' as const })],
+    ]) {
+      const h = harness();
+      await h.seedPaperRecord();
+      await seedOrder(h.store, unknownOrder, 'unknown');
+      for (const o of orders) h.fake.orders.push(o);
+      await h.run();
+      expect((await h.store.getOrder('ai-lost'))?.status).toBe('unknown');
+    }
+  });
+  it('an unknown order older than one session stops the algorithm with its own reason and alert', async () => {
+    const h = harness();
+    await h.seedPaperRecord();
+    await seedOrder(h.store, unknownOrder, 'unknown');
+    await h.run();
+    expect(orderPosts(h.fake)).toHaveLength(0);
+    expect(await h.store.isAlgorithmStopped(ID1)).toBe(true);
+    expect(h.store.stoppedReason(ID1)).toBe('unconfirmed-order');
+    expect(h.events).toEqual([
+      {
+        kind: 'algorithm-auto-stop',
+        mode: 'live',
+        algorithmName: '실전 테스트',
+        reason: 'unconfirmed-order',
+      },
+    ]);
+    expect(h.paper.runs.get(liveRunId('KR', '2026-10-21'))!.results[ID1]).toMatchObject({
+      code: 'UNCONFIRMED_ORDER_STOP',
+      stoppedNow: true,
+    });
+  });
+  it('an unknown order from today only blocks its symbol (no stop yet)', async () => {
+    const h = harness();
+    await h.seedPaperRecord();
+    await seedOrder(h.store, { ...unknownOrder, createdAt: '2026-10-21T00:01:00.000Z' }, 'unknown');
+    await h.run();
+    expect(await h.store.isAlgorithmStopped(ID1)).toBe(false);
+    expect(orderPosts(h.fake)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('algo-live job: loss stop every run, marks and per-order guard', () => {
+  // A huge scale keeps the score near zero: the algorithm only holds.
+  const holder = (over: Partial<AlgorithmRecord> = {}) =>
+    krRecord({
+      params: { ...structuredClone(defaultSignalParams), momentum: { lookbackDays: 1, scale: 10 } },
+      ...over,
+    });
+  const held = {
+    clientOrderId: 'ai-held',
+    algorithmId: ID1,
+    quantity: 100,
+    price: '70000',
+    createdAt: '2026-10-10T01:00:00.000Z',
+  };
+
+  it('stops and alerts at the loss limit even when there is no intent at all', async () => {
+    const h = harness({ records: [holder()], prices: { '005930': 40_000 } });
+    await h.seedPaperRecord();
+    await seedOrder(h.store, held);
+    await h.run();
+    expect(orderPosts(h.fake)).toHaveLength(0);
+    expect(await h.store.isAlgorithmStopped(ID1)).toBe(true);
+    expect(h.store.stoppedReason(ID1)).toBe('loss-limit');
+    expect(h.events).toEqual([
+      {
+        kind: 'algorithm-auto-stop',
+        mode: 'live',
+        algorithmName: '실전 테스트',
+        reason: 'loss-limit',
+      },
+    ]);
+    expect(h.paper.runs.get(liveRunId('KR', '2026-10-21'))!.results[ID1]).toMatchObject({
+      code: 'LOSS_LIMIT_STOP',
+      stoppedNow: true,
+    });
+    // Stopped means stopped: nothing was sold to "get out".
+    expect(h.fake.calls.some((c) => c.method === 'POST')).toBe(false);
+  });
+  it('a loss inside the limit does not stop it', async () => {
+    const h = harness({ records: [holder()], prices: { '005930': 60_000 } });
+    await h.seedPaperRecord();
+    await seedOrder(h.store, held);
+    await h.run();
+    expect(await h.store.isAlgorithmStopped(ID1)).toBe(false);
+  });
+  it('an unmarkable held symbol means no stop, no order and a note (never a stale close as mark)', async () => {
+    const h = harness({
+      records: [krRecord({ targets: ['005930'] })],
+      bars: {
+        '005930': flatBars(70_000, '2026-10-20'),
+        // The old close of the held symbol would show a huge PROFIT if it were used as a mark.
+        '000660': flatBars(1, '2026-10-20'),
+      },
+      prices: { '005930': 77_000 },
+    });
+    await h.seedPaperRecord();
+    await seedOrder(h.store, { ...held, symbol: '000660' });
+    await h.run();
+    expect(await h.store.isAlgorithmStopped(ID1)).toBe(false);
+    expect(orderPosts(h.fake)).toHaveLength(0); // P&L unknown -> LOSS_UNKNOWN for the buy
+    expect(h.store.listBlocked().some((b) => b.reasons.includes('LOSS_UNKNOWN'))).toBe(true);
+    const notes = h.paper.runs.get(liveRunId('KR', '2026-10-21'))!.results[ID1].notes.join(' ');
+    expect(notes).toContain('평가가격을 확인하지 못해');
+  });
+  it('marks a held symbol with the quote taken now', async () => {
+    const h = harness({ records: [holder()], prices: { '005930': 60_000 } });
+    await h.seedPaperRecord();
+    await seedOrder(h.store, held);
+    // The broker quote at order time shows a deep loss although the decision quote did not.
+    h.fake.quotes.set('005930', { price: '40000' });
+    await h.run();
+    expect(h.store.stoppedReason(ID1)).toBe('loss-limit');
+  });
+
+  const two = () => ({
+    bars: {
+      '005930': flatBars(70_000, '2026-10-20'),
+      '000660': flatBars(70_000, '2026-10-20'),
+    },
+    prices: { '005930': 77_000, '000660': 77_000 },
+  });
+  it('re-reads the algorithm before each order: switched to paper mid-run, the next order is refused', async () => {
+    const record = krRecord({ targets: ['005930', '000660'] });
+    const h = harness({ records: [record], ...two() });
+    await h.seedPaperRecord();
+    h.fake.onCreated = () => {
+      record.mode = 'paper';
+    };
+    await h.run();
+    expect(orderPosts(h.fake)).toHaveLength(1);
+    expect(h.store.listBlocked().map((b) => b.reasons)).toEqual([['ALGORITHM_NOT_LIVE']]);
+    expect(h.events).toEqual([]); // routine refusals are not alerts
+  });
+  it('stops ordering after the session window ends, even inside one run', async () => {
+    const h = harness({ records: [krRecord({ targets: ['005930', '000660'] })], ...two() });
+    await h.seedPaperRecord();
+    h.fake.onCreated = () => h.setNow(at('2026-10-21T10:00:00+09:00'));
+    await h.run();
+    expect(orderPosts(h.fake)).toHaveLength(1);
+    expect(h.store.listBlocked().map((b) => b.reasons)).toEqual([['RUN_WINDOW_CLOSED']]);
+  });
+  it('the close of the session also ends ordering', async () => {
+    const h = harness({ records: [krRecord({ targets: ['005930', '000660'] })], ...two() });
+    await h.seedPaperRecord();
+    h.fake.onCreated = () => h.setNow(at('2026-10-21T15:31:00+09:00'));
+    await h.run();
+    expect(h.store.listBlocked().map((b) => b.reasons)).toEqual([['RUN_WINDOW_CLOSED']]);
+  });
+});
+
+describe('algo-live job: unreadable control state is a failure, not a quiet skip', () => {
+  it('reports the run as failed and raises the job-failure alert (emergency stop unreadable)', async () => {
+    const h = harness({ failControl: true });
+    await h.seedPaperRecord();
+    await expect(h.run()).resolves.toBe('failed');
+    expect(h.paper.runs.get(liveRunId('KR', '2026-10-21'))!.results[ID1]).toMatchObject({
+      status: 'failed',
+      code: 'CONTROL_UNAVAILABLE',
+    });
+    expect(h.events).toContainEqual({ kind: 'job-failure', jobName: 'algo-live' });
+    expect(await h.store.getJobHeartbeat('KR')).toMatchObject({ outcome: 'failed' });
+  });
+  it('reports the run as failed when the algorithm stop state is unreadable', async () => {
+    const h = harness();
+    await h.seedPaperRecord();
+    vi.spyOn(h.store, 'isAlgorithmStopped').mockRejectedValue(new Error('down'));
+    await expect(h.run()).resolves.toBe('failed');
+    expect(orderPosts(h.fake)).toHaveLength(0);
+    expect(h.events).toContainEqual({ kind: 'job-failure', jobName: 'algo-live' });
   });
 });
