@@ -3,6 +3,7 @@ import {
   IDEMPOTENCY_WINDOW_MS,
   OrderApiError,
   OrderInputError,
+  PROVES_NO_ORDER,
   TossOrderClient,
   TransportNetworkError,
   correctedClientOrderId,
@@ -15,7 +16,7 @@ import {
   type TransportRequest,
   type TransportResponse,
 } from '../src/server/trading/toss-orders';
-import { FakeToss } from '../src/server/trading/testing';
+import { FakeToss } from './support/fake-toss';
 
 const SECRET_TEXT = 'text that must never be stored';
 
@@ -725,6 +726,204 @@ describe('read endpoints', () => {
     fake.postScript = [{ kind: 'status', status: 500, code: 'internal-error' }];
     await expect(client.cancelOrder(placed.orderId)).rejects.toBeInstanceOf(OrderApiError);
     expect(fake.calls.filter((c) => c.path.endsWith('/cancel'))).toHaveLength(2);
+  });
+});
+
+describe('ambiguity: after an unconfirmed attempt no later answer proves anything (M1)', () => {
+  it.each([
+    [401, 'invalid-token'],
+    [403, 'forbidden'],
+    [422, 'insufficient-buying-power'],
+    [409, 'opposite-pending-order-exists'],
+    [400, 'invalid-request'],
+    [404, 'order-not-found'],
+  ])(
+    'network error then HTTP %i %s is unknown, not rejected, and not retried further',
+    async (status, code) => {
+      const { fake, client } = setup();
+      fake.postScript = [{ kind: 'network' }, { kind: 'status', status, code }];
+      const result = await client.placeOrder(krBuy());
+      expect(result).toMatchObject({ outcome: 'unknown', attempts: 2, error: { status, code } });
+      expect(fake.placeCount()).toBe(2);
+    },
+  );
+  it.each([500, 503])('HTTP %i then a 4xx is unknown as well', async (first) => {
+    const { fake, client } = setup();
+    fake.postScript = [
+      { kind: 'status', status: first, code: 'internal-error' },
+      { kind: 'status', status: 422, code: 'stock-restricted' },
+    ];
+    expect(await client.placeOrder(krBuy())).toMatchObject({ outcome: 'unknown', attempts: 2 });
+  });
+  it('never tick-corrects after an ambiguous attempt', async () => {
+    const { fake, client } = setup();
+    let asked = 0;
+    fake.postScript = [
+      { kind: 'network' },
+      {
+        kind: 'status',
+        status: 400,
+        code: 'invalid-request',
+        data: { field: 'price', tickSize: '100', nearestPrices: ['50000', '50100'] },
+      },
+    ];
+    const result = await client.placeOrder(krBuy({ price: '50050' }), {
+      onPriceCorrection: () => {
+        asked++;
+        return true;
+      },
+    });
+    expect(result).toMatchObject({ outcome: 'unknown', tickCorrected: false });
+    expect(asked).toBe(0);
+    expect(fake.placeCount()).toBe(2);
+    expect(fake.calls.every((c) => (c.body as { price: string }).price === '50050')).toBe(true);
+  });
+  it('a 429 (which proves nothing was processed) followed by a definitive 4xx is still a rejection', async () => {
+    const { fake, client } = setup();
+    fake.postScript = [
+      { kind: 'status', status: 429, code: 'rate-limit-exceeded' },
+      { kind: 'status', status: 422, code: 'insufficient-buying-power' },
+    ];
+    expect(await client.placeOrder(krBuy())).toMatchObject({ outcome: 'rejected', attempts: 2 });
+  });
+  it('the explicit "proves no order" set is empty on purpose', () => {
+    expect(PROVES_NO_ORDER.size).toBe(0);
+  });
+});
+
+describe('beforeRetry hook: a stopped system must not resend (M2)', () => {
+  it('is called after the back-off and before every retry; true lets the retry proceed', async () => {
+    const { fake, client, sleeps } = setup();
+    fake.postScript = [{ kind: 'network' }, { kind: 'network' }];
+    const log: string[] = [];
+    const sleepSpy = new TossOrderClient(fake, {
+      sleep: async (ms) => {
+        log.push(`sleep:${ms}`);
+      },
+    });
+    void client;
+    void sleeps;
+    const result = await sleepSpy.placeOrder(krBuy(), {
+      beforeRetry: () => {
+        log.push('hook');
+        return true;
+      },
+    });
+    expect(result).toMatchObject({ outcome: 'accepted', attempts: 3 });
+    expect(log).toEqual(['sleep:500', 'hook', 'sleep:1000', 'hook']);
+  });
+  it.each([
+    ['returns false', () => false],
+    ['rejects', () => Promise.reject(new Error('store down'))],
+    [
+      'throws',
+      () => {
+        throw new Error('boom');
+      },
+    ],
+    ['returns a non-true value', () => undefined as never],
+  ])('aborts the retry when the hook %s: unknown, nothing resent', async (_n, hook) => {
+    const { fake, client } = setup();
+    fake.postScript = [{ kind: 'network' }, { kind: 'network' }, { kind: 'network' }];
+    const result = await client.placeOrder(krBuy(), { beforeRetry: hook as never });
+    expect(result).toMatchObject({
+      outcome: 'unknown',
+      attempts: 1,
+      error: { kind: 'network', code: 'retry-aborted' },
+    });
+    expect(fake.placeCount()).toBe(1);
+  });
+  it('can abort a later retry after the first one went out', async () => {
+    const { fake, client } = setup();
+    fake.postScript = [{ kind: 'network' }, { kind: 'network' }, { kind: 'network' }];
+    let calls = 0;
+    const result = await client.placeOrder(krBuy(), { beforeRetry: () => ++calls < 2 });
+    expect(result).toMatchObject({ outcome: 'unknown', attempts: 2 });
+    expect(fake.placeCount()).toBe(2);
+  });
+  it('is not consulted for the first attempt', async () => {
+    const { fake, client } = setup();
+    let calls = 0;
+    await client.placeOrder(krBuy(), {
+      beforeRetry: () => {
+        calls++;
+        return true;
+      },
+    });
+    expect(calls).toBe(0);
+    expect(fake.placeCount()).toBe(1);
+  });
+});
+
+describe('dot-only path segments are refused (L6)', () => {
+  it.each(['.', '..', '...'])(
+    'symbol %s and order id %s never reach the transport',
+    async (bad) => {
+      const { fake, client } = setup();
+      await expect(client.getStockWarnings(bad)).rejects.toBeInstanceOf(OrderInputError);
+      await expect(client.getSellableQuantity(bad)).rejects.toBeInstanceOf(OrderInputError);
+      await expect(client.getPriceLimits(bad)).rejects.toBeInstanceOf(OrderInputError);
+      await expect(client.listOrders({ status: 'OPEN', symbol: bad })).rejects.toBeInstanceOf(
+        OrderInputError,
+      );
+      await expect(client.getOrder(bad)).rejects.toBeInstanceOf(OrderInputError);
+      await expect(client.cancelOrder(bad)).rejects.toBeInstanceOf(OrderInputError);
+      expect(fake.calls).toHaveLength(0);
+    },
+  );
+  it('a provider answer carrying a dot-only order id or symbol is invalid', async () => {
+    const order = (over: Record<string, unknown>) => ({
+      orderId: 'o1',
+      symbol: '005930',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      timeInForce: 'DAY',
+      status: 'PENDING',
+      price: '70000',
+      quantity: '1',
+      orderAmount: null,
+      currency: 'KRW',
+      orderedAt: '2026-10-21T09:30:00.000+09:00',
+      canceledAt: null,
+      execution: {
+        filledQuantity: '0',
+        averageFilledPrice: null,
+        filledAmount: null,
+        commission: null,
+        tax: null,
+        filledAt: null,
+        settlementDate: null,
+      },
+      ...over,
+    });
+    for (const over of [{ orderId: '..' }, { symbol: '..' }, { orderId: '.' }]) {
+      const transport: OrderTransport = {
+        send: async () => ({
+          status: 200,
+          body: { result: { orders: [order(over)], nextCursor: null, hasNext: false } },
+        }),
+      };
+      await expect(
+        new TossOrderClient(transport).listOrders({ status: 'OPEN' }),
+      ).rejects.toMatchObject({
+        info: { code: 'response-invalid' },
+      });
+    }
+    const transport: OrderTransport = {
+      send: async () => ({
+        status: 200,
+        body: { result: { orderId: '..', clientOrderId: 'ai-test-0001' } },
+      }),
+    };
+    expect(await new TossOrderClient(transport).placeOrder(krBuy())).toMatchObject({
+      outcome: 'unknown',
+    });
+  });
+  it('ordinary symbols with dots and dashes are still fine', async () => {
+    const { fake, client } = setup();
+    await client.getStockWarnings('BRK.B');
+    await client.getSellableQuantity('BF-B');
+    expect(fake.calls).toHaveLength(2);
   });
 });
 

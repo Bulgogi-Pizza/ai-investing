@@ -1,23 +1,23 @@
-import { addSample, createBucketStats, type BucketStats } from '../../lib/algo/index.js';
-import type { PreTradeAlgorithm, PreTradeMarketFacts } from './pre-trade.js';
+import { addSample, createBucketStats, type BucketStats } from '../../src/lib/algo/index.js';
+import type { PreTradeAlgorithm, PreTradeMarketFacts } from '../../src/server/trading/pre-trade';
 import {
   kstDateKey,
   type LiveOrderRecord,
   type LiveOrderStatus,
   type TradingStore,
-} from './stores.js';
+} from '../../src/server/trading/stores';
 import {
   TransportNetworkError,
   type OrderTransport,
   type TransportRequest,
   type TransportResponse,
-} from './toss-orders.js';
+} from '../../src/server/trading/toss-orders';
 
 /**
  * TEST SUPPORT ONLY. A fake Toss server behind the `OrderTransport` port, shaped after the
  * official spec v1.2.24 (response envelopes, error codes, idempotency, KR tick-size 400). Tests use
  * it exclusively: no real order is ever placed by anything in this repository's tests. Not
- * imported by production code.
+ * imported by anything under src/ (a static test enforces it).
  */
 export type FakeOrder = {
   orderId: string;
@@ -299,6 +299,8 @@ export function krFacts(overrides: Partial<PreTradeMarketFacts> = {}): PreTradeM
     avgTradedValue: 5_000_000_000,
     financialsPresent: true,
     fxMidRate: null,
+    // Fresh by default; only US orders look at the FX fields.
+    fxObservedAt: new Date(NOW.getTime() - 60_000).toISOString(),
     ...overrides,
   };
 }
@@ -344,7 +346,12 @@ export async function seedOrder(
     ...input,
     status: 'reserved',
   };
-  const reserved = await store.reserveOrder({ record, maxPerAlgorithm: 1000, maxGlobal: 1000 });
+  const reserved = await store.reserveOrder({
+    record,
+    maxPerAlgorithm: 1000,
+    maxGlobal: 1000,
+    budget: Number.POSITIVE_INFINITY,
+  });
   if (!reserved.ok) throw new Error(`seed failed: ${reserved.reason}`);
   if (target === 'reserved') return;
   if (target === 'unknown' || target === 'rejected') {

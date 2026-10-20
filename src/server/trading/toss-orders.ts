@@ -151,6 +151,7 @@ const ERROR_MESSAGES: Record<string, string> = {
   maintenance: '증권사가 점검 중입니다.',
   'network-error': '증권사에 연결하지 못했습니다. 주문이 접수되었는지 확인해야 합니다.',
   'response-invalid': '증권사 응답 형식을 확인하지 못했습니다.',
+  'retry-aborted': '재시도 직전에 중단되었습니다. 주문이 접수되었는지 확인해야 합니다.',
   'tick-correction-declined': '호가 단위 보정을 적용하지 않아 주문하지 않았습니다.',
   'tick-correction-unavailable': '호가 단위 정보를 확인하지 못해 주문하지 않았습니다.',
   'already-filled': '이미 체결된 주문입니다.',
@@ -176,6 +177,14 @@ const AMBIGUOUS_CODES: ReadonlySet<string> = new Set([
   'request-in-progress',
   'idempotency-key-conflict',
 ]);
+
+/**
+ * Codes that prove NO order exists even after an ambiguous earlier attempt with the same key.
+ * Deliberately empty: with the same key an existing order is replayed as a 200 per the spec, but
+ * that is documented behaviour we do not bet money on. After a network error, 5xx or similar,
+ * every later non-200 stays `unknown`.
+ */
+export const PROVES_NO_ORDER: ReadonlySet<string> = new Set();
 
 /** True when a 401/403 on the orders endpoint points at missing credentials or permission. */
 export function isPermissionError(info: OrderErrorInfo) {
@@ -215,8 +224,12 @@ function shortText(value: unknown, max = 64): string {
   if (typeof value !== 'string' || value.length < 1 || value.length > max) bad();
   return value as string;
 }
-const ORDER_ID = /^[A-Za-z0-9_\-=.~]{1,256}$/;
-const SYMBOL = /^[A-Za-z0-9.\-]{1,30}$/;
+const ORDER_ID_PATTERN = /^[A-Za-z0-9_\-=.~]{1,256}$/;
+const SYMBOL_PATTERN = /^[A-Za-z0-9.\-]{1,30}$/;
+/** Dot-only segments ('.', '..') would change the request path once substituted into a URL. */
+const dotsOnly = (value: string) => /^\.+$/.test(value);
+const ORDER_ID = { test: (v: string) => ORDER_ID_PATTERN.test(v) && !dotsOnly(v) };
+const SYMBOL = { test: (v: string) => SYMBOL_PATTERN.test(v) && !dotsOnly(v) };
 function orderIdText(value: unknown): string {
   if (typeof value !== 'string' || !ORDER_ID.test(value)) bad();
   return value as string;
@@ -468,6 +481,12 @@ export type PlaceOrderOptions = {
    * happens when it resolves true. Without it a tick-size rejection is final.
    */
   onPriceCorrection?: (correctedPrice: string) => boolean | Promise<boolean>;
+  /**
+   * Called after the back-off sleep and before EVERY retry of the same request. Resolving false
+   * (or throwing) aborts the retry: nothing is resent and the outcome is `unknown`
+   * (`retry-aborted`). The executor uses it to re-read the emergency stop and algorithm state.
+   */
+  beforeRetry?: () => boolean | Promise<boolean>;
 };
 
 export type OrderClientOptions = {
@@ -681,7 +700,7 @@ export class TossOrderClient implements TossOrderReads, TossOrderWrites {
     let tickCorrected = false;
     let attempts = 0;
     for (;;) {
-      const sent = await this.sendWithRetries(request, wire);
+      const sent = await this.sendWithRetries(request, wire, options.beforeRetry);
       attempts += sent.attempts;
       const base = {
         clientOrderId: wire.clientOrderId,
@@ -765,6 +784,7 @@ export class TossOrderClient implements TossOrderReads, TossOrderWrites {
   private async sendWithRetries(
     r: PlaceOrderRequest,
     wire: { clientOrderId: string; price: string },
+    beforeRetry?: PlaceOrderOptions['beforeRetry'],
   ): Promise<
     | { kind: 'accepted'; orderId: string; attempts: number }
     | { kind: 'unknown'; error: OrderErrorInfo; attempts: number }
@@ -802,8 +822,9 @@ export class TossOrderClient implements TossOrderReads, TossOrderWrites {
         retryDelayMs = this.backoff(attempt, info.retryAfterSeconds);
       } else if (response.status >= 400 && response.status < 500) {
         const info = errorInfoFromResponse(response);
-        // Never retried. Some 4xx codes mean the earlier request with this key may exist.
-        if (AMBIGUOUS_CODES.has(info.code))
+        // Never retried. Some 4xx codes mean the earlier request with this key may exist, and after
+        // an ambiguous attempt (network error, 5xx) any 4xx says nothing about that earlier request.
+        if (AMBIGUOUS_CODES.has(info.code) || (maybeCreated && !PROVES_NO_ORDER.has(info.code)))
           return { kind: 'unknown', error: info, attempts: attempt };
         return { kind: 'refused', error: info, body: response.body, attempts: attempt };
       } else {
@@ -822,6 +843,18 @@ export class TossOrderClient implements TossOrderReads, TossOrderWrites {
           : { kind: 'unknown', error: last, attempts: attempt };
       }
       await this.sleep(retryDelayMs);
+      let proceed = true;
+      try {
+        proceed = beforeRetry ? (await beforeRetry()) === true : true;
+      } catch {
+        proceed = false;
+      }
+      if (!proceed)
+        return {
+          kind: 'unknown',
+          error: { kind: last.kind, status: last.status, code: 'retry-aborted' },
+          attempts: attempt,
+        };
     }
     return { kind: 'unknown', error: last, attempts: this.maxRetries + 1 };
   }

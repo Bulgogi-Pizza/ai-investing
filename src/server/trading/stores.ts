@@ -113,13 +113,25 @@ export type ReserveInput = {
   record: LiveOrderRecord;
   maxPerAlgorithm: number;
   maxGlobal: number;
+  /**
+   * The algorithm's budget in its currency. Re-checked inside the reservation transaction against
+   * the freshly read ledger (a buy may not push committed exposure past it; a sell may not exceed
+   * the shares the algorithm owns and has not already put into a working sell).
+   */
+  budget: number;
 };
 export type ReserveFailure =
   | 'emergency-stop'
   | 'algorithm-stopped'
   | 'daily-limit-algorithm'
   | 'daily-limit-global'
-  | 'duplicate';
+  | 'duplicate'
+  /** Another order for the same algorithm+symbol is working (lock held). */
+  | 'symbol-open'
+  /** Another order for the same algorithm+symbol has an unconfirmed outcome (lock held). */
+  | 'symbol-unreconciled'
+  | 'budget-exceeded'
+  | 'sell-exceeds-owned';
 export type ReserveResult = { ok: true } | { ok: false; reason: ReserveFailure };
 
 /**
@@ -149,6 +161,42 @@ export interface TradingStore extends PreTradeStore {
   /** All orders that are not terminal, across algorithms (for reconciliation). */
   listNonTerminalOrders(): Promise<LiveOrderRecord[]>;
   recordBlocked(record: BlockedOrderRecord): Promise<void>;
+  /**
+   * Per-algorithm run lease so two `executeRun` calls cannot overlap. Succeeds when no unexpired
+   * lease is held by a different run; the same run id may re-acquire (restart). The lease expires
+   * after `ttlMs` so a crashed run cannot block the algorithm forever.
+   */
+  acquireRunLease(algorithmId: string, runId: string, ttlMs: number): Promise<boolean>;
+  /** Releases the lease only if `runId` still holds it. */
+  releaseRunLease(algorithmId: string, runId: string): Promise<void>;
+}
+
+/**
+ * Lock state of an (algorithm, symbol) pair, from the order that holds the lock. A lock whose
+ * owner is terminal is stale and counts as free; a missing owner is treated as unconfirmed.
+ */
+export type SymbolLockState = 'free' | 'open' | 'unreconciled';
+export function symbolLockState(
+  locked: boolean,
+  ownerStatus: LiveOrderStatus | null,
+): SymbolLockState {
+  if (!locked) return 'free';
+  if (ownerStatus === null) return 'unreconciled';
+  if (TERMINAL_STATUSES.includes(ownerStatus)) return 'free';
+  return ownerStatus === 'reserved' || ownerStatus === 'unknown' ? 'unreconciled' : 'open';
+}
+
+/**
+ * Exposure facts read from the algorithm's own orders inside the reservation: budget used
+ * (held cost + working buys) and shares still available to sell for the record's symbol.
+ */
+export function ledgerFacts(orders: LiveOrderRecord[], symbol: string) {
+  const ledger = summarizeLedger(orders);
+  const position = ledger.positions.get(symbol);
+  return {
+    committed: ledger.committed,
+    ownAvailable: Math.max(0, (position?.quantity ?? 0) - (position?.pendingSellQuantity ?? 0)),
+  };
 }
 
 /** The decision both stores share, so the rules exist once. Pure. */
@@ -160,12 +208,24 @@ export function decideReserve(facts: {
   exists: boolean;
   maxPerAlgorithm: number;
   maxGlobal: number;
+  symbolLock: SymbolLockState;
+  side: TradeSide;
+  quantity: number;
+  notional: number;
+  budget: number;
+  committed: number;
+  ownAvailable: number;
 }): ReserveFailure | null {
   if (facts.exists) return 'duplicate';
   if (facts.emergencyStop) return 'emergency-stop';
   if (facts.algorithmStopped) return 'algorithm-stopped';
+  if (facts.symbolLock === 'unreconciled') return 'symbol-unreconciled';
+  if (facts.symbolLock === 'open') return 'symbol-open';
   if (facts.algorithmCount >= facts.maxPerAlgorithm) return 'daily-limit-algorithm';
   if (facts.globalCount >= facts.maxGlobal) return 'daily-limit-global';
+  if (facts.side === 'buy' && !(facts.committed + facts.notional <= facts.budget))
+    return 'budget-exceeded';
+  if (facts.side === 'sell' && facts.quantity > facts.ownAvailable) return 'sell-exceeds-owned';
   return null;
 }
 
@@ -265,6 +325,9 @@ export class MemoryTradingStore implements TradingStore {
   private readonly orders = new Map<string, LiveOrderRecord>();
   private readonly counters = new Map<string, number>();
   private readonly blocked: BlockedOrderRecord[] = [];
+  /** `${algorithmId}|${symbol}` -> clientOrderId of the order holding the lock. */
+  private readonly symbolLocks = new Map<string, string>();
+  private readonly leases = new Map<string, { runId: string; expiresAt: number }>();
   constructor(private readonly clock: () => Date = () => new Date()) {}
 
   /** Operator/test control. The 7e UI wires its own authenticated writer. */
@@ -295,6 +358,13 @@ export class MemoryTradingStore implements TradingStore {
     if (!ALGORITHM_ID.test(r.algorithmId) || r.status !== 'reserved')
       throw new Error('Invalid reservation');
     // No await between read and write: atomic on a single-threaded runtime.
+    const lockKey = `${r.algorithmId}|${r.symbol}`;
+    const owner = this.symbolLocks.get(lockKey);
+    const ownerStatus = owner === undefined ? null : (this.orders.get(owner)?.status ?? null);
+    const facts = ledgerFacts(
+      [...this.orders.values()].filter((o) => o.algorithmId === r.algorithmId),
+      r.symbol,
+    );
     const failure = decideReserve({
       emergencyStop: this.emergencyStop,
       algorithmStopped: this.stopped.has(r.algorithmId),
@@ -303,8 +373,16 @@ export class MemoryTradingStore implements TradingStore {
       exists: this.orders.has(r.clientOrderId),
       maxPerAlgorithm: input.maxPerAlgorithm,
       maxGlobal: input.maxGlobal,
+      symbolLock: symbolLockState(owner !== undefined, ownerStatus),
+      side: r.side,
+      quantity: r.quantity,
+      notional: r.quantity * Number(r.price),
+      budget: input.budget,
+      committed: facts.committed,
+      ownAvailable: facts.ownAvailable,
     });
     if (failure) return { ok: false, reason: failure };
+    this.symbolLocks.set(lockKey, r.clientOrderId);
     this.counters.set(
       `${r.dateKey}|a|${r.algorithmId}`,
       (this.counters.get(`${r.dateKey}|a|${r.algorithmId}`) ?? 0) + 1,
@@ -318,6 +396,9 @@ export class MemoryTradingStore implements TradingStore {
     if (!current) throw new Error('Unknown order');
     const next = applyPatch(current, patch, this.clock().toISOString());
     this.orders.set(clientOrderId, next);
+    const lockKey = `${next.algorithmId}|${next.symbol}`;
+    if (TERMINAL_STATUSES.includes(next.status) && this.symbolLocks.get(lockKey) === clientOrderId)
+      this.symbolLocks.delete(lockKey);
     return structuredClone(next);
   }
   async getOrder(clientOrderId: string) {
@@ -342,5 +423,16 @@ export class MemoryTradingStore implements TradingStore {
   }
   listBlocked() {
     return this.blocked.map((b) => structuredClone(b));
+  }
+  async acquireRunLease(algorithmId: string, runId: string, ttlMs: number) {
+    if (!ALGORITHM_ID.test(algorithmId) || !(ttlMs > 0)) throw new Error('Invalid lease');
+    const now = this.clock().getTime();
+    const held = this.leases.get(algorithmId);
+    if (held && held.expiresAt > now && held.runId !== runId) return false;
+    this.leases.set(algorithmId, { runId, expiresAt: now + ttlMs });
+    return true;
+  }
+  async releaseRunLease(algorithmId: string, runId: string) {
+    if (this.leases.get(algorithmId)?.runId === runId) this.leases.delete(algorithmId);
   }
 }

@@ -6,7 +6,7 @@ import {
   type OrderTransport,
   type TransportRequest,
 } from '../src/server/trading/toss-orders';
-import { FakeToss, NOW } from '../src/server/trading/testing';
+import { FakeToss, NOW } from './support/fake-toss';
 
 const clientFor = (fake: FakeToss) => new TossOrderClient(fake, { sleep: async () => undefined });
 

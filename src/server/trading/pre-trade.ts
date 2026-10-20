@@ -68,6 +68,8 @@ export type PreTradeMarketFacts = {
   financialsPresent: boolean;
   /** KRW per USD (`/exchange-rate` midRate). Required for US orders. */
   fxMidRate: number | null;
+  /** When that rate was observed/valid (ISO; `/exchange-rate` validFrom). Required for US orders. */
+  fxObservedAt?: string | null;
 };
 
 export type PreTradeSettings = {
@@ -82,6 +84,10 @@ export type PreTradeSettings = {
   maxQuoteDeviation?: number;
   /** Extra margin on the FX midRate when converting US orders to KRW for the 1e8 cap. Default 0.02. */
   fxSafetyMargin?: number;
+  /** Plausible KRW-per-USD band; a rate outside it is refused. Default 300..5000. */
+  fxBand?: { min: number; max: number };
+  /** Oldest acceptable FX rate in hours. Default 6. */
+  maxFxAgeHours?: number;
   /** Lower value only: the cap cannot exceed 100,000,000 KRW. */
   maxOrderValueKrw?: number;
   /** Quote age limit in ms. Can only be tightened below 60,000. */
@@ -137,6 +143,10 @@ const DEFAULT_PRICE_LIMIT_BUFFER = 0.03;
 const DEFAULT_MAX_QUOTE_DEVIATION = 0.03;
 const DEFAULT_FX_SAFETY_MARGIN = 0.02;
 const FUTURE_QUOTE_TOLERANCE_MS = 5_000;
+export const DEFAULT_FX_BAND = { min: 300, max: 5000 } as const;
+export const DEFAULT_MAX_FX_AGE_HOURS = 6;
+/** More sell tranches than this means something is wrong (or the order is absurdly large). */
+export const MAX_SELL_TRANCHES = 50;
 
 type ResolvedSettings = {
   safeguards: Safeguards;
@@ -145,6 +155,8 @@ type ResolvedSettings = {
   priceLimitBuffer: number;
   maxQuoteDeviation: number;
   fxSafetyMargin: number;
+  fxBand: { min: number; max: number };
+  maxFxAgeMs: number;
   maxQuoteAgeMs: number;
   minSamples: number | undefined;
 };
@@ -182,6 +194,10 @@ function resolveSettings(
   const deviation = s.maxQuoteDeviation ?? DEFAULT_MAX_QUOTE_DEVIATION;
   const margin = s.fxSafetyMargin ?? DEFAULT_FX_SAFETY_MARGIN;
   const age = s.maxQuoteAgeMs ?? HARD_MAX_QUOTE_AGE_MS;
+  const band = s.fxBand ?? DEFAULT_FX_BAND;
+  const fxHours = s.maxFxAgeHours ?? DEFAULT_MAX_FX_AGE_HOURS;
+  if (!positive(band.min) || !positive(band.max) || band.min >= band.max || !positive(fxHours))
+    return null;
   if (
     !positiveInt(maxGlobal) ||
     !(typeof buffer === 'number' && buffer >= 0 && buffer < 1) ||
@@ -200,6 +216,8 @@ function resolveSettings(
     priceLimitBuffer: buffer,
     maxQuoteDeviation: deviation,
     fxSafetyMargin: margin,
+    fxBand: { min: band.min, max: band.max },
+    maxFxAgeMs: fxHours * 3_600_000,
     maxQuoteAgeMs: Math.min(age, HARD_MAX_QUOTE_AGE_MS),
     minSamples: s.minSamples,
   };
@@ -214,10 +232,53 @@ export function krwEquivalentPrice(
   price: number,
   fxMidRate: number | null,
   fxSafetyMargin = DEFAULT_FX_SAFETY_MARGIN,
+  fxBand: { min: number; max: number } = DEFAULT_FX_BAND,
 ): number | null {
   if (market === 'KR') return price;
-  if (!positive(fxMidRate)) return null;
+  if (!positive(fxMidRate) || fxMidRate < fxBand.min || fxMidRate > fxBand.max) return null;
   return price * fxMidRate * (1 + fxSafetyMargin);
+}
+
+/**
+ * FX sanity for US orders: a missing rate, a rate outside the plausible band, or a rate without a
+ * recent timestamp must not size an order (a wrong rate would defeat the 1e8 cap).
+ */
+export function fxProblem(
+  facts: Pick<PreTradeMarketFacts, 'fxMidRate' | 'fxObservedAt'>,
+  settings: Pick<ResolvedSettings, 'fxBand' | 'maxFxAgeMs'>,
+  now: Date,
+): ReasonCode | null {
+  const rate = facts.fxMidRate;
+  if (typeof rate !== 'number' || !Number.isFinite(rate) || rate <= 0) return 'FX_RATE_MISSING';
+  if (rate < settings.fxBand.min || rate > settings.fxBand.max) return 'FX_RATE_INVALID';
+  const at = typeof facts.fxObservedAt === 'string' ? Date.parse(facts.fxObservedAt) : NaN;
+  if (!Number.isFinite(at)) return 'FX_RATE_STALE';
+  const age = now.getTime() - at;
+  if (age > settings.maxFxAgeMs || age < -FUTURE_QUOTE_TOLERANCE_MS) return 'FX_RATE_STALE';
+  return null;
+}
+
+/** Price-limit rule shared by the check and the tick-correction veto. */
+export function priceLimitProblem(
+  market: TradeMarket,
+  currency: 'KRW' | 'USD',
+  price: number,
+  limits: { upperLimitPrice: string | null; lowerLimitPrice: string | null; currency: string },
+  buffer: number,
+): ReasonCode | null {
+  if (limits.currency !== currency) return 'PRICE_LIMITS_UNAVAILABLE';
+  const upper = limits.upperLimitPrice === null ? null : Number(limits.upperLimitPrice);
+  const lower = limits.lowerLimitPrice === null ? null : Number(limits.lowerLimitPrice);
+  if ((upper !== null && !Number.isFinite(upper)) || (lower !== null && !Number.isFinite(lower)))
+    return 'PRICE_LIMITS_UNAVAILABLE';
+  // US has no price limits (both null). A KR symbol without limits cannot be verified.
+  if (market === 'KR' && upper === null && lower === null) return 'PRICE_LIMITS_UNAVAILABLE';
+  if (
+    (upper !== null && price >= upper * (1 - buffer)) ||
+    (lower !== null && price <= lower * (1 + buffer))
+  )
+    return 'NEAR_PRICE_LIMIT';
+  return null;
 }
 
 /**
@@ -230,20 +291,26 @@ export function planSellTranches(input: {
   quantity: number;
   price: string;
   fxMidRate: number | null;
-  settings?: Pick<PreTradeSettings, 'fxSafetyMargin' | 'maxOrderValueKrw'>;
+  settings?: Pick<PreTradeSettings, 'fxSafetyMargin' | 'maxOrderValueKrw' | 'fxBand'>;
 }): { tranches: number[]; error?: undefined } | { tranches: []; error: ReasonCode } {
   const price = Number(input.price);
   if (!Number.isSafeInteger(input.quantity) || input.quantity < 1 || !positive(price))
     return { tranches: [], error: 'ORDER_INVALID' };
   const margin = input.settings?.fxSafetyMargin ?? DEFAULT_FX_SAFETY_MARGIN;
-  const krw = krwEquivalentPrice(input.market, price, input.fxMidRate, margin);
-  if (krw === null) return { tranches: [], error: 'FX_RATE_MISSING' };
+  const band = input.settings?.fxBand ?? DEFAULT_FX_BAND;
+  const krw = krwEquivalentPrice(input.market, price, input.fxMidRate, margin, band);
+  if (krw === null)
+    return {
+      tranches: [],
+      error: positive(input.fxMidRate) ? 'FX_RATE_INVALID' : 'FX_RATE_MISSING',
+    };
   const cap = Math.min(
     input.settings?.maxOrderValueKrw ?? HARD_MAX_ORDER_VALUE_KRW,
     HARD_MAX_ORDER_VALUE_KRW,
   );
   const max = maxQuantityBelowValue(krw, cap);
-  if (max < 1) return { tranches: [], error: 'ORDER_TOO_LARGE' };
+  if (max < 1 || Math.ceil(input.quantity / max) > MAX_SELL_TRANCHES)
+    return { tranches: [], error: 'ORDER_TOO_LARGE' };
   const tranches: number[] = [];
   for (let left = input.quantity; left > 0; left -= max) tranches.push(Math.min(left, max));
   return { tranches };
@@ -380,8 +447,22 @@ async function evaluate(ctx: PreTradeContext, deps: PreTradeDeps): Promise<PreTr
     stage3.push(reason('DAILY_BAR_MISSING'));
   if (algorithm.usesValueSignal && facts.financialsPresent !== true)
     stage3.push(reason('FINANCIALS_MISSING'));
-  const krwPrice = krwEquivalentPrice(market, price, facts.fxMidRate, settings.fxSafetyMargin);
-  if (krwPrice === null) stage3.push(reason('FX_RATE_MISSING'));
+  let krwPrice: number | null = price;
+  if (market === 'US') {
+    const problem = fxProblem(facts, settings, now);
+    if (problem) {
+      stage3.push(reason(problem));
+      krwPrice = null;
+    } else
+      krwPrice = krwEquivalentPrice(
+        market,
+        price,
+        facts.fxMidRate,
+        settings.fxSafetyMargin,
+        settings.fxBand,
+      );
+    if (krwPrice === null && !problem) stage3.push(reason('FX_RATE_INVALID'));
+  }
 
   // Positions and working orders come from the store (the algorithm's own ledger).
   let ownAvailable = 0;
@@ -446,7 +527,9 @@ async function evaluate(ctx: PreTradeContext, deps: PreTradeDeps): Promise<PreTr
   const remote = async (): Promise<Reason[]> => {
     try {
       const open = await deps.toss.listOrders({ status: 'OPEN', symbol: order.symbol });
-      if (open.orders.some((o) => o.symbol === order.symbol)) return [reason('OPEN_ORDER_EXISTS')];
+      // The list is already filtered by symbol on the provider side; any order at all blocks, so a
+      // differently formatted symbol in the answer cannot slip through a string comparison.
+      if (open.orders.length > 0) return [reason('OPEN_ORDER_EXISTS')];
     } catch {
       return [reason('OPEN_ORDERS_UNAVAILABLE')];
     }
@@ -459,18 +542,8 @@ async function evaluate(ctx: PreTradeContext, deps: PreTradeDeps): Promise<PreTr
     }
     try {
       const limits = await deps.toss.getPriceLimits(order.symbol);
-      if (limits.currency !== currency) return [reason('PRICE_LIMITS_UNAVAILABLE')];
-      const upper = limits.upperLimitPrice === null ? null : Number(limits.upperLimitPrice);
-      const lower = limits.lowerLimitPrice === null ? null : Number(limits.lowerLimitPrice);
-      // US has no price limits (both null). A KR symbol without limits cannot be verified.
-      if (market === 'KR' && upper === null && lower === null)
-        return [reason('PRICE_LIMITS_UNAVAILABLE')];
-      const buffer = settings.priceLimitBuffer;
-      if (
-        (upper !== null && price >= upper * (1 - buffer)) ||
-        (lower !== null && price <= lower * (1 + buffer))
-      )
-        return [reason('NEAR_PRICE_LIMIT')];
+      const problem = priceLimitProblem(market, currency, price, limits, settings.priceLimitBuffer);
+      if (problem) return [reason(problem)];
     } catch {
       return [reason('PRICE_LIMITS_UNAVAILABLE')];
     }
@@ -555,15 +628,52 @@ export function isAcceptableCorrection(
     return false;
   // Less aggressive only (buy lower, sell higher); the quote checks of the original order still hold.
   if (order.side === 'buy' ? corrected > original : corrected < original) return false;
+  if (algorithm.market === 'US' && fxProblem(facts, settings, now) !== null) return false;
   const krw = krwEquivalentPrice(
     algorithm.market,
     corrected,
     facts.fxMidRate,
     settings.fxSafetyMargin,
+    settings.fxBand,
   );
   if (krw === null) return false;
   return (
     order.quantity <=
     maxQuantityBelowValue(krw, settings.safeguards.maxOrderValue ?? HARD_MAX_ORDER_VALUE_KRW)
   );
+}
+
+/**
+ * The complete veto for the tick-size correction: everything price-dependent is re-checked for the
+ * corrected price (value cap, price scale, direction, FX, and the price limits fetched again), and
+ * the emergency stop and algorithm state are re-read. Fails closed on any read error.
+ */
+export async function verifyCorrectedPrice(
+  ctx: PreTradeContext,
+  correctedPrice: string,
+  deps: Pick<PreTradeDeps, 'store' | 'toss' | 'now'>,
+): Promise<boolean> {
+  try {
+    const now = deps.now();
+    if (!isAcceptableCorrection(ctx, correctedPrice, now)) return false;
+    const settings = resolveSettings(ctx.algorithm.market, ctx.settings);
+    if (!settings) return false;
+    const market = ctx.algorithm.market;
+    const limits = await deps.toss.getPriceLimits(ctx.order.symbol);
+    if (
+      priceLimitProblem(
+        market,
+        currencyOf(market),
+        Number(correctedPrice),
+        limits,
+        settings.priceLimitBuffer,
+      ) !== null
+    )
+      return false;
+    if (await deps.store.getEmergencyStop()) return false;
+    if (await deps.store.isAlgorithmStopped(ctx.algorithm.id)) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }

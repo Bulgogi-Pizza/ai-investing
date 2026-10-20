@@ -2,8 +2,11 @@ import { Firestore } from '@google-cloud/firestore';
 import {
   ALGORITHM_ID,
   NON_TERMINAL_STATUSES,
+  TERMINAL_STATUSES,
   applyPatch,
   decideReserve,
+  ledgerFacts,
+  symbolLockState,
   type BlockedOrderRecord,
   type LiveOrderRecord,
   type LiveOrderStatus,
@@ -21,11 +24,16 @@ import {
  *   tradingAlgorithmState/{algorithmId}     { stopped: true, reason }
  *   tradingCounters/{dateKey}_global        { count }
  *   tradingCounters/{dateKey}_a_{id}        { count }
+ *   tradingSymbolLocks/{algorithmId}_{symbol}  { clientOrderId }  held from reservation until the
+ *                                           order is terminal (one working order per algorithm+symbol)
+ *   tradingRunLeases/{algorithmId}          { runId, expiresAt }  one executeRun at a time
  *   blockedOrders/{autoId}                  pre-trade refusals (never counted)
  *
  * `reserveOrder` is ONE transaction that reads the emergency stop, the algorithm state, both
- * counters and the order document, and then writes the counters and the order: the stop flag and
- * the daily counters cannot be raced by another job instance.
+ * counters, the order document, the symbol lock (and its owner) and the algorithm's orders, and
+ * then writes the counters, the lock and the order: the stop flag, the daily counters, the
+ * one-order-per-symbol rule, the budget and the sellable quantity cannot be raced by another job
+ * instance, even one with a different run id.
  */
 const STATUSES: readonly LiveOrderStatus[] = [
   'reserved',
@@ -108,6 +116,16 @@ export class FirestoreTradingStore implements TradingStore {
     if (!ALGORITHM_ID.test(algorithmId)) throw new Error('Invalid algorithm id');
     return this.db.collection('tradingCounters').doc(`${dateKey}_a_${algorithmId}`);
   }
+  private lockRef(algorithmId: string, symbol: string) {
+    if (!ALGORITHM_ID.test(algorithmId)) throw new Error('Invalid algorithm id');
+    if (!/^[A-Za-z0-9.\-]{1,30}$/.test(symbol) || /^\.+$/.test(symbol))
+      throw new Error('Invalid symbol');
+    return this.db.collection('tradingSymbolLocks').doc(`${algorithmId}_${symbol}`);
+  }
+  private leaseRef(algorithmId: string) {
+    if (!ALGORITHM_ID.test(algorithmId)) throw new Error('Invalid algorithm id');
+    return this.db.collection('tradingRunLeases').doc(algorithmId);
+  }
   private orderRef(clientOrderId: string) {
     if (!/^[a-zA-Z0-9\-_]{1,36}$/.test(clientOrderId)) throw new Error('Invalid client order id');
     return this.db.collection('liveOrders').doc(clientOrderId);
@@ -153,14 +171,20 @@ export class FirestoreTradingStore implements TradingStore {
     const algorithmCounter = this.counter(r.dateKey, r.algorithmId);
     const globalCounter = this.counter(r.dateKey);
     const order = this.orderRef(r.clientOrderId);
+    const lock = this.lockRef(r.algorithmId, r.symbol);
+    const algorithmOrders = this.db
+      .collection('liveOrders')
+      .where('algorithmId', '==', r.algorithmId);
     return this.db.runTransaction(async (tx) => {
       // All reads first, then all writes (Firestore transaction rule).
-      const [c, s, a, g, o] = await Promise.all([
+      const [c, s, a, g, o, l, mine] = await Promise.all([
         tx.get(control),
         tx.get(state),
         tx.get(algorithmCounter),
         tx.get(globalCounter),
         tx.get(order),
+        tx.get(lock),
+        tx.get(algorithmOrders),
       ]);
       const active = c.exists ? c.data()?.active : false;
       if (typeof active !== 'boolean') throw new Error('Invalid emergency stop document');
@@ -168,6 +192,18 @@ export class FirestoreTradingStore implements TradingStore {
         snap.exists && typeof snap.data()?.count === 'number' ? (snap.data()!.count as number) : 0;
       const algorithmCount = count(a);
       const globalCount = count(g);
+      let ownerStatus: LiveOrderStatus | null = null;
+      if (l.exists) {
+        const ownerId = l.data()?.clientOrderId;
+        if (typeof ownerId === 'string') {
+          const owner = await tx.get(this.orderRef(ownerId));
+          if (owner.exists) ownerStatus = parseLiveOrder(owner.data()).status;
+        }
+      }
+      const facts = ledgerFacts(
+        mine.docs.map((d) => parseLiveOrder(d.data())),
+        r.symbol,
+      );
       const failure = decideReserve({
         emergencyStop: active,
         algorithmStopped: s.exists,
@@ -176,10 +212,18 @@ export class FirestoreTradingStore implements TradingStore {
         exists: o.exists,
         maxPerAlgorithm: input.maxPerAlgorithm,
         maxGlobal: input.maxGlobal,
+        symbolLock: symbolLockState(l.exists, ownerStatus),
+        side: r.side,
+        quantity: r.quantity,
+        notional: r.quantity * Number(r.price),
+        budget: input.budget,
+        committed: facts.committed,
+        ownAvailable: facts.ownAvailable,
       });
       if (failure) return { ok: false as const, reason: failure };
       tx.set(algorithmCounter, { count: algorithmCount + 1, dateKey: r.dateKey });
       tx.set(globalCounter, { count: globalCount + 1, dateKey: r.dateKey });
+      tx.set(lock, { clientOrderId: r.clientOrderId, createdAt: r.createdAt });
       tx.create(order, clean({ ...r }));
       return { ok: true as const };
     });
@@ -190,8 +234,18 @@ export class FirestoreTradingStore implements TradingStore {
     return this.db.runTransaction(async (tx) => {
       const snapshot = await tx.get(ref);
       if (!snapshot.exists) throw new Error('Unknown order');
-      const next = applyPatch(parseLiveOrder(snapshot.data()), patch, this.clock().toISOString());
+      const current = parseLiveOrder(snapshot.data());
+      const lock = this.lockRef(current.algorithmId, current.symbol);
+      const lockSnapshot = await tx.get(lock);
+      const next = applyPatch(current, patch, this.clock().toISOString());
       tx.set(ref, clean({ ...next }));
+      // A terminal order releases its (algorithm, symbol) lock in the same transaction.
+      if (
+        TERMINAL_STATUSES.includes(next.status) &&
+        lockSnapshot.exists &&
+        lockSnapshot.data()?.clientOrderId === clientOrderId
+      )
+        tx.delete(lock);
       return next;
     });
   }
@@ -221,5 +275,29 @@ export class FirestoreTradingStore implements TradingStore {
       .collection('blockedOrders')
       .doc(record.id)
       .set(clean({ ...record }));
+  }
+  async acquireRunLease(algorithmId: string, runId: string, ttlMs: number) {
+    if (!(ttlMs > 0) || !/^[A-Za-z0-9_-]{1,64}$/.test(runId)) throw new Error('Invalid lease');
+    const ref = this.leaseRef(algorithmId);
+    const now = this.clock().getTime();
+    return this.db.runTransaction(async (tx) => {
+      const held = (await tx.get(ref)).data();
+      if (
+        held &&
+        typeof held.expiresAt === 'number' &&
+        held.expiresAt > now &&
+        held.runId !== runId
+      )
+        return false;
+      tx.set(ref, { runId, expiresAt: now + ttlMs });
+      return true;
+    });
+  }
+  async releaseRunLease(algorithmId: string, runId: string) {
+    const ref = this.leaseRef(algorithmId);
+    await this.db.runTransaction(async (tx) => {
+      const held = (await tx.get(ref)).data();
+      if (held?.runId === runId) tx.delete(ref);
+    });
   }
 }

@@ -1,11 +1,11 @@
 import { randomUUID } from 'node:crypto';
 import type { BucketStats } from '../../lib/algo/index.js';
-import type { NotificationEvent } from '../notify.js';
+import { liveAlertEvent, type LiveAlert, type NotificationEvent } from './alerts.js';
 import {
   DEFAULT_MAX_GLOBAL_ORDERS_PER_DAY,
-  isAcceptableCorrection,
   planSellTranches,
   preTradeCheck,
+  verifyCorrectedPrice,
   type OrderIntent,
   type PreTradeAlgorithm,
   type PreTradeContext,
@@ -85,6 +85,8 @@ export type ExecutorDeps = {
   now: () => Date;
   tradingDaysSince: PreTradeDeps['tradingDaysSince'];
   settings?: PreTradeSettings;
+  /** Run lease time-to-live in ms (default 10 minutes). */
+  runLeaseMs?: number;
   /** Display name for notifications; defaults to the algorithm id. */
   algorithmName?: (algorithmId: string) => string;
   newId?: () => string;
@@ -115,6 +117,8 @@ export type RunReport = {
   outcomes: OrderOutcome[];
   algorithmStopped: boolean;
   stopReason?: StopReason;
+  /** Another run of this algorithm holds the lease: nothing was attempted. */
+  leaseHeld?: boolean;
 };
 export type StopReason = 'loss-limit' | 'order-permission' | 'first-order-rejected';
 
@@ -138,6 +142,10 @@ const RESERVE_FAILURE_REASON: Record<ReserveFailure, ReasonCode> = {
   'daily-limit-algorithm': 'DAILY_LIMIT_ALGORITHM',
   'daily-limit-global': 'DAILY_LIMIT_GLOBAL',
   duplicate: 'UNRECONCILED_ORDER',
+  'symbol-open': 'OPEN_ORDER_EXISTS',
+  'symbol-unreconciled': 'UNRECONCILED_ORDER',
+  'budget-exceeded': 'BUDGET_EXCEEDED',
+  'sell-exceeds-owned': 'SELL_EXCEEDS_OWNED',
 };
 
 type PlannedOrder = { intent: OrderIntent };
@@ -151,9 +159,9 @@ export class LiveOrderExecutor {
   private name(algorithmId: string) {
     return this.deps.algorithmName?.(algorithmId) ?? algorithmId;
   }
-  private async notify(event: NotificationEvent) {
+  private async notify(alert: LiveAlert) {
     try {
-      await this.deps.notifier.notify(event);
+      await this.deps.notifier.notify(liveAlertEvent(alert));
     } catch {
       // Delivery problems never block trading; the notifier records its own failures.
     }
@@ -164,6 +172,43 @@ export class LiveOrderExecutor {
     if (!RUN_ID.test(run.runId) || !ALGORITHM_ID.test(run.algorithm.id))
       throw new Error('Invalid run or algorithm id');
     const report: RunReport = { runId: run.runId, outcomes: [], algorithmStopped: false };
+    // One run per algorithm at a time. Overlapping runs (a late trigger, a manual run, a retry of
+    // the scheduler) would otherwise read the same state and both order.
+    let leased = false;
+    try {
+      leased = await this.deps.store.acquireRunLease(
+        run.algorithm.id,
+        run.runId,
+        this.deps.runLeaseMs ?? 10 * 60 * 1000,
+      );
+    } catch {
+      leased = false;
+    }
+    if (!leased) {
+      report.leaseHeld = true;
+      for (const d of run.decisions)
+        report.outcomes.push({
+          symbol: d.symbol,
+          side: d.side,
+          tranche: 0,
+          status: 'skipped',
+          reasons: ['RUN_IN_PROGRESS'],
+        });
+      return report;
+    }
+    try {
+      await this.runDecisions(run, report);
+    } finally {
+      try {
+        await this.deps.store.releaseRunLease(run.algorithm.id, run.runId);
+      } catch {
+        // The lease expires on its own.
+      }
+    }
+    return report;
+  }
+
+  private async runDecisions(run: LiveRun, report: RunReport): Promise<void> {
     try {
       await this.reconcile(run.algorithm.id);
     } catch {
@@ -185,7 +230,6 @@ export class LiveOrderExecutor {
         report.outcomes.push(await this.executeOne(run, p.intent, report));
       }
     }
-    return report;
   }
 
   /** Turns a decision into order intents. Sells above the value cap are split into tranches. */
@@ -280,12 +324,10 @@ export class LiveOrderExecutor {
     }
     if (notify && !codes.every((c) => SILENT_CODES.includes(c)))
       await this.notify({
-        kind: 'order-rejected',
-        mode: 'live',
+        type: 'safety-guard-refusal',
         symbol: intent.symbol,
         side: intent.side,
         algorithmName: this.name(run.algorithm.id),
-        reason: 'safety-guard',
       });
   }
 
@@ -299,10 +341,9 @@ export class LiveOrderExecutor {
       // Still stopped for the rest of this run; the next pre-trade check also fails closed.
     }
     await this.notify({
-      kind: 'algorithm-auto-stop',
-      mode: 'live',
+      type: 'algorithm-stopped',
+      why,
       algorithmName: this.name(run.algorithm.id),
-      ...(why === 'loss-limit' ? { reason: 'loss-limit' as const } : {}),
     });
   }
 
@@ -417,6 +458,7 @@ export class LiveOrderExecutor {
           this.deps.settings?.safeguards?.maxOrdersPerDay ??
           defaultSafeguards(algorithm.market).maxOrdersPerDay,
         maxGlobal: this.deps.settings?.maxGlobalOrdersPerDay ?? DEFAULT_MAX_GLOBAL_ORDERS_PER_DAY,
+        budget: algorithm.budget ?? 0,
       });
     } catch {
       return refuse(['STORE_UNAVAILABLE']);
@@ -445,10 +487,20 @@ export class LiveOrderExecutor {
           price: intent.price,
         },
         {
-          onPriceCorrection: async (corrected) => {
-            if (!isAcceptableCorrection(ctx, corrected, this.deps.now())) return false;
+          // Everything price-dependent (cap, direction, FX, price limits) and the stop state again.
+          onPriceCorrection: (corrected) =>
+            verifyCorrectedPrice(ctx, corrected, {
+              store: this.deps.store,
+              toss: this.deps.client,
+              now: this.deps.now,
+            }),
+          // Re-read the stop state before EVERY retry: a stopped system must not resend.
+          beforeRetry: async () => {
             try {
-              return !(await this.deps.store.getEmergencyStop());
+              return (
+                !(await this.deps.store.getEmergencyStop()) &&
+                !(await this.deps.store.isAlgorithmStopped(algorithm.id))
+              );
             } catch {
               return false;
             }
@@ -456,7 +508,8 @@ export class LiveOrderExecutor {
         },
       );
     } catch (error) {
-      // OrderInputError: nothing was sent. Anything else: the outcome is unknown.
+      // OrderInputError: nothing was sent (a local failure, not a broker rejection). Anything
+      // else: the outcome is unknown.
       const notSent = error instanceof OrderInputError;
       const info: OrderErrorInfo = {
         kind: 'schema',
@@ -470,7 +523,7 @@ export class LiveOrderExecutor {
         firstLiveOrder,
         notSent ? 'rejected' : 'unknown',
         info,
-        {},
+        { local: notSent },
       );
     }
     if (placed.outcome === 'accepted')
@@ -499,6 +552,8 @@ export class LiveOrderExecutor {
       wireClientOrderId?: string;
       price?: string;
       tickCorrected?: boolean;
+      /** A local failure before anything was sent (not a broker rejection). */
+      local?: boolean;
     },
   ): Promise<OrderOutcome> {
     const outcome: OrderOutcome = {
@@ -524,14 +579,15 @@ export class LiveOrderExecutor {
       // The order was (maybe) sent; the 'reserved' record stays and blocks new orders.
       outcome.recordError = true;
     }
-    if (status === 'rejected') {
+    if (status === 'rejected' && extra.local) {
+      // Not counted as a broker rejection: no first-order stop, no broker-rejected alert.
+      await this.notify({ type: 'local-input-failure' });
+    } else if (status === 'rejected') {
       await this.notify({
-        kind: 'order-rejected',
-        mode: 'live',
+        type: 'broker-rejected',
         symbol: record.symbol,
         side: record.side,
         algorithmName: this.name(run.algorithm.id),
-        reason: 'broker-rejected',
       });
       // Design 주문 권한 확인 3: permission refusals always stop the algorithm; the first live
       // order being refused for any non-transient reason stops it too (7f first-order watch).
@@ -540,8 +596,7 @@ export class LiveOrderExecutor {
       else if (firstLiveOrder && error && !TRANSIENT_REJECTION_CODES.has(error.code))
         await this.stopAlgorithm(run, report, 'first-order-rejected');
     } else if (status === 'unknown') {
-      // No dedicated event kind exists for "sent but unconfirmed"; surface it as a job failure.
-      await this.notify({ kind: 'job-failure', jobName: 'live-order-unconfirmed' });
+      await this.notify({ type: 'order-unconfirmed' });
     }
     return outcome;
   }
@@ -563,19 +618,23 @@ export class LiveOrderExecutor {
         } else {
           // No orderId (unknown/reserved): adopt only an exact, unique match among OPEN orders.
           openList ??= (await this.deps.client.listOrders({ status: 'OPEN' })).orders;
-          const claimed = new Set(orders.map((o) => o.orderId).filter(Boolean));
-          const matches = openList.filter(
-            (t) =>
-              !claimed.has(t.orderId) &&
-              t.symbol === order.symbol &&
-              t.side === order.side &&
-              Number(t.quantity) === order.quantity &&
-              t.price !== null &&
-              Number(t.price) === Number(order.price) &&
-              t.orderType === 'LIMIT' &&
-              t.timeInForce === 'DAY',
-          );
+          // Claimed ids come from ALL records (every algorithm). An order is adopted only when
+          // exactly one provider order matches this record AND this record is the only record
+          // without an id that could own it (no cross-algorithm or look-alike adoption).
+          const claimed = new Set(all.map((o) => o.orderId).filter(Boolean));
+          const unowned = all.filter((o) => !o.orderId);
+          const fits = (t: TossOrder, r: LiveOrderRecord) =>
+            t.symbol === r.symbol &&
+            t.side === r.side &&
+            Number(t.quantity) === r.quantity &&
+            t.price !== null &&
+            Number(t.price) === Number(r.price) &&
+            t.orderType === 'LIMIT' &&
+            t.timeInForce === 'DAY' &&
+            Date.parse(t.orderedAt) >= Date.parse(r.createdAt);
+          const matches = openList.filter((t) => !claimed.has(t.orderId) && fits(t, order));
           if (matches.length !== 1) continue;
+          if (unowned.filter((r) => fits(matches[0], r)).length !== 1) continue;
           providerOrder = matches[0];
           await this.deps.store.updateOrder(order.clientOrderId, {
             status: 'accepted',
@@ -604,8 +663,7 @@ export class LiveOrderExecutor {
           saved.notifiedStatus !== saved.status
         ) {
           await this.notify({
-            kind: 'fill',
-            mode: 'live',
+            type: 'fill',
             symbol: saved.symbol,
             side: saved.side,
             status: saved.status,

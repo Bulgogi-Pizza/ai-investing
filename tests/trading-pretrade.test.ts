@@ -1,8 +1,12 @@
 import { describe, expect, it } from 'vitest';
 import {
   HARD_MAX_ORDER_VALUE_KRW,
+  MAX_SELL_TRANCHES,
+  fxProblem,
   isAcceptableCorrection,
   krwEquivalentPrice,
+  priceLimitProblem,
+  verifyCorrectedPrice,
   planSellTranches,
   preTradeCheck,
   type OrderIntent,
@@ -11,7 +15,11 @@ import {
 } from '../src/server/trading/pre-trade';
 import { REASONS, type ReasonCode } from '../src/server/trading/reasons';
 import { MemoryTradingStore, type PreTradeStore } from '../src/server/trading/stores';
-import { TossOrderClient } from '../src/server/trading/toss-orders';
+import {
+  TossOrderClient,
+  type OrderTransport,
+  type TransportRequest,
+} from '../src/server/trading/toss-orders';
 import {
   FakeToss,
   NOW,
@@ -20,7 +28,7 @@ import {
   sampleStats,
   seedOrder,
   tradingDaysSinceFixture,
-} from '../src/server/trading/testing';
+} from './support/fake-toss';
 
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -984,5 +992,292 @@ describe('cost rule: expected profit must exceed the round-trip cost, with enoug
       deps,
       ['EXPECTED_PROFIT_BELOW_COST'],
     );
+  });
+});
+
+describe('FX sanity for US orders (M3)', () => {
+  const usCtx = (
+    facts: Parameters<typeof krFacts>[0],
+    settings: PreTradeContext['settings'] = {},
+  ) =>
+    ctx({
+      algorithm: krAlgorithm({ market: 'US', budget: 1e9 }),
+      order: buyOrder({ symbol: 'AAPL', quantity: 5, price: '100' }),
+      market: krFacts({
+        quote: { price: 100, observedAt: iso(NOW.getTime() - 1000) },
+        avgTradedValue: 9e9,
+        fxMidRate: 1400,
+        ...facts,
+      }),
+      settings,
+    });
+  const usEnv = () => {
+    const e = env();
+    e.fake.priceLimits.set('AAPL', { upper: null, lower: null, currency: 'USD' });
+    e.fake.buyingPower.USD = '1000000';
+    return e;
+  };
+  const ago = (hours: number) => iso(NOW.getTime() - hours * 3_600_000);
+
+  it('a plausible, fresh rate passes', async () => {
+    const { deps } = usEnv();
+    await expectAllowed(usCtx({}), deps);
+    await expectAllowed(usCtx({ fxMidRate: 300 }), deps);
+    await expectAllowed(usCtx({ fxMidRate: 5000 }), deps);
+  });
+  it.each([0.0014, 1.4, 14, 299.99, 5000.01, 1_400_000, Number.MAX_VALUE])(
+    'rate %s is outside the plausible band: FX_RATE_INVALID',
+    async (rate) => {
+      const { deps, fake } = usEnv();
+      await expectBlocked(usCtx({ fxMidRate: rate }), deps, ['FX_RATE_INVALID']);
+      expect(fake.calls).toHaveLength(0);
+    },
+  );
+  it.each([null, 0, -1400, NaN, Infinity])('rate %s is missing: FX_RATE_MISSING', async (rate) => {
+    const { deps } = usEnv();
+    await expectBlocked(usCtx({ fxMidRate: rate as never }), deps, ['FX_RATE_MISSING']);
+  });
+  it('a rate older than 6 hours (or without a timestamp, or from the future) is FX_RATE_STALE', async () => {
+    const { deps } = usEnv();
+    await expectAllowed(usCtx({ fxObservedAt: ago(6) }), deps);
+    await expectBlocked(usCtx({ fxObservedAt: iso(NOW.getTime() - 6 * 3_600_000 - 1) }), deps, [
+      'FX_RATE_STALE',
+    ]);
+    await expectBlocked(usCtx({ fxObservedAt: null }), deps, ['FX_RATE_STALE']);
+    await expectBlocked(usCtx({ fxObservedAt: undefined }), deps, ['FX_RATE_STALE']);
+    await expectBlocked(usCtx({ fxObservedAt: 'recently' }), deps, ['FX_RATE_STALE']);
+    await expectBlocked(usCtx({ fxObservedAt: iso(NOW.getTime() + 3_600_000) }), deps, [
+      'FX_RATE_STALE',
+    ]);
+  });
+  it('band and age are configurable', async () => {
+    const { deps } = usEnv();
+    await expectBlocked(usCtx({ fxMidRate: 1400 }, { fxBand: { min: 1000, max: 1300 } }), deps, [
+      'FX_RATE_INVALID',
+    ]);
+    await expectAllowed(usCtx({ fxMidRate: 1400 }, { fxBand: { min: 1000, max: 1500 } }), deps);
+    await expectBlocked(usCtx({ fxObservedAt: ago(2) }, { maxFxAgeHours: 1 }), deps, [
+      'FX_RATE_STALE',
+    ]);
+    await expectAllowed(usCtx({ fxObservedAt: ago(10) }, { maxFxAgeHours: 12 }), deps);
+    for (const bad of [
+      { min: 0, max: 10 },
+      { min: 10, max: 10 },
+      { min: 10, max: 5 },
+      { min: NaN, max: 5 },
+    ])
+      await expectBlocked(usCtx({}, { fxBand: bad }), deps, ['SETTINGS_INVALID']);
+    await expectBlocked(usCtx({}, { maxFxAgeHours: 0 }), deps, ['SETTINGS_INVALID']);
+  });
+  it('KR orders do not look at FX at all', async () => {
+    const { deps } = env();
+    await expectAllowed(ctx({ market: krFacts({ fxMidRate: null, fxObservedAt: null }) }), deps);
+  });
+  it('fxProblem, krwEquivalentPrice and planSellTranches share the band', () => {
+    const settings = { fxBand: { min: 300, max: 5000 }, maxFxAgeMs: 6 * 3_600_000 };
+    expect(fxProblem({ fxMidRate: 1400, fxObservedAt: ago(1) }, settings, NOW)).toBeNull();
+    expect(fxProblem({ fxMidRate: 14, fxObservedAt: ago(1) }, settings, NOW)).toBe(
+      'FX_RATE_INVALID',
+    );
+    expect(krwEquivalentPrice('US', 100, 14)).toBeNull();
+    expect(krwEquivalentPrice('US', 100, 99_999)).toBeNull();
+    expect(krwEquivalentPrice('US', 100, 1400, 0, { min: 1000, max: 2000 })).toBeCloseTo(140_000);
+    expect(
+      planSellTranches({ market: 'US', quantity: 10, price: '100', fxMidRate: 14 }),
+    ).toMatchObject({ error: 'FX_RATE_INVALID' });
+    expect(
+      planSellTranches({
+        market: 'US',
+        quantity: 10,
+        price: '100',
+        fxMidRate: 14,
+        settings: { fxBand: { min: 10, max: 20 } },
+      }),
+    ).toMatchObject({ tranches: [10] });
+  });
+  it('a mis-scaled rate cannot slip a huge order under the 1e8 cap', async () => {
+    const { deps } = usEnv();
+    // 14 instead of 1400: 70,000 shares of a $100 stock would be ~99M "KRW" at the wrong rate.
+    await expectBlocked(usCtx({ fxMidRate: 14 }), deps, ['FX_RATE_INVALID']);
+  });
+});
+
+describe('open-order guard trusts the symbol-filtered list (L2)', () => {
+  const transportReturning = (fake: FakeToss, orders: unknown[]): OrderTransport => ({
+    send: async (r: TransportRequest) =>
+      r.path === '/api/v1/orders'
+        ? { status: 200, body: { result: { orders, nextCursor: null, hasNext: false } } }
+        : fake.send(r),
+  });
+  const order = (symbol: string) => ({
+    orderId: 'o1',
+    symbol,
+    side: 'BUY',
+    orderType: 'LIMIT',
+    timeInForce: 'DAY',
+    status: 'PENDING',
+    price: '80000',
+    quantity: '1',
+    orderAmount: null,
+    currency: 'KRW',
+    orderedAt: iso(NOW.getTime()),
+    canceledAt: null,
+    execution: {
+      filledQuantity: '0',
+      averageFilledPrice: null,
+      filledAmount: null,
+      commission: null,
+      tax: null,
+      filledAt: null,
+      settlementDate: null,
+    },
+  });
+  it.each(['005930', ' 005930', '005930 ', '5930', 'samsung', 'AAPL'])(
+    'any listed order blocks, whatever its symbol spelling (%j)',
+    async (symbol) => {
+      const e = env();
+      const deps = {
+        ...e.deps,
+        toss: new TossOrderClient(transportReturning(e.fake, [order(symbol)])),
+      };
+      // Symbols with spaces are not valid provider symbols; the list itself is then invalid and blocks too.
+      const result = await codes(ctx(), deps);
+      expect(result).toHaveLength(1);
+      expect(['OPEN_ORDER_EXISTS', 'OPEN_ORDERS_UNAVAILABLE']).toContain(result[0]);
+    },
+  );
+  it('a lowercase spelling of the same symbol blocks', async () => {
+    const e = env();
+    e.fake.priceLimits.set('AAPL', { upper: null, lower: null, currency: 'USD' });
+    const deps = {
+      ...e.deps,
+      toss: new TossOrderClient(transportReturning(e.fake, [order('aapl')])),
+    };
+    const us = ctx({
+      algorithm: krAlgorithm({ market: 'US', budget: 1e9 }),
+      order: buyOrder({ symbol: 'AAPL', quantity: 5, price: '100' }),
+      market: krFacts({
+        quote: { price: 100, observedAt: iso(NOW.getTime() - 1000) },
+        avgTradedValue: 9e9,
+        fxMidRate: 1400,
+      }),
+      settings: {},
+    });
+    await expectBlocked(us, deps, ['OPEN_ORDER_EXISTS']);
+  });
+  it('an empty list does not block', async () => {
+    const e = env();
+    const deps = { ...e.deps, toss: new TossOrderClient(transportReturning(e.fake, [])) };
+    await expectAllowed(ctx(), deps);
+  });
+});
+
+describe('tick-correction veto re-checks price limits and stop state (L3)', () => {
+  const buy50050 = (lower: string) => ({
+    c: ctx({
+      order: buyOrder({ price: '50050' }),
+      market: krFacts({ quote: { price: 50_050, observedAt: iso(NOW.getTime() - 1000) } }),
+    }),
+    lower,
+  });
+  it('accepts a correction that stays clear of the limits and refuses one that crosses the buffer', async () => {
+    const ok = env();
+    ok.fake.priceLimits.set('005930', { upper: '70000', lower: '40000', currency: 'KRW' });
+    expect(await verifyCorrectedPrice(buy50050('').c, '50000', ok.deps)).toBe(true);
+    // lower * 1.03 = 50,016.8: the original 50,050 is clear of it, the corrected 50,000 is not.
+    const near = env();
+    near.fake.priceLimits.set('005930', { upper: '70000', lower: '48560', currency: 'KRW' });
+    expect(await preTradeCheck(buy50050('').c, near.deps)).toMatchObject({ allowed: true });
+    expect(await verifyCorrectedPrice(buy50050('').c, '50000', near.deps)).toBe(false);
+  });
+  it('re-reads emergency stop and algorithm state; read failures refuse', async () => {
+    const a = env();
+    a.fake.priceLimits.set('005930', { upper: '70000', lower: '40000', currency: 'KRW' });
+    a.memory.setEmergencyStop(true);
+    expect(await verifyCorrectedPrice(buy50050('').c, '50000', a.deps)).toBe(false);
+    const b = env();
+    b.fake.priceLimits.set('005930', { upper: '70000', lower: '40000', currency: 'KRW' });
+    await b.memory.stopAlgorithm('algo-1', 'x');
+    expect(await verifyCorrectedPrice(buy50050('').c, '50000', b.deps)).toBe(false);
+    const c = env();
+    c.fake.priceLimits.set('005930', { upper: '70000', lower: '40000', currency: 'KRW' });
+    c.fake.getFailures.set('/api/v1/price-limits', { status: 500, code: 'internal-error' });
+    expect(await verifyCorrectedPrice(buy50050('').c, '50000', c.deps)).toBe(false);
+    const d = env();
+    d.fake.priceLimits.set('005930', { upper: '70000', lower: '40000', currency: 'KRW' });
+    const throwing = {
+      ...d.deps,
+      store: {
+        ...d.deps.store,
+        getEmergencyStop: async () => {
+          throw new Error('down');
+        },
+      } as PreTradeStore,
+    };
+    expect(await verifyCorrectedPrice(buy50050('').c, '50000', throwing)).toBe(false);
+  });
+  it('still refuses wrong-direction, off-scale and over-cap corrections', async () => {
+    const e = env();
+    e.fake.priceLimits.set('005930', { upper: '200000', lower: '40000', currency: 'KRW' });
+    const c = buy50050('').c;
+    expect(await verifyCorrectedPrice(c, '50100', e.deps)).toBe(false);
+    expect(await verifyCorrectedPrice(c, '50000.5', e.deps)).toBe(false);
+    const sell = ctx({
+      order: sellOrder({ quantity: 1427, price: '70050' }),
+      market: krFacts({ quote: { price: 70_050, observedAt: iso(NOW.getTime() - 1000) } }),
+    });
+    expect(await verifyCorrectedPrice(sell, '70100', e.deps)).toBe(false);
+  });
+  it('priceLimitProblem unit behaviour', () => {
+    const limits = { upperLimitPrice: '91000', lowerLimitPrice: '49000', currency: 'KRW' };
+    expect(priceLimitProblem('KR', 'KRW', 70000, limits, 0.03)).toBeNull();
+    expect(priceLimitProblem('KR', 'KRW', 88_300, limits, 0.03)).toBe('NEAR_PRICE_LIMIT');
+    expect(priceLimitProblem('KR', 'KRW', 50_400, limits, 0.03)).toBe('NEAR_PRICE_LIMIT');
+    expect(priceLimitProblem('KR', 'USD', 70000, limits, 0.03)).toBe('PRICE_LIMITS_UNAVAILABLE');
+    expect(
+      priceLimitProblem(
+        'KR',
+        'KRW',
+        70000,
+        { ...limits, upperLimitPrice: null, lowerLimitPrice: null },
+        0.03,
+      ),
+    ).toBe('PRICE_LIMITS_UNAVAILABLE');
+    expect(
+      priceLimitProblem(
+        'US',
+        'USD',
+        100,
+        { upperLimitPrice: null, lowerLimitPrice: null, currency: 'USD' },
+        0.03,
+      ),
+    ).toBeNull();
+    expect(priceLimitProblem('KR', 'KRW', 70000, { ...limits, upperLimitPrice: 'x' }, 0.03)).toBe(
+      'PRICE_LIMITS_UNAVAILABLE',
+    );
+  });
+});
+
+describe('tranche count cap (L5)', () => {
+  it('up to 50 tranches are planned, more are refused', () => {
+    expect(MAX_SELL_TRANCHES).toBe(50);
+    const at = (quantity: number) =>
+      planSellTranches({ market: 'KR', quantity, price: '70000', fxMidRate: null });
+    // 1428 shares per tranche at 70,000 KRW.
+    const fifty = at(1428 * 50);
+    expect(fifty.tranches).toHaveLength(50);
+    expect(fifty.tranches.every((q) => q === 1428)).toBe(true);
+    expect(at(1428 * 50 + 1)).toMatchObject({ tranches: [], error: 'ORDER_TOO_LARGE' });
+    expect(at(1428 * 50 - 1).tranches).toHaveLength(50);
+    expect(at(1428 * 49 + 1).tranches).toHaveLength(50);
+  });
+  it('applies to US sells too', () => {
+    const r = planSellTranches({
+      market: 'US',
+      quantity: 1_000_000,
+      price: '100',
+      fxMidRate: 1400,
+    });
+    expect(r).toMatchObject({ tranches: [], error: 'ORDER_TOO_LARGE' });
   });
 });

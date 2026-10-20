@@ -2,7 +2,7 @@
 
 SOT: [next-phase-design.md](../planning/next-phase-design.md) 4절(주문·주문 권한 확인·비용 반영·안전장치 1–10), 계획: [next-phase-plan.md](../planning/next-phase-plan.md) 7d. 구현: `src/server/trading/`, 테스트: `tests/trading-*.test.ts`.
 
-**이 모듈은 어디에도 연결되어 있지 않다.** `src/server/app.ts`, `src/server/index.ts`, 작업, 스케줄러 어느 것도 이 모듈을 import하지 않고 호출하지 않는다(정적 테스트가 검사한다). 테스트는 가짜 토스 서버(`testing.ts`)만 쓴다. 이 저장소의 어떤 테스트도 실제 주문을 내지 않는다. 연결(7e), 화면과 실전 켜기(7f)는 이후 단계다.
+**이 모듈은 어디에도 연결되어 있지 않다.** `src/server/app.ts`, `src/server/index.ts`, 작업, 스케줄러 어느 것도 이 모듈을 import하지 않고 호출하지 않는다(정적 테스트가 검사한다). 테스트는 가짜 토스 서버(`tests/support/fake-toss.ts`)만 쓴다. 이 저장소의 어떤 테스트도 실제 주문을 내지 않는다. 연결(7e), 화면과 실전 켜기(7f)는 이후 단계다.
 
 ## 공식 계약
 
@@ -52,7 +52,9 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md) 4절(주문·주�
 | `stores.ts`          | 저장소 인터페이스, 상태 전이, 장부 계산, 메모리 구현                                                        |
 | `firestore-store.ts` | Firestore 구현(트랜잭션)                                                                                    |
 | `reasons.ts`         | 거부 사유 코드와 한국어 문구                                                                                |
-| `testing.ts`         | 테스트 전용 가짜 토스 서버와 고정 입력. 운영 코드가 import하지 않는다                                       |
+| `alerts.ts`          | 알림 매핑 단 한 곳(`liveAlertEvent`). 7e가 알림 종류를 추가할 때 이 함수만 고친다                           |
+
+가짜 토스 서버(`FakeToss`), 가짜 Firestore, 고정 입력은 `tests/support/`에 있다. `src/`의 어떤 파일도 이를 import하지 않는다(정적 테스트가 검사한다).
 
 ### 전송 계층 인터페이스
 
@@ -82,16 +84,18 @@ interface OrderTransport {
 
 - `normalizeLimitPrice(market, side, price)`: 국내는 정수 원, 미국은 1달러 미만 4자리·1달러 이상 2자리로 맞추되 **항상 덜 공격적인 쪽**(매수는 내림, 매도는 올림)으로 한다. 10진 문자열을 BigInt로 계산해 부동소수 오차가 없다.
 - 국내 호가 단위 표(KRX 규정)는 토스 명세에 없다. **추측한 표를 코드에 넣지 않았다.** 호가에 맞지 않으면 토스가 400과 함께 `nearestPrices`를 돌려주므로, 그 값으로 **한 번만** 보정한다. 매수는 아래 값, 매도는 위 값(덜 공격적인 쪽)이다. 보정은 다음 조건을 모두 만족할 때만 한다: 국내 종목, 응답이 `invalid-request`이고 `field=price`, `tickSize`와 `nearestPrices`가 정수 문자열, 보낸 가격이 두 값 사이, 두 값의 차이가 `tickSize` 이하. 하나라도 어긋나면 보정하지 않고 거부한다(`tick-correction-unavailable`).
-- 보정 가격으로 다시 보내기 전에 호출자가 준 `onPriceCorrection` 검문을 통과해야 한다. 없으면 거부한다(`tick-correction-declined`). 실행기는 이 검문에서 1억 원 상한, 가격 단위, 덜 공격적인 방향, **긴급 정지 재조회**를 다시 확인한다(매도는 가격이 오르면 주문 금액이 상한을 넘을 수 있다). 보정 후 두 번째 가격 거부는 최종이다(반복 없음).
+- 보정 가격으로 다시 보내기 전에 호출자가 준 `onPriceCorrection` 검문을 통과해야 한다. 없으면 거부한다(`tick-correction-declined`). 실행기의 검문(`verifyCorrectedPrice`)은 1억 원 상한, 가격 단위, 덜 공격적인 방향, 환율을 다시 확인하고, **상·하한가를 다시 조회해 보정 가격이 완충 구간(3%)에 들어가면 거부**하며, 긴급 정지와 알고리즘 정지를 다시 읽는다(읽기 실패는 거부). 보정 후 두 번째 가격 거부는 최종이다(반복 없음). 이전 시도가 모호했다면(아래) 호가 보정은 하지 않는다.
 - 보정 재시도에는 **새 키**(`<원래 키>-t1`)를 쓴다. 첫 요청이 400으로 확정 거부되어 그 키로 만들어진 주문은 없다. 거부된 본문에 키가 묶이는지는 명세에 없으므로, 같은 키에 다른 본문을 보내는 방식은 피한다.
 
 ### `clientOrderId`와 재시도
 
 - `deriveClientOrderId({algorithmId, runId, symbol, side, tranche})`: 입력의 JSON을 SHA-256으로 해시해 `ai-` + 16진 28자(31자)를 만든다. 같은 입력이면 항상 같고(프로세스 재시작 포함), 구성 요소 중 하나만 달라도 달라진다. 구분자 충돌이 없다.
 - 재시도는 **네트워크 오류, 5xx, 429에서만** 한다. 같은 키·같은 본문으로 **최대 2번**(총 3회). 4xx는 재시도하지 않는다. 대기는 500ms, 1000ms이고, 429의 `Retry-After`가 있으면 그 값(최대 30초)을 쓴다. 첫 시도에서 9분이 지났거나 대기 시간을 더하면 9분을 넘으면 더 시도하지 않는다(키 유효 10분을 넘기면 새 주문이 되기 때문이다).
+- **재시도 직전 점검(`beforeRetry`)**: 대기 뒤, 모든 재시도 직전에 호출자의 훅을 부른다. 훅이 `false`를 돌려주거나 던지면 재전송하지 않고 `unknown`(`retry-aborted`)으로 끝낸다. 실행기는 이 훅에서 긴급 정지와 알고리즘 정지 상태를 다시 읽고, 읽기에 실패해도 재전송하지 않는다.
 - 재시도 소진 후의 결과: 응답이 한 번이라도 모호했으면(네트워크 오류, 5xx, 이상한 200) `unknown`. 모든 시도가 429였다면 `rejected`(주문이 만들어졌을 수 없다).
+- **모호한 시도 뒤의 4xx**: 네트워크 오류나 5xx 같은 모호한 시도가 한 번이라도 있었다면, 그 뒤에 오는 **모든 비 200 응답**(401, 403, 422, 409, 400 등)은 `rejected`가 아니라 `unknown`이다. 이전 요청으로 주문이 이미 만들어졌는지 이 응답으로는 알 수 없다. 이 판정에서 "주문이 없음을 증명하는 코드" 집합(`PROVES_NO_ORDER`)은 의도적으로 비어 있다. 그래서 이 경우에는 호가 보정도, 권한 문제로 인한 알고리즘 정지도 일어나지 않는다. 429는 처리 전에 거부하므로 앞선 시도가 모호하지 않았다면 `rejected` 판정을 해치지 않는다.
 - 4xx 중에도 **모호한 코드**가 있다. `409 request-in-progress`(같은 키 요청이 처리 중)와 `422 idempotency-key-conflict`(같은 키가 이미 다른 본문으로 쓰였다)는 이전 주문이 있을 수 있으므로 `unknown`이다. 재시도하지 않는다.
-- `GET /orders`가 `clientOrderId`를 돌려주지 않으므로, `unknown` 주문의 확인은 `clientOrderId`로 할 수 없다. 실행기의 `reconcile`은 종목·방향·수량·가격이 모두 같은 **유일한** 미체결 주문만 이어받는다. 그 밖에는 `unknown`으로 남아 새 주문을 막는다(사람의 확인이 필요하다). 10분 안이면 같은 키·같은 본문 재전송이 이전 결과를 돌려주므로 확인 수단이 된다(구현하지 않았다. 7e/7f 과제).
+- `GET /orders`가 `clientOrderId`를 돌려주지 않으므로, `unknown` 주문의 확인은 `clientOrderId`로 할 수 없다. 실행기의 `reconcile`은 종목·방향·수량·가격·`LIMIT`·`DAY`가 모두 같고 `orderedAt`이 기록의 `createdAt` 이후인 **유일한** 미체결 주문만 이어받는다. 이어받기에는 두 방향의 유일성이 필요하다: 기록 하나에 맞는 미체결 주문이 정확히 하나이고, 그 주문에 맞는 `orderId` 없는 기록(모든 알고리즘 포함)도 정확히 하나여야 한다. 이미 다른 기록(어느 알고리즘이든)이 가진 `orderId`는 이어받지 않는다. 그 밖에는 `unknown`으로 남아 새 주문을 막는다(사람의 확인이 필요하다). 10분 안이면 같은 키·같은 본문 재전송이 이전 결과를 돌려주므로 확인 수단이 된다(구현하지 않았다. 7e/7f 과제).
 
 ## 주문 전 검사 (`pre-trade.ts`)
 
@@ -106,6 +110,7 @@ interface OrderTransport {
   4. 원격 조회(차례대로, 첫 거부에서 중단): 미체결 주문 → 매수 유의사항 → 상·하한가 → (매도) 판매 가능 수량 / (매수) 수수료 → 예상 이익 규칙(`checkOrder` 두 번째 호출) → 매수 가능 금액
   5. 마지막: **긴급 정지를 저장소에서 다시 읽는다.** 느린 원격 조회 뒤의 변경을 잡는다. 1단계 읽기와 별개이며 캐시하지 않는다.
 - 설정은 느슨하게 만들 수 없는 한도가 있다. 주문 금액 상한은 1억 원 이상으로 올릴 수 없고(낮추는 것만 가능), 현재가 허용 나이는 60초를 넘길 수 없다. 숫자 설정이 `NaN`이거나 범위를 벗어나면 안전장치가 조용히 꺼지는 일이 없도록 `SETTINGS_INVALID`로 거부한다.
+- **위험을 늘리는 설정(사용자 선호: 설정 가능, 상한 없음)**: 하루 주문 횟수(알고리즘 3건, 전체 10건), 최소 보유 거래일, 누적 손실 정지 비율, 유동성 기준, 운용 금액 한도는 코드가 올릴 수 있는 한도를 따로 정하지 않는다. 이 값을 **올리거나 느슨하게 하는 것은 위험을 늘리는 설정 변경**이다. 7e는 이 변경을 반드시 설정 변경 알림 경로(`setting-risk-increase`, 설계의 설정 변경 인증 절)로 보내고 변경 이력을 남겨야 한다. 줄이는 변경은 즉시 반영해도 된다. 이 모듈은 하드 한도를 1억 원 주문 상한과 60초 현재가 나이 두 가지만 둔다.
 
 ### `checkOrder`(`src/lib/algo`) 재사용과 차이
 
@@ -120,52 +125,55 @@ interface OrderTransport {
 
 번호는 설계 4절 "안전장치" 순서다. 모든 사유는 안정된 코드와 한국어 문구(`reasons.ts`)를 갖는다.
 
-| 설계 | 규칙                                                          | 사유 코드                                                                                                                                                   | 단계 | 자료                                             |
-| ---- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- | ------------------------------------------------ |
-| 1    | 알고리즘별·통화별 운용 금액 한도(기본값 없음)                 | `BUDGET_NOT_SET`, `BUDGET_EXCEEDED`                                                                                                                         | 2, 3 | 알고리즘 설정, 장부(보유 원가 + 진행 중 매수)    |
-| 2    | 하루 알고리즘 3건·전체 10건                                   | `DAILY_LIMIT_ALGORITHM`, `DAILY_LIMIT_GLOBAL`                                                                                                               | 2    | 저장소 카운터(KST 날짜), 예약 때 트랜잭션 재확인 |
-| 2    | 최소 보유 5거래일                                             | `MIN_HOLDING_PERIOD`                                                                                                                                        | 3    | 장부의 마지막 매수일 + 거래일 계산               |
-| 3    | 미체결 주문이 있으면 새 주문 금지                             | `OPEN_ORDER_EXISTS`, `UNRECONCILED_ORDER`, `OPEN_ORDERS_UNAVAILABLE`                                                                                        | 3, 4 | 저장소 + `GET /orders?status=OPEN&symbol`        |
-| 3    | 재시도는 같은 `clientOrderId`                                 | (클라이언트 규칙)                                                                                                                                           | -    | `deriveClientOrderId`                            |
-| 4    | 누적 손실 -20% 자동 정지                                      | `LOSS_LIMIT_REACHED`(+ `autoStop`), `LOSS_UNKNOWN`                                                                                                          | 2    | 호출자가 계산한 실현 + 평가 손익                 |
-| 5    | 긴급 정지                                                     | `EMERGENCY_STOP`, `EMERGENCY_STOP_UNREADABLE`, `ALGORITHM_STOPPED`                                                                                          | 2, 5 | 저장소(매번 새로 읽음)                           |
-| 6    | 데이터 신선도                                                 | `DAILY_BAR_MISSING`, `QUOTE_MISSING`, `QUOTE_STALE`, `FINANCIALS_MISSING`, `PRICE_FAR_FROM_QUOTE`(추가 규칙)                                                | 3    | 호출자가 준 시세·일봉                            |
-| 7    | 알고리즘이 산 수량만 매도                                     | `SELL_NOT_OWNED`, `SELL_EXCEEDS_OWNED`, `SELL_EXCEEDS_SELLABLE`, `SELLABLE_UNAVAILABLE`                                                                     | 3, 4 | 장부 + `GET /sellable-quantity`                  |
-| 8    | 지정가만, 유동성 필터(국내 10억 원·미국 500만 달러, 20거래일) | `ORDER_NOT_LIMIT_DAY`, `LIQUIDITY_BELOW_MINIMUM`                                                                                                            | 1, 3 | 호출자가 준 평균 거래대금                        |
-| 9    | 매수 유의사항·상하한가 근접 제외                              | `STOCK_WARNING`, `WARNINGS_UNAVAILABLE`, `NEAR_PRICE_LIMIT`, `PRICE_LIMITS_UNAVAILABLE`                                                                     | 4    | `GET /stocks/{symbol}/warnings`, `/price-limits` |
-| 10   | 1억 원 이상 주문 금지, 매도는 분할                            | `ORDER_TOO_LARGE`(+ `planSellTranches`)                                                                                                                     | 3    | 원화 환산 가격(미국은 환율 + 여유)               |
-| 비용 | 예상 이익 > 왕복 비용, 기록 부족이면 보류                     | `COST_SETTINGS_MISSING`, `COMMISSIONS_UNAVAILABLE`, `HISTORY_INSUFFICIENT`("기록 부족으로 주문 보류"), `EXPECTED_PROFIT_BELOW_COST`                         | 4    | `/commissions`, 설정의 거래세율, 점수 구간 통계  |
-| -    | 매수 가능 금액(국내 원화, 미국은 달러 현금만)                 | `BUYING_POWER_INSUFFICIENT`, `BUYING_POWER_UNAVAILABLE`                                                                                                     | 4    | `GET /buying-power?currency=`                    |
-| -    | 입력·설정 이상, 미국 환율 없음, 예상 밖 오류                  | `ORDER_INVALID`, `QUANTITY_NOT_INTEGER`, `PRICE_INVALID`, `CURRENCY_MISMATCH`, `FX_RATE_MISSING`, `SETTINGS_INVALID`, `STORE_UNAVAILABLE`, `INTERNAL_ERROR` | 1-4  | -                                                |
+| 설계 | 규칙                                                          | 사유 코드                                                                                                                                                                                                                  | 단계 | 자료                                             |
+| ---- | ------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---- | ------------------------------------------------ |
+| 1    | 알고리즘별·통화별 운용 금액 한도(기본값 없음)                 | `BUDGET_NOT_SET`, `BUDGET_EXCEEDED`                                                                                                                                                                                        | 2, 3 | 알고리즘 설정, 장부(보유 원가 + 진행 중 매수)    |
+| 2    | 하루 알고리즘 3건·전체 10건                                   | `DAILY_LIMIT_ALGORITHM`, `DAILY_LIMIT_GLOBAL`                                                                                                                                                                              | 2    | 저장소 카운터(KST 날짜), 예약 때 트랜잭션 재확인 |
+| 2    | 최소 보유 5거래일                                             | `MIN_HOLDING_PERIOD`                                                                                                                                                                                                       | 3    | 장부의 마지막 매수일 + 거래일 계산               |
+| 3    | 미체결 주문이 있으면 새 주문 금지                             | `OPEN_ORDER_EXISTS`, `UNRECONCILED_ORDER`, `OPEN_ORDERS_UNAVAILABLE`                                                                                                                                                       | 3, 4 | 저장소 + `GET /orders?status=OPEN&symbol`        |
+| 3    | 재시도는 같은 `clientOrderId`                                 | (클라이언트 규칙)                                                                                                                                                                                                          | -    | `deriveClientOrderId`                            |
+| 4    | 누적 손실 -20% 자동 정지                                      | `LOSS_LIMIT_REACHED`(+ `autoStop`), `LOSS_UNKNOWN`                                                                                                                                                                         | 2    | 호출자가 계산한 실현 + 평가 손익                 |
+| 5    | 긴급 정지                                                     | `EMERGENCY_STOP`, `EMERGENCY_STOP_UNREADABLE`, `ALGORITHM_STOPPED`                                                                                                                                                         | 2, 5 | 저장소(매번 새로 읽음)                           |
+| 6    | 데이터 신선도                                                 | `DAILY_BAR_MISSING`, `QUOTE_MISSING`, `QUOTE_STALE`, `FINANCIALS_MISSING`, `PRICE_FAR_FROM_QUOTE`(추가 규칙)                                                                                                               | 3    | 호출자가 준 시세·일봉                            |
+| 7    | 알고리즘이 산 수량만 매도                                     | `SELL_NOT_OWNED`, `SELL_EXCEEDS_OWNED`, `SELL_EXCEEDS_SELLABLE`, `SELLABLE_UNAVAILABLE`                                                                                                                                    | 3, 4 | 장부 + `GET /sellable-quantity`                  |
+| 8    | 지정가만, 유동성 필터(국내 10억 원·미국 500만 달러, 20거래일) | `ORDER_NOT_LIMIT_DAY`, `LIQUIDITY_BELOW_MINIMUM`                                                                                                                                                                           | 1, 3 | 호출자가 준 평균 거래대금                        |
+| 9    | 매수 유의사항·상하한가 근접 제외                              | `STOCK_WARNING`, `WARNINGS_UNAVAILABLE`, `NEAR_PRICE_LIMIT`, `PRICE_LIMITS_UNAVAILABLE`                                                                                                                                    | 4    | `GET /stocks/{symbol}/warnings`, `/price-limits` |
+| 10   | 1억 원 이상 주문 금지, 매도는 분할                            | `ORDER_TOO_LARGE`(+ `planSellTranches`)                                                                                                                                                                                    | 3    | 원화 환산 가격(미국은 환율 + 여유)               |
+| 비용 | 예상 이익 > 왕복 비용, 기록 부족이면 보류                     | `COST_SETTINGS_MISSING`, `COMMISSIONS_UNAVAILABLE`, `HISTORY_INSUFFICIENT`("기록 부족으로 주문 보류"), `EXPECTED_PROFIT_BELOW_COST`                                                                                        | 4    | `/commissions`, 설정의 거래세율, 점수 구간 통계  |
+| -    | 매수 가능 금액(국내 원화, 미국은 달러 현금만)                 | `BUYING_POWER_INSUFFICIENT`, `BUYING_POWER_UNAVAILABLE`                                                                                                                                                                    | 4    | `GET /buying-power?currency=`                    |
+| -    | 입력·설정 이상, 미국 환율 없음, 예상 밖 오류                  | `ORDER_INVALID`, `QUANTITY_NOT_INTEGER`, `PRICE_INVALID`, `CURRENCY_MISMATCH`, `FX_RATE_MISSING`, `FX_RATE_INVALID`, `FX_RATE_STALE`, `RUN_IN_PROGRESS`(실행기), `SETTINGS_INVALID`, `STORE_UNAVAILABLE`, `INTERNAL_ERROR` | 1-4  | -                                                |
 
 세부 규칙:
 
 - 신선도: 현재가는 관측 시각이 60초 이내여야 하고(미래 시각 5초 초과도 거부), 직전 거래일 일봉 날짜가 호출자가 준 기대 날짜 이상이어야 한다. 가치 신호를 쓰는 알고리즘만 재무 유무를 본다. 지정가가 현재가보다 3% 넘게 **불리한 쪽**(매수는 높음, 매도는 낮음)이면 거부한다. 체결되지 않을 뿐인 먼 가격은 막지 않는다. 이 3% 검사는 설계에 없는 추가 안전장치다.
-- 미체결 판정: 저장소에서 같은 알고리즘·종목의 `accepted`/`partially-filled`는 `OPEN_ORDER_EXISTS`, `reserved`/`unknown`은 `UNRECONCILED_ORDER`다. 제공자 `OPEN` 목록은 **누가 냈든** 같은 종목의 주문이 있으면 막는다(목록에 `clientOrderId`가 없어 알고리즘을 구분할 수 없다. 소유자가 직접 낸 주문과 겹치지 않게 하는 보수적 선택이다).
+- 미체결 판정: 저장소에서 같은 알고리즘·종목의 `accepted`/`partially-filled`는 `OPEN_ORDER_EXISTS`, `reserved`/`unknown`은 `UNRECONCILED_ORDER`다. 제공자 `OPEN` 목록은 이미 `symbol=`로 걸러서 받으므로, **목록에 주문이 하나라도 있으면** 누가 냈든 막는다(종목 문자열 비교를 하지 않아 표기가 다른 심볼도 빠져나가지 못한다. 목록에 `clientOrderId`가 없어 알고리즘을 구분할 수 없고, 소유자가 직접 낸 주문과 겹치지 않게 하는 보수적 선택이다).
 - 유의사항: 활성 항목이 하나라도 있으면(알 수 없는 유형 포함) 매수·매도 모두 막는다. 거부는 안전한 쪽이라 보수적으로 했다. 403 등으로 조회가 안 되면 `WARNINGS_UNAVAILABLE`이다.
 - 상·하한가: 주문 가격이 상한가의 97% 이상이거나 하한가의 103% 이하이거나 범위 밖이면 `NEAR_PRICE_LIMIT`. 국내 종목에서 두 값이 모두 `null`이면 확인할 수 없으므로 거부한다. 미국은 두 값이 `null`이 정상이다.
-- 1억 원: 국내 `수량 × 가격 < 1억`. 미국은 `수량 × 가격 × midRate × 1.02 < 1억`(토스의 실제 환산율이 다를 수 있어 2% 여유). 매수는 거부, 매도는 `planSellTranches`로 `maxQuantityBelowValue`(`src/lib/algo`) 단위로 나눠 각 분할을 따로 검사한다. 한 종목에는 한 번에 미체결 주문 하나만 허용하므로 첫 분할만 나가고 나머지는 `OPEN_ORDER_EXISTS`로 보류되어 이후 판단 때 나간다.
+- 1억 원: 국내 `수량 × 가격 < 1억`. 미국은 `수량 × 가격 × midRate × 1.02 < 1억`(토스의 실제 환산율이 다를 수 있어 2% 여유). 매수는 거부, 매도는 `planSellTranches`로 `maxQuantityBelowValue`(`src/lib/algo`) 단위로 나눠 각 분할을 따로 검사한다. 분할은 **최대 50개**이고 더 필요하면 `ORDER_TOO_LARGE`로 거부한다. 한 종목에는 한 번에 미체결 주문 하나만 허용하므로 첫 분할만 나가고 나머지는 `OPEN_ORDER_EXISTS`로 보류되어 이후 판단 때 나간다.
 - 비용: 수수료율은 `/commissions`에서 시장·날짜에 맞는 항목을 고르고 여러 개면 가장 큰 값을 쓴다. 국내는 거래세율 설정(`sellTaxRate`)이 없으면 0으로 가정하지 않고 거부한다. 왕복 비용은 `roundTripCostRate`(= 2 × 수수료 + 거래세)다. 양도소득세는 비교에 넣지 않는다(7b 시뮬레이션과 같다).
 - 미국: 달러 현금만 본다(`GET /buying-power?currency=USD`만 호출한다). 환전 호출은 없다. 달러가 모자라면 거부하고 알린다.
+- **환율 점검(미국)**: `midRate`는 상식적인 범위(기본 300~5000 원/달러, `fxBand`)에 있어야 하고(아니면 `FX_RATE_INVALID`), 관측 시각(`fxObservedAt`, `/exchange-rate`의 `validFrom`)이 6시간(`maxFxAgeHours`) 이내여야 한다(없거나 오래되었거나 미래이면 `FX_RATE_STALE`, 값이 없거나 0 이하이면 `FX_RATE_MISSING`). 틀린 자릿수의 환율이 1억 원 상한을 우회하지 못하게 하는 점검이다. 분할 계획과 호가 보정 검문도 같은 범위를 쓴다.
 
 ## 실행기 (`executor.ts`)
 
 `LiveOrderExecutor.executeRun({runId, algorithm, decisions, data})`는 결정마다 차례로 처리한다.
 
+0. **실행 임대(lease)**: `executeRun`은 먼저 알고리즘별 임대(`tradingRunLeases/{알고리즘}`, 기본 10분)를 잡는다. 다른 실행이 살아 있는 임대를 쥐고 있으면 아무것도 하지 않고 `leaseHeld`와 결정별 `RUN_IN_PROGRESS`(건너뜀)로 끝난다. 같은 실행 ID는 다시 잡을 수 있고(재시작), 끝나면(예외 포함) 풀며, 죽은 실행의 임대는 만료로 풀린다.
 1. 시작 때 `reconcile`을 읽기 전용으로 한 번 돌린다(실패해도 계속하지만, 풀리지 않은 주문은 사전 검사에서 막힌다).
 2. 결정을 주문으로 바꾼다. 가격을 덜 공격적으로 정규화하고, 매도가 상한을 넘으면 분할한다.
 3. 주문마다 `data.marketFacts`(현재가를 그때 새로 받는다), 누적 손익, 예상 이익 통계를 받아 `preTradeCheck`를 부른다.
 4. 거부되면 사유 코드와 함께 `blockedOrders`에 기록하고(카운터는 쓰지 않는다) 알린다. 단 "기록 부족" 같은 일상적 보류, 긴급 정지·알고리즘 정지, 진행 중 주문은 알리지 않는다. `autoStop`이면 알고리즘을 정지하고 `algorithm-auto-stop`(`loss-limit`)을 보낸 뒤 이번 실행의 나머지 주문은 건너뛴다.
-5. 통과하면 **슬롯 예약**을 한다. 한 트랜잭션에서 긴급 정지, 알고리즘 상태, 하루 카운터 두 개, 같은 키의 문서를 읽고, 모두 통과하면 카운터를 올리고 `reserved` 기록을 만든다. 이 기록은 요청을 보내기 **전에** 남는다(write-ahead). 같은 키의 기록이 있으면 `duplicate`로 건너뛴다. 재시작이나 중복 실행이 같은 주문을 다시 내지 못한다.
+5. 통과하면 **슬롯 예약**을 한다. 한 트랜잭션에서 긴급 정지, 알고리즘 상태, 하루 카운터 두 개, 같은 키의 문서, **(알고리즘, 종목) 잠금**과 그 잠금을 쥔 주문, **알고리즘의 모든 주문(장부)**을 읽고 모두 통과해야 카운터를 올리고, 잠금을 잡고, `reserved` 기록을 만든다. 잠금이 살아 있으면 `OPEN_ORDER_EXISTS`/`UNRECONCILED_ORDER`, 장부로 다시 계산한 매수 예산 초과는 `BUDGET_EXCEEDED`, 매도 수량이 소유 수량(작업 중 매도 제외)을 넘으면 `SELL_EXCEEDS_OWNED`로 거부한다. 이 기록은 요청을 보내기 **전에** 남는다(write-ahead). 같은 키의 기록이 있으면 `duplicate`로 건너뛴다. 실행 ID가 다른 겹친 실행, 재시작, 중복 실행이 같은 주문을 다시 내거나 예산·보유 수량을 두 번 쓰지 못한다.
 6. 주문을 낸다. 결과에 따라 기록을 갱신한다: `accepted`(+`orderId`, 보정되었다면 보낸 키와 가격), `rejected`(+정리된 오류), `unknown`(+정리된 오류). 기록 갱신이 실패하면 `reserved`로 남고(다음 주문을 막는다) 결과에 `recordError`가 표시된다.
-7. 알림은 `Notifier`가 아니라 주입한 `TradingNotifier.notify(event)`로 보낸다(`src/server/notify.ts`의 `NotificationEvent`를 `import type`으로만 쓴다). 알림 실패는 삼키고 거래 판단을 막지 않는다.
+7. 알림은 주입한 `TradingNotifier.notify(event)`로 보내며, 상황을 이벤트로 바꾸는 매핑은 `alerts.ts`의 `liveAlertEvent` 한 곳에만 있다(`src/server/notify.ts`의 `NotificationEvent`는 `import type`으로만 쓴다). 알림 실패는 삼키고 거래 판단을 막지 않는다.
 
 ### 첫 실전 주문과 권한
 
 - 첫 주문 판정: 그 알고리즘에 `accepted`, `unknown`, `partially-filled`, `filled` 기록이 하나도 없으면 첫 주문이다.
 - `POST /orders`가 **401 또는 403**이면 몇 번째 주문이든 알고리즘을 정지하고(`order-permission`) `order-rejected`(증권사 거부)와 `algorithm-auto-stop`을 보낸다. 이 실행의 나머지 주문은 건너뛴다.
 - **첫 주문**이 다른 확정 거부(예: `prerequisite-required`, `insufficient-buying-power`)를 받아도 정지한다(`first-order-rejected`, 7f의 "첫 실전 주문 거부 감시"). 단 `rate-limit-exceeded`는 일시적이라 제외한다. 첫 주문 이후의 일반 거부는 기록과 알림만 한다.
-- `unknown` 결과는 거부가 아니다. 알림 종류에 "접수 여부 미확인"이 없어서 `job-failure`(`live-order-unconfirmed`)로 보낸다. 같은 종목의 새 주문은 `UNRECONCILED_ORDER`로 막힌다.
+- `unknown` 결과는 거부가 아니다. 이 알림은 지금은 `job-failure`(`live-order-unconfirmed`)로 간다(전용 종류는 7e가 `notify.ts`에 추가하고 `alerts.ts`만 고친다). 같은 종목의 새 주문은 `UNRECONCILED_ORDER`로 막힌다.
+- **로컬 입력 오류**(`OrderInputError`: 아무것도 보내지 않았다)는 증권사 거부가 아니다. 기록은 `rejected`/`input-invalid`로 남기지만 첫 주문 거부로 세지 않고, 알고리즘을 정지하지 않으며, `order-rejected` 대신 `job-failure`(`live-order-input-invalid`)로 알린다.
 
 ### 미체결·체결 동기화 (`reconcile`)
 
@@ -177,7 +185,7 @@ interface OrderTransport {
 - 상태: `reserved → accepted | rejected | unknown`, `unknown → accepted | rejected | partially-filled | filled | canceled`, `accepted → partially-filled | filled | canceled | rejected`, `partially-filled → filled | canceled | rejected`. `rejected`, `filled`, `canceled`는 끝 상태이며 나갈 수 없다. 어긋난 전이는 던진다.
 - 장부 계산(`summarizeLedger`)은 알고리즘 자신의 주문 기록에서 보유 수량, 평균 원가 기반 보유 원가, 진행 중 매수 금액, 진행 중 매도 수량, 마지막 매수일을 구한다. 사전 검사의 "알고리즘이 산 수량"과 예산 누적이 이것이다.
 - 하루 카운터는 **KST 날짜** 기준이다. 예약 때 증가하고 나중에 거부되어도 되돌리지 않는다(연속 실패의 안전망이기도 하다). 미국 장도 KST 22:30 이후 한 번만 판단하므로 같은 날짜에 들어간다.
-- Firestore 구현은 서버 전용 컬렉션을 쓴다(클라이언트 접근은 기존 Firestore 규칙이 막는다): `liveOrders/{clientOrderId}`, `tradingControl/emergencyStop`(`{active}`, 문서가 없으면 정지 아님, 형식이 틀리면 던진다), `tradingAlgorithmState/{algorithmId}`, `tradingCounters/{날짜}_global`·`{날짜}_a_{algorithmId}`, `blockedOrders/{id}`. 예약은 한 `runTransaction` 안에서 모든 읽기를 한 뒤 쓴다. 문서 ID는 정규식으로 검증한다(경로 주입 방지). 저장된 문서가 형식에 맞지 않으면 잘못된 값을 조용히 쓰지 않고 오류로 처리한다. `liveOrders`의 알고리즘별 조회와 `status in` 조회는 단일 필드라 복합 색인이 필요 없다. 테스트는 낙관적 동시성(읽은 문서가 바뀌면 재시도)을 흉내 내는 가짜 Firestore로 동시 예약이 한도를 넘지 못함을 확인한다. 실제 Firestore에는 연결하지 않았다.
+- Firestore 구현은 서버 전용 컬렉션을 쓴다(클라이언트 접근은 기존 Firestore 규칙이 막는다): `liveOrders/{clientOrderId}`, `tradingControl/emergencyStop`(`{active}`, 문서가 없으면 정지 아님, 형식이 틀리면 던진다), `tradingAlgorithmState/{algorithmId}`, `tradingCounters/{날짜}_global`·`{날짜}_a_{algorithmId}`, `tradingSymbolLocks/{algorithmId}_{종목}`(주문이 끝날 때까지 잡고 있는 잠금, 종료 상태로 바뀌는 같은 트랜잭션에서 지운다. 주인 주문이 종료 상태이면 낡은 잠금으로 보고 덮어쓰며, 주인 문서가 없으면 미확인으로 막는다), `tradingRunLeases/{algorithmId}`(`{runId, expiresAt}`), `blockedOrders/{id}`. 예약은 한 `runTransaction` 안에서 모든 읽기(알고리즘 주문 질의 포함)를 한 뒤 쓴다. 문서 ID는 정규식으로 검증한다(경로 주입 방지, 종목은 점만으로 된 값도 거부). 저장된 문서가 형식에 맞지 않으면 잘못된 값을 조용히 쓰지 않고 오류로 처리한다. `liveOrders`의 알고리즘별 조회와 `status in` 조회는 단일 필드라 복합 색인이 필요 없다. 테스트는 낙관적 동시성(읽은 문서나 질의한 컬렉션이 바뀌면 재시도)을 흉내 내는 가짜 Firestore로, 실행 ID가 다른 동시 예약이 같은 종목·예산·보유 수량을 두 번 쓰지 못함과 한도를 넘지 못함을 확인한다. 실제 Firestore에는 연결하지 않았다.
 
 ## 읽기 전용 권한 확인 (`access-check.ts`)
 
@@ -201,6 +209,6 @@ interface OrderTransport {
 5. 긴급 정지 문서와 화면이 실제로 `tradingControl/emergencyStop`을 쓰고, 정지를 켠 뒤 다음 주문이 나가지 않는 것을 모의 주문 없이 단위 수준(가짜 서버)으로 확인했다.
 6. 세금 설정(`sellTaxRate`)과 수수료율이 현재 값이다. 운용 금액 한도(알고리즘별, 통화별)를 작게 입력했다. 첫 실전은 작은 금액으로 사용자가 직접 켠다.
 7. 텔레그램 알림이 도착한다(주문 거부, 알고리즘 자동 정지, 체결). 알림 실패가 주문을 막지 않는 것은 테스트로 확인했다.
-8. Firestore 규칙이 새 컬렉션(`liveOrders`, `tradingControl`, `tradingAlgorithmState`, `tradingCounters`, `blockedOrders`)의 클라이언트 접근을 막는다.
+8. Firestore 규칙이 새 컬렉션(`liveOrders`, `tradingControl`, `tradingAlgorithmState`, `tradingCounters`, `tradingSymbolLocks`, `tradingRunLeases`, `blockedOrders`)의 클라이언트 접근을 막는다.
 9. 시장 캘린더 기반 `tradingDaysSince`, 직전 거래일 일봉 날짜, 환율(`midRate`)이 실제 값으로 들어온다. 평균 거래대금(20거래일), 현재가 관측 시각, 누적 손익이 사실과 맞는지 샘플로 대조했다.
 10. 첫 실전 주문 뒤 `liveOrders` 기록, `reconcile` 결과, 텔레그램 알림이 서로 맞는지 사용자가 확인한다. 거부되면 알고리즘이 정지되었는지 확인한다.

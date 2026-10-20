@@ -122,9 +122,31 @@ describe('the module is not wired anywhere', () => {
         );
     }
   });
-  it('the notify import is type-only (no Firestore client or Telegram code is loaded)', () => {
-    const text = read(join(tradingDir, 'executor.ts'));
+  it('the notify import exists only in alerts.ts and is type-only (no Firestore client or Telegram code is loaded)', () => {
+    const importers = tradingFiles.filter((f) => /from\s+['"]\.\.\/notify\.js['"]/.test(read(f)));
+    expect(importers.map(rel)).toEqual(['src/server/trading/alerts.ts']);
+    const text = read(importers[0]);
     expect(text).toMatch(/import type \{ NotificationEvent \} from '\.\.\/notify\.js'/);
     expect(text).not.toMatch(/^import \{[^}]*\} from '\.\.\/notify\.js'/m);
+  });
+});
+
+describe('test support stays out of src', () => {
+  it('the fake Toss server lives under tests/support, not under src', () => {
+    expect(existsSync(join(root, 'tests', 'support', 'fake-toss.ts'))).toBe(true);
+    expect(existsSync(join(tradingDir, 'testing.ts'))).toBe(false);
+  });
+  it('no file under src/ imports test support, FakeToss, or anything under tests/', () => {
+    const offenders = walk(join(root, 'src'))
+      .filter((f) => /\.(ts|tsx|js|mjs)$/.test(f))
+      .filter((f) => {
+        const text = read(f);
+        return (
+          /(?:from|import|require)\s*\(?\s*['"][^'"]*(?:\/testing|fake-toss|\/tests\/|\.\.\/tests)[^'"]*['"]/.test(
+            text,
+          ) || /\bFakeToss\b/.test(text)
+        );
+      });
+    expect(offenders.map(rel)).toEqual([]);
   });
 });

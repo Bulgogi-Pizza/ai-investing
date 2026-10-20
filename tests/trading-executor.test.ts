@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { Firestore } from '@google-cloud/firestore';
 import type { NotificationEvent } from '../src/server/notify';
 import {
   LiveOrderExecutor,
@@ -8,8 +9,11 @@ import {
   type RunDataProvider,
 } from '../src/server/trading/executor';
 import type { PreTradeMarketFacts } from '../src/server/trading/pre-trade';
+import { liveAlertEvent } from '../src/server/trading/alerts';
+import { FirestoreTradingStore } from '../src/server/trading/firestore-store';
 import { MemoryTradingStore, kstDateKey } from '../src/server/trading/stores';
-import { TossOrderClient } from '../src/server/trading/toss-orders';
+import { FakeFirestore } from './support/fake-firestore';
+import { OrderInputError, TossOrderClient } from '../src/server/trading/toss-orders';
 import {
   FakeToss,
   NOW,
@@ -18,7 +22,7 @@ import {
   sampleStats,
   seedOrder,
   tradingDaysSinceFixture,
-} from '../src/server/trading/testing';
+} from './support/fake-toss';
 
 const SYMBOLS = ['005930', '000660', '035420', '051910'];
 
@@ -28,6 +32,7 @@ function env(opts: { settings?: Record<string, unknown> } = {}) {
     fake.priceLimits.set(s, { upper: '91000', lower: '49000', currency: 'KRW' });
     fake.sellable.set(s, '5000');
   }
+  fake.now = () => NOW.getTime() + 1000; // broker clock is just after the local reservation
   const store = new MemoryTradingStore(() => NOW);
   const events: NotificationEvent[] = [];
   const client = new TossOrderClient(fake, { sleep: async () => undefined });
@@ -752,5 +757,494 @@ describe('reconciliation and fill notifications', () => {
       'BRAND_NEW',
     ])
       expect(mapProviderStatus(keep)).toBeNull();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Overlapping runs (H1)
+// ---------------------------------------------------------------------------
+describe('overlapping runs of one algorithm cannot both place an order (H1)', () => {
+  /** A store that pretends nobody holds the run lease, so only the reservation guards remain. */
+  class NoLeaseStore extends FirestoreTradingStore {
+    override async acquireRunLease() {
+      return true;
+    }
+  }
+  function twoExecutors(opts: { lease: boolean; algorithm?: ReturnType<typeof krAlgorithm> }) {
+    const db = new FakeFirestore();
+    const fake = new FakeToss();
+    fake.now = () => NOW.getTime() + 1000;
+    for (const symbol of SYMBOLS) {
+      fake.priceLimits.set(symbol, { upper: '91000', lower: '49000', currency: 'KRW' });
+      fake.sellable.set(symbol, '5000');
+    }
+    const events: unknown[] = [];
+    const make = () => {
+      const store = opts.lease
+        ? new FirestoreTradingStore(db as unknown as Firestore, () => NOW)
+        : new NoLeaseStore(db as unknown as Firestore, () => NOW);
+      return {
+        store,
+        executor: new LiveOrderExecutor({
+          client: new TossOrderClient(fake, { sleep: async () => undefined }),
+          store,
+          notifier: { notify: async (e) => void events.push(e) },
+          now: () => NOW,
+          tradingDaysSince: tradingDaysSinceFixture,
+          settings: { sellTaxRate: 0.0018 },
+          algorithmName: () => 'KR momentum',
+        }),
+      };
+    };
+    return { db, fake, events, a: make(), b: make() };
+  }
+  const runWith = (runId: string, decisions: Decision[], algorithm = krAlgorithm()) =>
+    run(decisions, { runId, algorithm });
+
+  it('buy: two runs with distinct run ids -> one order (run lease)', async () => {
+    const { fake, a, b } = twoExecutors({ lease: true });
+    const [ra, rb] = await Promise.all([
+      a.executor.executeRun(runWith('run-a', [buy('005930')])),
+      b.executor.executeRun(runWith('run-b', [buy('005930')])),
+    ]);
+    expect(fake.placeCount()).toBe(1);
+    expect([ra.leaseHeld, rb.leaseHeld].filter(Boolean)).toHaveLength(1);
+    const held = ra.leaseHeld ? ra : rb;
+    expect(held.outcomes).toEqual([
+      {
+        symbol: '005930',
+        side: 'buy',
+        tranche: 0,
+        status: 'skipped',
+        reasons: ['RUN_IN_PROGRESS'],
+      },
+    ]);
+  });
+  it('buy: even with the lease bypassed, the symbol lock inside the reservation allows one order', async () => {
+    const { fake, db, a, b } = twoExecutors({ lease: false });
+    const [ra, rb] = await Promise.all([
+      a.executor.executeRun(runWith('run-a', [buy('005930')])),
+      b.executor.executeRun(runWith('run-b', [buy('005930')])),
+    ]);
+    expect(fake.placeCount()).toBe(1);
+    const statuses = [...ra.outcomes, ...rb.outcomes].map((o) => o.status).sort();
+    expect(statuses).toEqual(['accepted', 'blocked']);
+    const blocked = [...ra.outcomes, ...rb.outcomes].find((o) => o.status === 'blocked')!;
+    expect(['OPEN_ORDER_EXISTS', 'UNRECONCILED_ORDER']).toContain(blocked.reasons?.[0]);
+    expect([...db.docs.keys()].filter((k) => k.startsWith('liveOrders/'))).toHaveLength(1);
+  });
+  it('sell: two runs selling the same position -> one order, never a double sell', async () => {
+    const { fake, a, b } = twoExecutors({ lease: false });
+    await seedOrder(a.store, { clientOrderId: 'own', quantity: 10 }, 'filled');
+    const [ra, rb] = await Promise.all([
+      a.executor.executeRun(runWith('run-a', [sell('005930', 10)])),
+      b.executor.executeRun(runWith('run-b', [sell('005930', 10)])),
+    ]);
+    expect(fake.placeCount()).toBe(1);
+    expect([...ra.outcomes, ...rb.outcomes].map((o) => o.status).sort()).toEqual([
+      'accepted',
+      'blocked',
+    ]);
+    expect(fake.orders.map((o) => o.side)).toEqual(['SELL']);
+  });
+  it('sell: with the lease bypassed and DIFFERENT symbols the owned-quantity check is per symbol', async () => {
+    const { fake, a, b } = twoExecutors({ lease: false });
+    await seedOrder(a.store, { clientOrderId: 'own-1', quantity: 10, symbol: '005930' }, 'filled');
+    await seedOrder(a.store, { clientOrderId: 'own-2', quantity: 10, symbol: '000660' }, 'filled');
+    await Promise.all([
+      a.executor.executeRun(runWith('run-a', [sell('005930', 10)])),
+      b.executor.executeRun(runWith('run-b', [sell('000660', 10)])),
+    ]);
+    expect(fake.placeCount()).toBe(2); // independent positions are not serialized needlessly
+  });
+  it('buys on different symbols cannot jointly exceed the budget (re-checked in the transaction)', async () => {
+    const { fake, a, b } = twoExecutors({ lease: false });
+    const algorithm = krAlgorithm({ budget: 1_000_000 }); // each buy is 700,000
+    const [ra, rb] = await Promise.all([
+      a.executor.executeRun(runWith('run-a', [buy('005930')], algorithm)),
+      b.executor.executeRun(runWith('run-b', [buy('000660')], algorithm)),
+    ]);
+    expect(fake.placeCount()).toBe(1);
+    const blocked = [...ra.outcomes, ...rb.outcomes].find((o) => o.status === 'blocked')!;
+    expect(blocked.reasons).toEqual(['BUDGET_EXCEEDED']);
+  });
+  it('a lease held by another run refuses the whole run without touching the broker', async () => {
+    const { fake, store, executor } = env();
+    await store.acquireRunLease('algo-1', 'someone-else', 600_000);
+    const report = await executor.executeRun(run([buy('005930'), buy('000660')]));
+    expect(report.leaseHeld).toBe(true);
+    expect(report.outcomes.map((o) => o.status)).toEqual(['skipped', 'skipped']);
+    expect(fake.calls).toHaveLength(0);
+  });
+  it('the same run id may continue after a restart; the lease is released afterwards', async () => {
+    const { store, executor } = env();
+    await store.acquireRunLease('algo-1', 'run-2026-10-21-kr', 600_000);
+    const report = await executor.executeRun(run([buy('005930')]));
+    expect(report.leaseHeld).toBeUndefined();
+    expect(report.outcomes[0].status).toBe('accepted');
+    expect(await store.acquireRunLease('algo-1', 'another-run', 600_000)).toBe(true);
+  });
+  it('the lease is released even if the run throws', async () => {
+    const { store, executor: _e } = env();
+    void _e;
+    const executor = new LiveOrderExecutor({
+      client: new TossOrderClient(new FakeToss()),
+      store,
+      notifier: { notify: async () => undefined },
+      now: () => NOW,
+      tradingDaysSince: tradingDaysSinceFixture,
+      settings: { sellTaxRate: 0.0018 },
+      algorithmName: () => {
+        throw new Error('naming exploded');
+      },
+    });
+    await expect(
+      executor.executeRun(
+        run([buy('005930')], { data: provider({ facts: { avgTradedValue: 1 } }) }),
+      ),
+    ).rejects.toThrow('naming exploded');
+    expect(await store.acquireRunLease('algo-1', 'next-run', 600_000)).toBe(true);
+  });
+  it('different algorithms do not block each other', async () => {
+    const { fake, executor, store } = env();
+    await store.acquireRunLease('algo-other', 'run-x', 600_000);
+    const report = await executor.executeRun(run([buy('005930')]));
+    expect(report.outcomes[0].status).toBe('accepted');
+    expect(fake.placeCount()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Ambiguity, stop before retry, local failures
+// ---------------------------------------------------------------------------
+describe('retries stop when the system is stopped (M2)', () => {
+  it('emergency stop flipped during scripted network errors: no resend, outcome unknown', async () => {
+    const { fake, store, events, executor } = env();
+    fake.postScript = [{ kind: 'network' }, { kind: 'network' }, { kind: 'network' }];
+    const original = fake.send.bind(fake);
+    fake.send = async (r) => {
+      if (r.method === 'POST') store.setEmergencyStop(true); // pressed during the first attempt
+      return original(r);
+    };
+    const report = await executor.executeRun(run([buy('005930')]));
+    expect(report.outcomes[0]).toMatchObject({ status: 'unknown', errorCode: 'retry-aborted' });
+    expect(fake.placeCount()).toBe(1);
+    expect((await store.listOrders({ algorithmId: 'algo-1' }))[0].status).toBe('unknown');
+    expect(events).toEqual([{ kind: 'job-failure', jobName: 'live-order-unconfirmed' }]);
+  });
+  it('an algorithm stopped during the retries also aborts the resend', async () => {
+    const { fake, store, executor } = env();
+    fake.postScript = [{ kind: 'network' }, { kind: 'network' }];
+    const original = fake.send.bind(fake);
+    fake.send = async (r) => {
+      if (r.method === 'POST') await store.stopAlgorithm('algo-1', 'loss-limit');
+      return original(r);
+    };
+    const report = await executor.executeRun(run([buy('005930')]));
+    expect(report.outcomes[0]).toMatchObject({ status: 'unknown', errorCode: 'retry-aborted' });
+    expect(fake.placeCount()).toBe(1);
+  });
+  it('an unreadable stop flag at retry time aborts the resend (fail closed)', async () => {
+    const { fake, store, executor } = env();
+    fake.postScript = [{ kind: 'network' }, { kind: 'network' }];
+    let first = true;
+    const original = fake.send.bind(fake);
+    fake.send = async (r) => {
+      if (r.method === 'POST' && first) {
+        first = false;
+        store.getEmergencyStop = async () => {
+          throw new Error('firestore down');
+        };
+      }
+      return original(r);
+    };
+    const report = await executor.executeRun(run([buy('005930')]));
+    expect(report.outcomes[0]).toMatchObject({ status: 'unknown', errorCode: 'retry-aborted' });
+    expect(fake.placeCount()).toBe(1);
+  });
+  it('without a stop the retries still go out with the same key', async () => {
+    const { fake, executor } = env();
+    fake.postScript = [{ kind: 'network' }, { kind: 'network' }];
+    const report = await executor.executeRun(run([buy('005930')]));
+    expect(report.outcomes[0].status).toBe('accepted');
+    const posts = fake.calls.filter((c) => c.method === 'POST');
+    expect(posts).toHaveLength(3);
+    expect(
+      new Set(posts.map((c) => (c.body as { clientOrderId: string }).clientOrderId)).size,
+    ).toBe(1);
+  });
+});
+
+describe('an ambiguous attempt followed by a 4xx is unknown, not a broker rejection (M1)', () => {
+  it.each([401, 403])(
+    'network error then HTTP %i: no permission stop, no rejection alert',
+    async (status) => {
+      const { fake, store, events, executor } = env();
+      fake.postScript = [{ kind: 'network' }, { kind: 'status', status, code: 'forbidden' }];
+      const report = await executor.executeRun(run([buy('005930'), buy('000660')]));
+      expect(report.outcomes[0]).toMatchObject({ status: 'unknown', errorCode: 'forbidden' });
+      expect(report.algorithmStopped).toBe(false);
+      expect(await store.isAlgorithmStopped('algo-1')).toBe(false);
+      expect(events).toEqual([{ kind: 'job-failure', jobName: 'live-order-unconfirmed' }]);
+      expect((await store.listOrders({ algorithmId: 'algo-1' }))[0].status).toBe('unknown');
+    },
+  );
+  it('network error then 422 keeps the symbol blocked as unreconciled', async () => {
+    const { fake, executor } = env();
+    fake.postScript = [
+      { kind: 'network' },
+      { kind: 'status', status: 422, code: 'insufficient-buying-power' },
+    ];
+    const first = await executor.executeRun(run([buy('005930')]));
+    expect(first.outcomes[0].status).toBe('unknown');
+    const next = await executor.executeRun(run([buy('005930')], { runId: 'run-next' }));
+    expect(next.outcomes[0]).toMatchObject({ status: 'blocked', reasons: ['UNRECONCILED_ORDER'] });
+  });
+});
+
+describe('local input failures are not broker rejections (L7)', () => {
+  function throwingClient() {
+    const fake = new FakeToss();
+    for (const s of SYMBOLS)
+      fake.priceLimits.set(s, { upper: '91000', lower: '49000', currency: 'KRW' });
+    const real = new TossOrderClient(fake);
+    return {
+      fake,
+      client: {
+        placeOrder: async () => {
+          throw new OrderInputError('price must be in the documented scale');
+        },
+        cancelOrder: real.cancelOrder.bind(real),
+        listOrders: real.listOrders.bind(real),
+        getOrder: real.getOrder.bind(real),
+        getSellableQuantity: real.getSellableQuantity.bind(real),
+        getBuyingPower: real.getBuyingPower.bind(real),
+        getCommissions: real.getCommissions.bind(real),
+        getStockWarnings: real.getStockWarnings.bind(real),
+        getPriceLimits: real.getPriceLimits.bind(real),
+      },
+    };
+  }
+  it('records input-invalid, alerts as a job failure, does not stop the algorithm even on the first order', async () => {
+    const { client, fake } = throwingClient();
+    const store = new MemoryTradingStore(() => NOW);
+    const events: unknown[] = [];
+    const executor = new LiveOrderExecutor({
+      client,
+      store,
+      notifier: { notify: async (e) => void events.push(e) },
+      now: () => NOW,
+      tradingDaysSince: tradingDaysSinceFixture,
+      settings: { sellTaxRate: 0.0018 },
+      algorithmName: () => 'KR momentum',
+    });
+    const report = await executor.executeRun(run([buy('005930'), buy('000660')]));
+    expect(report.algorithmStopped).toBe(false);
+    expect(report.outcomes.map((o) => [o.status, o.errorCode])).toEqual([
+      ['rejected', 'input-invalid'],
+      ['rejected', 'input-invalid'],
+    ]);
+    expect(await store.isAlgorithmStopped('algo-1')).toBe(false);
+    expect(events).toEqual([
+      { kind: 'job-failure', jobName: 'live-order-input-invalid' },
+      { kind: 'job-failure', jobName: 'live-order-input-invalid' },
+    ]);
+    const recs = await store.listOrders({ algorithmId: 'algo-1' });
+    expect(recs.map((r) => [r.status, r.error?.code])).toEqual([
+      ['rejected', 'input-invalid'],
+      ['rejected', 'input-invalid'],
+    ]);
+    expect(fake.placeCount()).toBe(0);
+  });
+  it('a later genuine first broker order is still watched (the local failure did not count as one)', async () => {
+    const { client } = throwingClient();
+    const store = new MemoryTradingStore(() => NOW);
+    const executor = new LiveOrderExecutor({
+      client,
+      store,
+      notifier: { notify: async () => undefined },
+      now: () => NOW,
+      tradingDaysSince: tradingDaysSinceFixture,
+      settings: { sellTaxRate: 0.0018 },
+    });
+    await executor.executeRun(run([buy('005930')]));
+    const prior = await store.listOrders({ algorithmId: 'algo-1' });
+    expect(prior.every((o) => o.status === 'rejected')).toBe(true);
+  });
+});
+
+describe('tick correction veto in the executor re-checks price limits (L3)', () => {
+  it('a correction that would land inside the lower-limit buffer is declined', async () => {
+    const { fake, executor } = env();
+    // lower * 1.03 = 50,016.8: the original 50,050 passes the check, the corrected 50,000 would not.
+    fake.priceLimits.set('005930', { upper: '70000', lower: '48560', currency: 'KRW' });
+    const report = await executor.executeRun(
+      run([buy('005930', 10, 50050)], {
+        data: provider({
+          facts: {
+            quote: { price: 50_050, observedAt: new Date(NOW.getTime() - 5000).toISOString() },
+          },
+        }),
+      }),
+    );
+    expect(report.outcomes[0]).toMatchObject({
+      status: 'rejected',
+      errorCode: 'tick-correction-declined',
+    });
+    expect(fake.placeCount()).toBe(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reconcile adoption (L1)
+// ---------------------------------------------------------------------------
+describe('reconcile never adopts an order across algorithms or from before the record (L1)', () => {
+  const openOrder = (over: Record<string, unknown> = {}) => ({
+    orderId: 'broker-open-1',
+    clientOrderId: null,
+    symbol: '005930',
+    side: 'BUY' as const,
+    orderType: 'LIMIT',
+    timeInForce: 'DAY',
+    status: 'PENDING',
+    price: '70000',
+    quantity: '10',
+    currency: 'KRW' as const,
+    orderedAt: new Date(NOW.getTime() + 1000).toISOString(),
+    filledQuantity: '0',
+    averageFilledPrice: null,
+    ...over,
+  });
+  const seedUnknown = (
+    store: MemoryTradingStore,
+    id: string,
+    algorithmId: string,
+    createdAt = NOW.toISOString(),
+  ) =>
+    seedOrder(
+      store,
+      { clientOrderId: id, algorithmId, symbol: '005930', createdAt, dateKey: kstDateKey(NOW) },
+      'unknown',
+    );
+
+  it('a single record with a single matching later OPEN order is adopted (baseline)', async () => {
+    const { fake, store, executor } = env();
+    await seedUnknown(store, 'u1', 'algo-1');
+    fake.orders.push(openOrder());
+    await executor.reconcile();
+    expect(await store.getOrder('u1')).toMatchObject({
+      status: 'accepted',
+      orderId: 'broker-open-1',
+    });
+  });
+  it('two algorithms with look-alike unknown records: neither adopts the one broker order', async () => {
+    const { fake, store, executor } = env();
+    await seedUnknown(store, 'u1', 'algo-1');
+    await seedUnknown(store, 'u2', 'algo-2');
+    fake.orders.push(openOrder());
+    await executor.reconcile('algo-1');
+    await executor.reconcile('algo-2');
+    await executor.reconcile();
+    expect((await store.getOrder('u1'))?.status).toBe('unknown');
+    expect((await store.getOrder('u2'))?.status).toBe('unknown');
+  });
+  it('an order id already claimed by another algorithm is never adopted', async () => {
+    const { fake, store, executor } = env();
+    await seedOrder(
+      store,
+      {
+        clientOrderId: 'claimed',
+        algorithmId: 'algo-2',
+        symbol: '005930',
+        createdAt: NOW.toISOString(),
+        dateKey: kstDateKey(NOW),
+      },
+      'accepted',
+    );
+    await store.updateOrder('claimed', { orderId: 'broker-open-1' });
+    await seedUnknown(store, 'u1', 'algo-1');
+    fake.orders.push(openOrder());
+    await executor.reconcile('algo-1');
+    expect((await store.getOrder('u1'))?.status).toBe('unknown');
+  });
+  it('an order placed before the record was created is not adopted', async () => {
+    const { fake, store, executor } = env();
+    await seedUnknown(store, 'u1', 'algo-1', NOW.toISOString());
+    fake.orders.push(openOrder({ orderedAt: new Date(NOW.getTime() - 60_000).toISOString() }));
+    await executor.reconcile();
+    expect((await store.getOrder('u1'))?.status).toBe('unknown');
+  });
+  it('differences in symbol, side, quantity, price, type or time-in-force prevent adoption', async () => {
+    for (const over of [
+      { symbol: '000660' },
+      { side: 'SELL' },
+      { quantity: '11' },
+      { price: '70100' },
+      { orderType: 'MARKET', price: null },
+      { timeInForce: 'CLS' },
+    ]) {
+      const { fake, store, executor } = env();
+      await seedUnknown(store, 'u1', 'algo-1');
+      fake.orders.push(openOrder(over));
+      await executor.reconcile();
+      expect((await store.getOrder('u1'))?.status, JSON.stringify(over)).toBe('unknown');
+    }
+  });
+  it('two matching broker orders for one record are ambiguous: no adoption', async () => {
+    const { fake, store, executor } = env();
+    await seedUnknown(store, 'u1', 'algo-1');
+    fake.orders.push(openOrder(), openOrder({ orderId: 'broker-open-2' }));
+    await executor.reconcile();
+    expect((await store.getOrder('u1'))?.status).toBe('unknown');
+  });
+});
+
+describe('alert mapping lives in one function', () => {
+  it('maps every live situation to a notification event without amounts or provider text', () => {
+    const base = { symbol: '005930', side: 'buy' as const, algorithmName: 'KR momentum' };
+    expect(liveAlertEvent({ type: 'safety-guard-refusal', ...base })).toEqual({
+      kind: 'order-rejected',
+      mode: 'live',
+      reason: 'safety-guard',
+      ...base,
+    });
+    expect(liveAlertEvent({ type: 'broker-rejected', ...base })).toEqual({
+      kind: 'order-rejected',
+      mode: 'live',
+      reason: 'broker-rejected',
+      ...base,
+    });
+    expect(
+      liveAlertEvent({ type: 'algorithm-stopped', why: 'loss-limit', algorithmName: 'A' }),
+    ).toEqual({
+      kind: 'algorithm-auto-stop',
+      mode: 'live',
+      algorithmName: 'A',
+      reason: 'loss-limit',
+    });
+    expect(
+      liveAlertEvent({ type: 'algorithm-stopped', why: 'order-permission', algorithmName: 'A' }),
+    ).toEqual({ kind: 'algorithm-auto-stop', mode: 'live', algorithmName: 'A' });
+    expect(
+      liveAlertEvent({
+        type: 'algorithm-stopped',
+        why: 'first-order-rejected',
+        algorithmName: 'A',
+      }),
+    ).toEqual({ kind: 'algorithm-auto-stop', mode: 'live', algorithmName: 'A' });
+    expect(liveAlertEvent({ type: 'order-unconfirmed' })).toEqual({
+      kind: 'job-failure',
+      jobName: 'live-order-unconfirmed',
+    });
+    expect(liveAlertEvent({ type: 'local-input-failure' })).toEqual({
+      kind: 'job-failure',
+      jobName: 'live-order-input-invalid',
+    });
+    expect(liveAlertEvent({ type: 'fill', status: 'filled', ...base })).toEqual({
+      kind: 'fill',
+      mode: 'live',
+      status: 'filled',
+      ...base,
+    });
   });
 });

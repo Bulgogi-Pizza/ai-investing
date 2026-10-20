@@ -25,6 +25,8 @@ export const REASONS = {
   QUOTE_STALE: '현재가가 1분보다 오래되어 주문하지 않습니다.',
   FINANCIALS_MISSING: '재무 데이터가 비어 있어 가치 신호를 쓰는 알고리즘은 주문하지 않습니다.',
   FX_RATE_MISSING: '환율을 확인하지 못해 미국 주문 금액을 원화로 환산할 수 없습니다.',
+  FX_RATE_INVALID: '환율이 상식적인 범위를 벗어나 미국 주문 금액을 환산하지 않습니다.',
+  FX_RATE_STALE: '환율이 오래되었거나 시각을 알 수 없어 미국 주문 금액을 환산하지 않습니다.',
   PRICE_FAR_FROM_QUOTE: '주문 가격이 현재가와 너무 떨어져 있습니다.',
   // Position rules — 7, 2, 1.
   SELL_NOT_OWNED: '알고리즘이 보유한 수량이 없어 매도하지 않습니다.',
@@ -53,6 +55,7 @@ export const REASONS = {
   BUYING_POWER_UNAVAILABLE: '매수 가능 금액을 확인하지 못해 주문하지 않습니다.',
   SELLABLE_UNAVAILABLE: '판매 가능 수량을 확인하지 못해 주문하지 않습니다.',
   COMMISSIONS_UNAVAILABLE: '매매 수수료율을 확인하지 못해 주문하지 않습니다.',
+  RUN_IN_PROGRESS: '같은 알고리즘의 다른 실행이 진행 중이어서 주문하지 않습니다.',
   // Fail-closed fallbacks.
   SETTINGS_INVALID: '안전장치 설정값이 올바르지 않아 주문하지 않습니다.',
   INTERNAL_ERROR: '예상하지 못한 오류가 있어 주문하지 않습니다.',

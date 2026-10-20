@@ -9,113 +9,13 @@ import {
   decideReserve,
   kstDateKey,
   summarizeLedger,
+  symbolLockState,
   type LiveOrderRecord,
   type LiveOrderStatus,
   type TradingStore,
 } from '../src/server/trading/stores';
-import { NOW, seedOrder } from '../src/server/trading/testing';
-
-// ---------------------------------------------------------------------------
-// A tiny in-memory Firestore with optimistic transactions (reads are validated at commit and the
-// callback is re-run on conflict, like the real client). It rejects `undefined` values the way the
-// real client does by default.
-// ---------------------------------------------------------------------------
-type Stored = { data: Record<string, unknown>; version: number };
-class FakeSnapshot {
-  constructor(
-    readonly exists: boolean,
-    private readonly value: Record<string, unknown> | undefined,
-    readonly id: string,
-  ) {}
-  data() {
-    return this.value === undefined ? undefined : structuredClone(this.value);
-  }
-}
-function assertNoUndefined(value: unknown, path = ''): void {
-  if (value === undefined) throw new Error(`Cannot use undefined as a Firestore value (${path})`);
-  if (value && typeof value === 'object')
-    for (const [k, v] of Object.entries(value)) assertNoUndefined(v, `${path}.${k}`);
-}
-class FakeFirestore {
-  readonly docs = new Map<string, Stored>();
-  transactionRuns = 0;
-  collection(name: string) {
-    return {
-      doc: (id: string) => {
-        if (!id || id.includes('/')) throw new Error('Invalid document id');
-        return new FakeRef(this, `${name}/${id}`);
-      },
-      where: (field: string, op: string, value: unknown) => ({
-        get: async () => ({
-          docs: [...this.docs.entries()]
-            .filter(([path]) => path.startsWith(`${name}/`))
-            .filter(([, s]) =>
-              op === '==' ? s.data[field] === value : (value as unknown[]).includes(s.data[field]),
-            )
-            .map(([path, s]) => new FakeSnapshot(true, s.data, path.split('/')[1])),
-        }),
-      }),
-    };
-  }
-  snapshot(path: string) {
-    const s = this.docs.get(path);
-    return new FakeSnapshot(!!s, s?.data, path.split('/')[1]);
-  }
-  version(path: string) {
-    return this.docs.get(path)?.version ?? 0;
-  }
-  write(path: string, data: Record<string, unknown>, merge = false, create = false) {
-    assertNoUndefined(data, path);
-    const current = this.docs.get(path);
-    if (create && current) throw new Error('ALREADY_EXISTS');
-    this.docs.set(path, {
-      data:
-        merge && current ? { ...current.data, ...structuredClone(data) } : structuredClone(data),
-      version: (current?.version ?? 0) + 1,
-    });
-  }
-  async runTransaction<T>(fn: (tx: unknown) => Promise<T>): Promise<T> {
-    for (let attempt = 0; attempt < 10; attempt++) {
-      this.transactionRuns++;
-      const reads = new Map<string, number>();
-      const writes: Array<() => void> = [];
-      const tx = {
-        get: async (ref: FakeRef) => {
-          // Read first, then yield: concurrent transactions all see the same starting state.
-          reads.set(ref.path, this.version(ref.path));
-          const snapshot = this.snapshot(ref.path);
-          await new Promise((r) => setTimeout(r, 0));
-          return snapshot;
-        },
-        set: (ref: FakeRef, data: Record<string, unknown>, options?: { merge?: boolean }) => {
-          assertNoUndefined(data);
-          writes.push(() => this.write(ref.path, data, options?.merge));
-        },
-        create: (ref: FakeRef, data: Record<string, unknown>) => {
-          assertNoUndefined(data);
-          writes.push(() => this.write(ref.path, data, false, true));
-        },
-      };
-      const result = await fn(tx);
-      if ([...reads].some(([path, v]) => this.version(path) !== v)) continue; // conflict: retry
-      writes.forEach((w) => w());
-      return result;
-    }
-    throw new Error('Too much contention');
-  }
-}
-class FakeRef {
-  constructor(
-    private readonly db: FakeFirestore,
-    readonly path: string,
-  ) {}
-  async get() {
-    return this.db.snapshot(this.path);
-  }
-  async set(data: Record<string, unknown>, options?: { merge?: boolean }) {
-    this.db.write(this.path, data, options?.merge);
-  }
-}
+import { FakeFirestore } from './support/fake-firestore';
+import { NOW, seedOrder } from './support/fake-toss';
 
 const makeFirestore = () => {
   const db = new FakeFirestore();
@@ -145,8 +45,12 @@ const record = (over: Partial<LiveOrderRecord> = {}): LiveOrderRecord => ({
   filledQuantity: 0,
   ...over,
 });
-const reserve = (store: TradingStore, over: Partial<LiveOrderRecord> = {}, max = { a: 3, g: 10 }) =>
-  store.reserveOrder({ record: record(over), maxPerAlgorithm: max.a, maxGlobal: max.g });
+const reserve = (
+  store: TradingStore,
+  over: Partial<LiveOrderRecord> = {},
+  max = { a: 3, g: 10 },
+  budget = Number.POSITIVE_INFINITY,
+) => store.reserveOrder({ record: record(over), maxPerAlgorithm: max.a, maxGlobal: max.g, budget });
 
 describe('pure helpers', () => {
   it('kstDateKey uses Korea time (UTC+9, no DST)', () => {
@@ -154,7 +58,7 @@ describe('pure helpers', () => {
     expect(kstDateKey(new Date('2026-10-20T15:00:00Z'))).toBe('2026-10-21');
     expect(kstDateKey(new Date('2026-07-01T00:00:00Z'))).toBe('2026-07-01');
   });
-  it('decideReserve: duplicate first, then stop flags, then limits', () => {
+  it('decideReserve: duplicate first, then stop flags, symbol lock, limits, then exposure', () => {
     const base = {
       emergencyStop: false,
       algorithmStopped: false,
@@ -163,6 +67,13 @@ describe('pure helpers', () => {
       exists: false,
       maxPerAlgorithm: 3,
       maxGlobal: 10,
+      symbolLock: 'free' as const,
+      side: 'buy' as const,
+      quantity: 10,
+      notional: 700_000,
+      budget: 1_000_000,
+      committed: 0,
+      ownAvailable: 0,
     };
     expect(decideReserve(base)).toBeNull();
     expect(decideReserve({ ...base, exists: true, emergencyStop: true })).toBe('duplicate');
@@ -170,9 +81,26 @@ describe('pure helpers', () => {
       'emergency-stop',
     );
     expect(decideReserve({ ...base, algorithmStopped: true })).toBe('algorithm-stopped');
+    expect(decideReserve({ ...base, symbolLock: 'open', algorithmCount: 3 })).toBe('symbol-open');
+    expect(decideReserve({ ...base, symbolLock: 'unreconciled' })).toBe('symbol-unreconciled');
     expect(decideReserve({ ...base, algorithmCount: 3 })).toBe('daily-limit-algorithm');
     expect(decideReserve({ ...base, algorithmCount: 2 })).toBeNull();
     expect(decideReserve({ ...base, globalCount: 10 })).toBe('daily-limit-global');
+    expect(decideReserve({ ...base, committed: 300_001 })).toBe('budget-exceeded');
+    expect(decideReserve({ ...base, committed: 300_000 })).toBeNull();
+    expect(decideReserve({ ...base, side: 'sell', ownAvailable: 9 })).toBe('sell-exceeds-owned');
+    expect(decideReserve({ ...base, side: 'sell', ownAvailable: 10 })).toBeNull();
+  });
+  it('symbolLockState: a terminal or missing owner is not a live lock', () => {
+    expect(symbolLockState(false, null)).toBe('free');
+    expect(symbolLockState(true, 'filled')).toBe('free');
+    expect(symbolLockState(true, 'rejected')).toBe('free');
+    expect(symbolLockState(true, 'canceled')).toBe('free');
+    expect(symbolLockState(true, null)).toBe('unreconciled');
+    expect(symbolLockState(true, 'reserved')).toBe('unreconciled');
+    expect(symbolLockState(true, 'unknown')).toBe('unreconciled');
+    expect(symbolLockState(true, 'accepted')).toBe('open');
+    expect(symbolLockState(true, 'partially-filled')).toBe('open');
   });
   it('status lifecycle: terminal states cannot be left; every non-terminal can progress', () => {
     const all: LiveOrderStatus[] = [
@@ -306,11 +234,17 @@ describe('summarizeLedger: what the algorithm owns and has committed', () => {
 });
 
 describe.each([
-  ['MemoryTradingStore', () => new MemoryTradingStore(() => NOW) as TradingStore],
-  ['FirestoreTradingStore (fake Firestore)', () => makeFirestore().store as TradingStore],
+  ['MemoryTradingStore', (clock: () => Date) => new MemoryTradingStore(clock) as TradingStore],
+  [
+    'FirestoreTradingStore (fake Firestore)',
+    (clock: () => Date) =>
+      new FirestoreTradingStore(new FakeFirestore() as unknown as Firestore, clock) as TradingStore,
+  ],
 ] as const)('store contract: %s', (name, make) => {
+  let clockNow = NOW;
   const build = () => {
-    const store = make();
+    clockNow = NOW;
+    const store = make(() => clockNow);
     const setStop = async (v: boolean) => {
       if (store instanceof MemoryTradingStore) store.setEmergencyStop(v);
       else await (store as FirestoreTradingStore).setEmergencyStop(v);
@@ -331,8 +265,10 @@ describe.each([
   it('enforces the per-algorithm and global daily limits atomically', async () => {
     const { store } = build();
     for (let i = 0; i < 3; i++)
-      expect(await reserve(store, { clientOrderId: `a-${i}` })).toEqual({ ok: true });
-    expect(await reserve(store, { clientOrderId: 'a-3' })).toEqual({
+      expect(await reserve(store, { clientOrderId: `a-${i}`, symbol: `S${i}` })).toEqual({
+        ok: true,
+      });
+    expect(await reserve(store, { clientOrderId: 'a-3', symbol: 'S3' })).toEqual({
       ok: false,
       reason: 'daily-limit-algorithm',
     });
@@ -440,7 +376,7 @@ describe.each([
     );
     await seedOrder(
       store,
-      { clientOrderId: 'd', algorithmId: 'algo-2', symbol: '000660' },
+      { clientOrderId: 'd', algorithmId: 'algo-2', symbol: '035420' },
       'rejected',
     );
     expect(
@@ -474,6 +410,105 @@ describe.each([
     });
     expect(await store.getDailyCounts('2026-10-21', 'algo-1')).toEqual({ algorithm: 0, global: 0 });
   });
+  it('one working order per algorithm+symbol: the lock is held until the order is terminal', async () => {
+    const { store } = build();
+    expect(await reserve(store, { clientOrderId: 'first' })).toEqual({ ok: true });
+    // Reserved but not yet confirmed: unreconciled.
+    expect(await reserve(store, { clientOrderId: 'second' })).toEqual({
+      ok: false,
+      reason: 'symbol-unreconciled',
+    });
+    await store.updateOrder('first', { status: 'accepted', orderId: 'b-1' });
+    expect(await reserve(store, { clientOrderId: 'second' })).toEqual({
+      ok: false,
+      reason: 'symbol-open',
+    });
+    await store.updateOrder('first', { status: 'partially-filled', filledQuantity: 3 });
+    expect(await reserve(store, { clientOrderId: 'second' })).toEqual({
+      ok: false,
+      reason: 'symbol-open',
+    });
+    // Other symbol and other algorithm are independent.
+    expect(await reserve(store, { clientOrderId: 'other-symbol', symbol: '000660' })).toEqual({
+      ok: true,
+    });
+    expect(await reserve(store, { clientOrderId: 'other-algo', algorithmId: 'algo-2' })).toEqual({
+      ok: true,
+    });
+    await store.updateOrder('first', { status: 'filled', filledQuantity: 10 });
+    expect(await reserve(store, { clientOrderId: 'second', side: 'sell', quantity: 10 })).toEqual({
+      ok: true,
+    });
+  });
+  it('an unknown outcome keeps the lock; every terminal status releases it', async () => {
+    for (const terminal of ['rejected', 'filled', 'canceled'] as const) {
+      const { store } = build();
+      await reserve(store, { clientOrderId: 'first' });
+      await store.updateOrder('first', { status: 'unknown' });
+      expect(await reserve(store, { clientOrderId: 'second' })).toEqual({
+        ok: false,
+        reason: 'symbol-unreconciled',
+      });
+      await store.updateOrder('first', { status: terminal });
+      expect(await reserve(store, { clientOrderId: 'second' })).toEqual({ ok: true });
+    }
+  });
+  it('the budget is re-checked against the freshly read ledger at reservation time', async () => {
+    const { store } = build();
+    // 1,000,000 budget; 700,000 already committed to a working buy of another symbol.
+    expect(
+      await reserve(store, { clientOrderId: 'b1', symbol: 'S1' }, { a: 5, g: 10 }, 1_000_000),
+    ).toEqual({ ok: true });
+    expect(
+      await reserve(store, { clientOrderId: 'b2', symbol: 'S2' }, { a: 5, g: 10 }, 1_000_000),
+    ).toEqual({ ok: false, reason: 'budget-exceeded' });
+    // A smaller buy still fits (300,000 = 10 * 30,000).
+    expect(
+      await reserve(
+        store,
+        { clientOrderId: 'b3', symbol: 'S3', price: '30000' },
+        { a: 5, g: 10 },
+        1_000_000,
+      ),
+    ).toEqual({ ok: true });
+    // Filled holdings count at cost; a rejected order frees its commitment.
+    await store.updateOrder('b1', { status: 'rejected' });
+    expect(
+      await reserve(store, { clientOrderId: 'b4', symbol: 'S4' }, { a: 5, g: 10 }, 1_000_000),
+    ).toEqual({ ok: true });
+  });
+  it('a sell cannot exceed the shares the algorithm owns, re-read inside the reservation', async () => {
+    const { store } = build();
+    await reserve(store, { clientOrderId: 'buy' });
+    await store.updateOrder('buy', { status: 'accepted', orderId: 'b-1' });
+    await store.updateOrder('buy', { status: 'filled', filledQuantity: 10 });
+    expect(await reserve(store, { clientOrderId: 's1', side: 'sell', quantity: 11 })).toEqual({
+      ok: false,
+      reason: 'sell-exceeds-owned',
+    });
+    expect(
+      await reserve(store, { clientOrderId: 's2', side: 'sell', quantity: 4, symbol: '000660' }),
+    ).toEqual({ ok: false, reason: 'sell-exceeds-owned' }); // owns nothing of that symbol
+    expect(await reserve(store, { clientOrderId: 's3', side: 'sell', quantity: 10 })).toEqual({
+      ok: true,
+    });
+  });
+  it('run lease: one run at a time, same run may re-acquire, it expires, release is by owner', async () => {
+    const { store } = build();
+    const ttl = 600_000;
+    expect(await store.acquireRunLease('algo-1', 'run-a', ttl)).toBe(true);
+    expect(await store.acquireRunLease('algo-1', 'run-b', ttl)).toBe(false);
+    expect(await store.acquireRunLease('algo-1', 'run-a', ttl)).toBe(true); // restart of the same run
+    expect(await store.acquireRunLease('algo-2', 'run-b', ttl)).toBe(true); // other algorithms are independent
+    await store.releaseRunLease('algo-1', 'run-b'); // not the owner: no effect
+    expect(await store.acquireRunLease('algo-1', 'run-b', ttl)).toBe(false);
+    await store.releaseRunLease('algo-1', 'run-a');
+    expect(await store.acquireRunLease('algo-1', 'run-b', ttl)).toBe(true);
+    clockNow = new Date(NOW.getTime() + ttl + 1);
+    expect(await store.acquireRunLease('algo-1', 'run-c', ttl)).toBe(true); // b's lease expired
+    await expect(store.acquireRunLease('a/b', 'run-a', ttl)).rejects.toThrow();
+    await expect(store.acquireRunLease('algo-1', 'run-a', 0)).rejects.toThrow();
+  });
   it(`${name}: returned records are copies`, async () => {
     const { store } = build();
     await reserve(store);
@@ -492,6 +527,7 @@ describe('FirestoreTradingStore specifics', () => {
           record: record({ clientOrderId: `c-${i}`, algorithmId: `alg-${i}` }),
           maxPerAlgorithm: 3,
           maxGlobal: 3,
+          budget: Number.POSITIVE_INFINITY,
         }),
       ),
     );
@@ -506,7 +542,7 @@ describe('FirestoreTradingStore specifics', () => {
     const { store } = makeFirestore();
     const results = await Promise.all(
       Array.from({ length: 5 }, (_, i) =>
-        reserve(store, { clientOrderId: `c-${i}` }, { a: 2, g: 10 }),
+        reserve(store, { clientOrderId: `c-${i}`, symbol: `S${i}` }, { a: 2, g: 10 }),
       ),
     );
     expect(results.filter((r) => r.ok)).toHaveLength(2);
@@ -515,11 +551,63 @@ describe('FirestoreTradingStore specifics', () => {
     const { db, store } = makeFirestore();
     const first = reserve(store, { clientOrderId: 'one' });
     db.write('tradingControl/emergencyStop', { active: true });
-    const second = reserve(store, { clientOrderId: 'two' });
+    const second = reserve(store, { clientOrderId: 'two', symbol: 'S2' });
     const [a, b] = await Promise.all([first, second]);
     // Whatever interleaving happened, nothing was reserved after the flag was set.
     expect([a, b].some((r) => !r.ok && r.reason === 'emergency-stop')).toBe(true);
     expect(db.docs.has('liveOrders/two')).toBe(false);
+  });
+  it('two reservations racing for the same algorithm+symbol: exactly one succeeds', async () => {
+    const { db, store } = makeFirestore();
+    const results = await Promise.all([
+      reserve(store, { clientOrderId: 'run-a-order' }),
+      reserve(store, { clientOrderId: 'run-b-order' }),
+    ]);
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.find((r) => !r.ok)).toMatchObject({ reason: 'symbol-unreconciled' });
+    expect([...db.docs.keys()].filter((k) => k.startsWith('liveOrders/'))).toHaveLength(1);
+    expect(db.docs.get('tradingCounters/2026-10-21_global')?.data.count).toBe(1);
+  });
+  it('racing buys on different symbols cannot jointly exceed the budget', async () => {
+    const { store } = makeFirestore();
+    const results = await Promise.all(
+      ['S1', 'S2', 'S3'].map((symbol, i) =>
+        reserve(store, { clientOrderId: `b-${i}`, symbol }, { a: 5, g: 10 }, 1_000_000),
+      ),
+    );
+    // 700,000 each: only one fits in 1,000,000.
+    expect(results.filter((r) => r.ok)).toHaveLength(1);
+    expect(results.filter((r) => !r.ok).every((r) => !r.ok && r.reason === 'budget-exceeded')).toBe(
+      true,
+    );
+  });
+  it('the lock document is removed by the terminal transition in the same transaction', async () => {
+    const { db, store } = makeFirestore();
+    await reserve(store, { clientOrderId: 'first' });
+    expect(db.docs.has('tradingSymbolLocks/algo-1_005930')).toBe(true);
+    await store.updateOrder('first', { status: 'accepted', orderId: 'b-1' });
+    expect(db.docs.has('tradingSymbolLocks/algo-1_005930')).toBe(true);
+    await store.updateOrder('first', { status: 'canceled' });
+    expect(db.docs.has('tradingSymbolLocks/algo-1_005930')).toBe(false);
+  });
+  it('a stale lock whose owner is terminal does not block (and is replaced)', async () => {
+    const { db, store } = makeFirestore();
+    await reserve(store, { clientOrderId: 'first' });
+    await store.updateOrder('first', { status: 'rejected' });
+    db.write('tradingSymbolLocks/algo-1_005930', { clientOrderId: 'first' });
+    expect(await reserve(store, { clientOrderId: 'second' })).toEqual({ ok: true });
+    expect(db.docs.get('tradingSymbolLocks/algo-1_005930')?.data.clientOrderId).toBe('second');
+  });
+  it('a lock whose owner document is missing is treated as unreconciled', async () => {
+    const { db, store } = makeFirestore();
+    db.write('tradingSymbolLocks/algo-1_005930', { clientOrderId: 'ghost' });
+    expect(await reserve(store)).toEqual({ ok: false, reason: 'symbol-unreconciled' });
+  });
+  it('lock and lease document ids are validated', async () => {
+    const { store } = makeFirestore();
+    await expect(reserve(store, { symbol: '..' })).rejects.toThrow();
+    await expect(reserve(store, { symbol: 'a/b' })).rejects.toThrow();
+    await expect(store.acquireRunLease('../x', 'run', 1000)).rejects.toThrow();
   });
   it('a malformed emergency-stop document fails closed (throws) instead of reading as false', async () => {
     const { db, store } = makeFirestore();
