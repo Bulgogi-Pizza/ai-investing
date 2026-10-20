@@ -29,6 +29,9 @@ import {
   validAppOrigin,
   type NotificationRepository,
 } from './notify.js';
+import { createAnalysisRouter } from './analysis.js';
+import { createFundamentalsRouter } from './fundamentals/index.js';
+import type { FundamentalsRouterOptions } from './fundamentals/router.js';
 import { ownerGate } from './owner.js';
 import {
   createSnapshotRouter,
@@ -38,7 +41,8 @@ import {
 import type { aiFromEnvironment } from './ai.js';
 import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
-import { ProviderError, parsePriceSymbols, type TossClient } from './toss.js';
+import { TossAnalysis } from './toss-analysis.js';
+import { ProviderError, parsePriceSymbols, validBefore, type TossClient } from './toss.js';
 import { MemoryStore, type Store, type Strategy, type User } from './store.js';
 
 export type AppOptions = {
@@ -49,6 +53,9 @@ export type AppOptions = {
   toss?: TossClient;
   /** Same TOSS_OWNER_USER_ID the Toss client is bound to. Missing => owner routes fail closed. */
   ownerUserId?: string;
+  /** DART / SEC EDGAR adapters from the environment; a missing one answers 503 for its market. */
+  dart?: FundamentalsRouterOptions['dart'];
+  sec?: FundamentalsRouterOptions['sec'];
   calendarRepository?: CalendarRepository;
   snapshotRepository?: SnapshotRepository;
   loginThrottle?: LoginThrottle;
@@ -339,7 +346,9 @@ export function createApp(options: AppOptions = {}) {
       typeof req.query.symbol !== 'string' ||
       (req.query.interval !== undefined && typeof req.query.interval !== 'string') ||
       (req.query.count !== undefined &&
-        (typeof req.query.count !== 'string' || !/^\d{1,3}$/.test(req.query.count)))
+        (typeof req.query.count !== 'string' || !/^\d{1,3}$/.test(req.query.count))) ||
+      (req.query.before !== undefined &&
+        (typeof req.query.before !== 'string' || !validBefore(req.query.before)))
     ) {
       failure(res, 400, 'INVALID_MARKET_QUERY', '잘못된 조회 조건입니다.');
       return;
@@ -349,6 +358,7 @@ export function createApp(options: AppOptions = {}) {
         req.query.symbol,
         req.query.interval ?? '1d',
         req.query.count === undefined ? 100 : Number(req.query.count),
+        req.query.before,
       ),
     );
   });
@@ -401,6 +411,21 @@ export function createApp(options: AppOptions = {}) {
     createSnapshotRouter({
       repository: options.snapshotRepository ?? new MemorySnapshotRepository(),
       ownerUserId: options.ownerUserId,
+    }),
+  );
+  app.use(
+    createAnalysisRouter({
+      analysis: options.toss ? new TossAnalysis(options.toss) : undefined,
+      gate: requireOwner,
+    }),
+  );
+  // Owner-only: 503 when the owner is unknown, 403 for others; the router re-checks the owner.
+  app.use('/api/fundamentals', ownerAccount);
+  app.use(
+    createFundamentalsRouter({
+      dart: options.dart,
+      sec: options.sec,
+      ownerUserId: options.ownerUserId ?? '',
     }),
   );
   app.use(createNewsRouter({ repository: calendarRepository, ownerUserId: options.ownerUserId }));

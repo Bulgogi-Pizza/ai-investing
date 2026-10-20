@@ -2,6 +2,7 @@ import { aiFromEnvironment } from './ai.js';
 import { FirestoreLoginThrottle, MemoryLoginThrottle } from './login-throttle.js';
 import { FirestoreCalendarRepository, MemoryCalendarRepository } from './calendar.js';
 import { FirestoreSnapshotRepository, MemorySnapshotRepository } from './snapshots.js';
+import { dartFromEnvironment, secFromEnvironment } from './fundamentals/index.js';
 import { tossFromEnvironment } from './toss.js';
 import { createApp } from './app.js';
 import { FirestoreAlgorithmRepository, MemoryAlgorithmRepository } from './algorithms.js';
@@ -50,6 +51,10 @@ const app = createApp({
   loginThrottle: production ? new FirestoreLoginThrottle() : new MemoryLoginThrottle(),
   staticDirectory: 'dist',
   toss: tossFromEnvironment(production),
+  // Fundamentals providers: DART_API_KEY (secret) and SEC_USER_AGENT (contact, not secret).
+  // A missing or malformed value leaves that market answering 503 instead of guessing.
+  dart: dartFromEnvironment(),
+  sec: secFromEnvironment(),
   // Same value the Toss client is bound to; owner-only routes fail closed when unset.
   ownerUserId: process.env.TOSS_OWNER_USER_ID,
   algorithmRepository: production
