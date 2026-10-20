@@ -29,6 +29,12 @@ import { DataState, LoadingState } from '../../components/DataState';
 import { SourceLink } from '../../components/SourceLink';
 import { formatKst, kstToday } from '../../lib/kst';
 import { ApiError, issueOf, signalAuthRequired, type DataIssue } from '../../lib/api';
+import './calendar-morning.css';
+
+/** Release time unknown (providers such as FRED publish dates only): shown instead of a time. */
+const UNKNOWN_TIME = '발표 시각 미확인';
+const timeText = (time: string) => time || UNKNOWN_TIME;
+type Brief = { date: string; text: string; generatedAt: string; aiUsed: boolean };
 const flag = (country: string) => (country === '한국' ? '🇰🇷' : country === '미국' ? '🇺🇸' : '🌐');
 export default function CalendarPage({ search, isAdmin }: { search: string; isAdmin: boolean }) {
   const [view, setView] = useState('월간');
@@ -117,6 +123,36 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
   const [calendarIssue, setCalendarIssue] = useState<DataIssue | null>(null);
   const [calendarTruncated, setCalendarTruncated] = useState(false);
   const [calendarReload, setCalendarReload] = useState(0);
+  const [brief, setBrief] = useState<Brief | null>(null);
+  const [briefState, setBriefState] = useState<'loading' | 'ready' | 'empty' | 'error'>('loading');
+  const [shownOriginals, setShownOriginals] = useState<number[]>([]);
+  useEffect(() => {
+    const controller = new AbortController();
+    setBriefState('loading');
+    fetch('/api/calendar/brief', { signal: controller.signal })
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok) throw new Error('brief');
+        const item = body?.brief;
+        if (item === null) return { brief: null };
+        if (
+          typeof item?.date !== 'string' ||
+          typeof item?.text !== 'string' ||
+          typeof item?.generatedAt !== 'string'
+        )
+          throw new Error('brief');
+        return { brief: item as Brief };
+      })
+      .then(({ brief: item }) => {
+        if (controller.signal.aborted) return;
+        setBrief(item);
+        setBriefState(item ? 'ready' : 'empty');
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setBriefState('error');
+      });
+    return () => controller.abort();
+  }, [calendarReload]);
   const [importOpen, setImportOpen] = useState(false);
   const [importJson, setImportJson] = useState('');
   const [importError, setImportError] = useState('');
@@ -314,6 +350,24 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           </button>
         </div>
       </div>
+      <section className="morning-brief" data-state={briefState} aria-label="아침 브리핑">
+        <strong>
+          <Sparkles size={14} /> 아침 브리핑
+        </strong>
+        {briefState === 'loading' && <p>불러오는 중입니다.</p>}
+        {briefState === 'error' && <p>아침 브리핑을 불러오지 못했습니다.</p>}
+        {briefState === 'empty' && (
+          <p>아직 저장된 브리핑이 없습니다. 아침 작업(매일 07:00 KST)이 실행되면 표시됩니다.</p>
+        )}
+        {briefState === 'ready' && brief && (
+          <>
+            <p>{brief.text}</p>
+            <small>
+              {formatKst(brief.generatedAt)} KST 생성{brief.aiUsed ? ' · AI 요약 포함' : ''}
+            </small>
+          </>
+        )}
+      </section>
       <div className="calendar-stats">
         <div>
           <span className="stat-icon purple">
@@ -610,7 +664,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                         }
                       >
                         <span className="event-time">
-                          {e.time}
+                          {e.time ? e.time : '시각 미확인'}
                           <i
                             className={`importance-dot ${importancePresentation(e.importance).tone}`}
                           />
@@ -634,12 +688,31 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
             </div>
             {view === '시간별' ? (
               <div className="hour-timeline">
+                {monthEvents.some((e) => e.day === day && !e.time) && (
+                  <div className="hour-row" key="unknown-time">
+                    <time>{UNKNOWN_TIME}</time>
+                    <div>
+                      {monthEvents
+                        .filter((e) => e.day === day && !e.time)
+                        .map((e) => (
+                          <button key={e.id} onClick={() => setSelected(e)} className="hour-event">
+                            {flag(e.country)} {e.title}
+                            <span>
+                              {e.assets[0]} · {importancePresentation(e.importance).label}
+                            </span>
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+                )}
                 {Array.from({ length: 24 }, (_, hour) => (
                   <div className="hour-row" key={hour}>
                     <time>{String(hour).padStart(2, '0')}:00</time>
                     <div>
                       {monthEvents
-                        .filter((e) => e.day === day && Number(e.time.slice(0, 2)) === hour)
+                        .filter(
+                          (e) => e.day === day && !!e.time && Number(e.time.slice(0, 2)) === hour,
+                        )
                         .map((e) => (
                           <button key={e.id} onClick={() => setSelected(e)} className="hour-event">
                             {flag(e.country)} {e.time} · {e.title}
@@ -657,7 +730,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                 <button className="agenda-event" key={e.id} onClick={() => setSelected(e)}>
                   <span>
                     {`${Number(e.date.slice(5, 7))}.${e.day}`}
-                    <small>{e.time}</small>
+                    <small>{timeText(e.time)}</small>
                   </span>
                   <span>
                     {flag(e.country)} {e.title}
@@ -717,8 +790,35 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                 <div>
                   <h3>{selectedEvent.title}</h3>
                   <p>
-                    {selectedEvent.date.replaceAll('-', '. ')}. · {selectedEvent.time} KST
+                    {selectedEvent.date.replaceAll('-', '. ')}.{' · '}
+                    {selectedEvent.time ? `${selectedEvent.time} KST` : UNKNOWN_TIME}
                   </p>
+                  {selectedEvent.titleOriginal && (
+                    <div className="original-title">
+                      <button
+                        type="button"
+                        aria-expanded={shownOriginals.includes(selectedEvent.id)}
+                        onClick={() =>
+                          setShownOriginals((v) =>
+                            v.includes(selectedEvent.id)
+                              ? v.filter((i) => i !== selectedEvent.id)
+                              : [...v, selectedEvent.id],
+                          )
+                        }
+                      >
+                        {shownOriginals.includes(selectedEvent.id)
+                          ? '원문 제목 숨기기'
+                          : '원문 제목 보기'}
+                      </button>
+                      <small>
+                        AI 번역
+                        {selectedEvent.translation ? ` · ${selectedEvent.translation.model}` : ''}
+                      </small>
+                      {shownOriginals.includes(selectedEvent.id) && (
+                        <q lang="en">{selectedEvent.titleOriginal}</q>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <button
                   className={`icon-button star-button ${saved.includes(selectedEvent.id) ? 'is-saved' : ''}`}
@@ -759,6 +859,36 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                   </strong>
                 </div>
               </div>
+              {selectedEvent.values && selectedEvent.values.length > 0 && (
+                <ul className="event-values" aria-label="발표 결과">
+                  {selectedEvent.values.map((value) => (
+                    <li key={value.indicatorId}>
+                      <strong>{value.label}</strong>
+                      <span>
+                        발표 <b>{value.actual}</b>
+                        {value.unit ? ` ${value.unit}` : ''} · 이전 <b>{value.previous ?? '—'}</b>
+                      </span>
+                      <small>
+                        기준 {value.period.slice(0, 7).replace('-', '. ')} · 출처 {value.source} ·{' '}
+                        {formatKst(value.observedAt)} KST 확인
+                      </small>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {selectedEvent.aiSummary?.text && (
+                <div className="ai-summary" aria-label="AI 요약">
+                  <strong>
+                    <Sparkles size={13} /> AI 요약
+                  </strong>
+                  <p>{selectedEvent.aiSummary.text}</p>
+                  <small>
+                    {selectedEvent.aiSummary.model} ·{' '}
+                    {formatKst(selectedEvent.aiSummary.generatedAt)} KST · AI가 만든 요약이라 틀릴
+                    수 있습니다. 발표 값은 위 출처에서 확인하세요.
+                  </small>
+                </div>
+              )}
               <div className="tag-row">
                 <span>{selectedEvent.category}</span>
                 {selectedEvent.assets.map((a) => (

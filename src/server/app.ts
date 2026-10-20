@@ -16,6 +16,11 @@ import {
   MemoryCalendarRepository,
   type CalendarRepository,
 } from './calendar.js';
+import {
+  createMorningRouter,
+  MemoryMorningRunRepository,
+  type MorningRunRepository,
+} from './morning.js';
 import { createNewsRouter } from './news.js';
 import {
   createAlgorithmsRouter,
@@ -58,6 +63,8 @@ export type AppOptions = {
   sec?: FundamentalsRouterOptions['sec'];
   calendarRepository?: CalendarRepository;
   snapshotRepository?: SnapshotRepository;
+  /** Morning calendar job records (the stored brief is read from here). */
+  morningRepository?: MorningRunRepository;
   loginThrottle?: LoginThrottle;
   /** Algorithm models, change history, emergency-stop flag and cost settings (owner-only API). */
   algorithmRepository?: AlgorithmRepository;
@@ -429,6 +436,12 @@ export function createApp(options: AppOptions = {}) {
     }),
   );
   app.use(createNewsRouter({ repository: calendarRepository, ownerUserId: options.ownerUserId }));
+  app.use(
+    createMorningRouter({
+      repository: options.morningRepository ?? new MemoryMorningRunRepository(),
+      ownerUserId: options.ownerUserId,
+    }),
+  );
   app.use(
     createCalendarRouter({
       repository: calendarRepository,

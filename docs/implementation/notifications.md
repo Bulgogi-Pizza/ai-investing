@@ -77,6 +77,7 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md)의 "알림" 절과
 
 ## 아직 연결하지 않은 것
 
+- `src/server/app.ts`·`index.ts`에서 라우터 설치(인증·동일 출처 이후)와 `FirestoreNotificationRepository` 주입, `notifierFromEnvironment()`로 서비스 생성. 아침 작업(`src/jobs/morning-calendar.ts`)은 `morning-brief`(하루 한 번)와 실행 실패 시 `job-failure`를 이 서비스로 보낸다. 알고리즘 API는 긴급 정지 해제·운용 금액 한도 상향 때 `setting-risk-increase`를 보낸다(7a).
 - Secret Manager 비밀(`investing-telegram-bot-token`, `investing-telegram-chat-id`)과 서비스·작업의 비밀 참조, 환경변수 `TELEGRAM_BOT_TOKEN`·`TELEGRAM_CHAT_ID` 연결, Firestore `notifications.ttlAt` TTL 정책 — 계획 2단계(Terraform).
 - 체결·자동 정지·주문 거부·데이터 오류·작업 실패·아침 브리핑을 호출하는 쪽(7c~7f, 6b).
 - `.env.example`에 `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` 빈 항목 추가.

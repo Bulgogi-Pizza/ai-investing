@@ -112,7 +112,7 @@ app.use(createMacroRouter({ fred, ecos, ownerUserId: process.env.TOSS_OWNER_USER
 
 ### 캘린더 연결
 
-FRED는 발표일(날짜)만 주고 **시각과 시간대를 문서에서 밝히지 않는다**. 그래서 `EconomicEvent`의 필수 필드 `time`을 만들 수 없다. `releaseEventDraft`는 `time`·`date` 없이 `releaseDate`(제공자 날짜)와 안정적인 `idKey`를 가진 초안을 만들고, 6b 작업이 KST 날짜·시각을 정해 `toEconomicEvent(draft, { date, time })`로 완성한다(`cleanEvent`로 검증하므로 모델에 맞지 않으면 `null`). 이벤트 ID는 `macroEventId(idKey)`로 같은 발표·날짜에 같은 정수가 나와 upsert가 중복을 만들지 않는다(1e15 이상 48비트 해시, 손으로 넣은 작은 ID와 겹치지 않는다). 초안의 영향 방향은 `unknown`, 확신은 `low`로 둔다. 발표 후 실제값·이전값은 `latestObservations`로 붙이고 문자열로 `previous`/설명에 넣는 일은 6b가 한다.
+FRED는 발표일(날짜)만 주고 **시각과 시간대를 문서에서 밝히지 않는다**. 그래서 `EconomicEvent`의 필수 필드 `time`을 만들 수 없다. `releaseEventDraft`는 `time`·`date` 없이 `releaseDate`(제공자 날짜)와 안정적인 `idKey`를 가진 초안을 만들고, 6b 작업이 KST 날짜·시각을 정해 `toEconomicEvent(draft, { date, time })`로 완성한다(`cleanEvent`로 검증하므로 모델에 맞지 않으면 `null`). 이벤트 ID는 `macroEventId(idKey)`로 같은 발표·날짜에 같은 정수가 나와 upsert가 중복을 만들지 않는다(1e15 이상 48비트 해시, 손으로 넣은 작은 ID와 겹치지 않는다). 초안의 영향 방향은 `unknown`, 확신은 `low`로 둔다. 초안은 `indicatorIds`(발표에 속한 카탈로그 지표)도 담는다. 6b 작업이 `time: ''`(시각 미확인)로 이벤트를 완성하고, 발표 후 실제값·이전값은 `latestObservations`로 읽어 이벤트의 `values[]`에 붙인다([캘린더 문서](calendar.md#아침-갱신-6b)).
 
 ## 미래 정보 금지 규칙
 

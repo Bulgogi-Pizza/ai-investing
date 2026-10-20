@@ -35,6 +35,8 @@ export function releaseEventDraft(release: ReleaseDate, observedAt: Date): Macro
     country: '미국',
     category: entry.category,
     assets: entry.assets,
+    // The morning job attaches the released values of these catalog indicators after the date.
+    indicatorIds: release.indicatorIds,
     importance: entry.importance,
     description: `FRED 발표 일정(${entry.releaseName}). 발표 시각은 제공되지 않는다. 대상 지표: ${release.indicatorIds.join(', ')}.`,
     sourceUrl: entry.sourceUrl,

@@ -53,6 +53,24 @@ export type MarketEvent = {
   impactHorizon?: string;
   confidence?: 'low' | 'medium' | 'high';
   factualObservedAt?: string;
+  /** Released values attached by the morning job (source and fetch time per value). */
+  values?: EventValue[];
+  /** Present only when an AI summary exists; null/undefined means none. */
+  aiSummary?: { text: string; model: string; generatedAt: string } | null;
+  /** Provider's own title when `title` is a Korean AI translation. */
+  titleOriginal?: string;
+  translation?: { model: string; translatedAt: string };
+};
+export type EventValue = {
+  indicatorId: string;
+  label: string;
+  actual: string;
+  previous: string | null;
+  unit: string;
+  period: string;
+  previousPeriod: string | null;
+  source: string;
+  observedAt: string;
 };
 export type EventFilters = {
   importance?: number;

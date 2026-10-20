@@ -1,6 +1,7 @@
 import { aiFromEnvironment } from './ai.js';
 import { FirestoreLoginThrottle, MemoryLoginThrottle } from './login-throttle.js';
 import { FirestoreCalendarRepository, MemoryCalendarRepository } from './calendar.js';
+import { FirestoreMorningRunRepository, MemoryMorningRunRepository } from './morning.js';
 import { FirestoreSnapshotRepository, MemorySnapshotRepository } from './snapshots.js';
 import { dartFromEnvironment, secFromEnvironment } from './fundamentals/index.js';
 import { tossFromEnvironment } from './toss.js';
@@ -68,6 +69,9 @@ const app = createApp({
   snapshotRepository: production
     ? new FirestoreSnapshotRepository()
     : new MemorySnapshotRepository(),
+  morningRepository: production
+    ? new FirestoreMorningRunRepository()
+    : new MemoryMorningRunRepository(),
 });
 const port = Number(process.env.PORT ?? 8080);
 app.listen(port, '0.0.0.0', () => console.info(`Application listening on port ${port}`));

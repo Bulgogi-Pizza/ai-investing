@@ -129,7 +129,8 @@ export async function createRecommendation({
   const excludedCount = records.slice(0, 2000).length - relevantEvents.length;
   const events = relevantEvents
     .filter((event) => {
-      const stamp = Date.parse(`${event.date}T${event.time}:00+09:00`);
+      // An event without a release time (time '') stays upcoming until the end of its date.
+      const stamp = Date.parse(`${event.date}T${event.time || '23:59'}:00+09:00`);
       try {
         return (
           Number.isFinite(stamp) &&

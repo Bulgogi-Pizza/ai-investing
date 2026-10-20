@@ -37,30 +37,49 @@ export type AiResult =
 export interface AiQuota {
   consume(day: string): Promise<boolean>;
 }
+/**
+ * Daily call limits per feature. The original shared limit of 25 stays with the explanation
+ * feature; every other feature has its own counter so one cannot starve another. The morning
+ * calendar job uses two calls per run (summaries + translations) and the limit leaves room for two
+ * manual re-runs.
+ */
+export type AiFeature = 'explanation' | 'morning';
+export const AI_FEATURE_LIMITS: Readonly<Record<AiFeature, number>> = {
+  explanation: 25,
+  morning: 4,
+};
+/** `aiUsage/{day}` is the explanation counter (as before); other features use `aiUsage/{day}_{feature}`. */
+export const aiUsageDocumentId = (day: string, feature: AiFeature) =>
+  feature === 'explanation' ? day : `${day}_${feature}`;
 export class MemoryAiQuota implements AiQuota {
   private day = '';
   private count = 0;
+  constructor(private feature: AiFeature = 'explanation') {}
   async consume(day: string) {
     if (day !== this.day) {
       this.day = day;
       this.count = 0;
     }
-    if (this.count >= 25) return false;
+    if (this.count >= AI_FEATURE_LIMITS[this.feature]) return false;
     this.count++;
     return true;
   }
 }
 export class FirestoreAiQuota implements AiQuota {
-  constructor(private db = new Firestore()) {}
+  constructor(
+    private db = new Firestore(),
+    private feature: AiFeature = 'explanation',
+  ) {}
   async consume(day: string) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !Number.isFinite(Date.parse(day)))
       throw new Error('Invalid quota day');
-    const ref = this.db.collection('aiUsage').doc(day);
+    const ref = this.db.collection('aiUsage').doc(aiUsageDocumentId(day, this.feature));
+    const limit = AI_FEATURE_LIMITS[this.feature];
     return this.db.runTransaction(async (tx) => {
       const data = (await tx.get(ref)).data();
       const count = data?.count ?? 0;
       if (!Number.isSafeInteger(count) || count < 0) throw new Error('Invalid quota state');
-      if (count >= 25) return false;
+      if (count >= limit) return false;
       tx.set(ref, {
         count: count + 1,
         ttlAt: Timestamp.fromMillis(Date.parse(day) + 2 * 86400000),
@@ -141,6 +160,11 @@ export function minimizeAiEvidence(rules: AiRules) {
   if (Buffer.byteLength(serialized, 'utf8') > 12000) throw new Error('AI input limit');
   return { serialized, sources };
 }
+/** Shared safety patterns: allocation commands and trade instructions are never allowed in AI text. */
+export const AI_ALLOCATION_INSTRUCTION =
+  /\d+(?:\.\d+)?\s*%[^.!?]{0,35}(?:설정|편입|맞추|맞춰|재배분|할당|늘리|줄이|변경|조정|확대|축소)|(?:비중|배분|자산|포트폴리오)[^.!?]{0,45}\d+(?:\.\d+)?\s*%[^.!?]{0,35}(?:늘리|줄이|변경|조정|설정|편입|맞추|맞춰|재배분|할당|확대|축소|추천|권장)|(?:설정|편입|맞추|맞춰|재배분|할당|배분)[^.!?]{0,40}\d+(?:\.\d+)?\s*%|\b(?:allocate|rebalance|invest|assign|set|adjust|increase|decrease)\b[^.!?]{0,65}\d+(?:\.\d+)?\s*%|\btarget\s+(?:weights?|allocations?)\b[^.!?]{0,45}\d+(?:\.\d+)?\s*%/i;
+export const AI_TRADE_INSTRUCTION =
+  /(?:목표\s*주가|매수\s*가격|매도\s*가격|price\s*target|buy\s*at|sell\s*at|즉시\s*(?:매수|매도)|(?:매수|매도)\s*하세요)/i;
 const FIELDS = [
   'summary',
   'actions',
@@ -209,13 +233,9 @@ export function validateAiNarrative(value: unknown, sources: AiSource[]): AiNarr
   )
     throw new Error('Numeric confidence is forbidden');
   // Reject allocation commands, while allowing descriptions/comparisons of observed risk percentages.
-  const allocationInstruction =
-    /\d+(?:\.\d+)?\s*%[^.!?]{0,35}(?:설정|편입|맞추|맞춰|재배분|할당|늘리|줄이|변경|조정|확대|축소)|(?:비중|배분|자산|포트폴리오)[^.!?]{0,45}\d+(?:\.\d+)?\s*%[^.!?]{0,35}(?:늘리|줄이|변경|조정|설정|편입|맞추|맞춰|재배분|할당|확대|축소|추천|권장)|(?:설정|편입|맞추|맞춰|재배분|할당|배분)[^.!?]{0,40}\d+(?:\.\d+)?\s*%|\b(?:allocate|rebalance|invest|assign|set|adjust|increase|decrease)\b[^.!?]{0,65}\d+(?:\.\d+)?\s*%|\btarget\s+(?:weights?|allocations?)\b[^.!?]{0,45}\d+(?:\.\d+)?\s*%/i;
   if (
-    allocationInstruction.test(normalizedStrings) ||
-    /(?:목표\s*주가|매수\s*가격|매도\s*가격|price\s*target|buy\s*at|sell\s*at|즉시\s*(?:매수|매도)|(?:매수|매도)\s*하세요)/i.test(
-      normalizedStrings,
-    )
+    AI_ALLOCATION_INSTRUCTION.test(normalizedStrings) ||
+    AI_TRADE_INSTRUCTION.test(normalizedStrings)
   )
     throw new Error('Disallowed AI instruction');
   return {
