@@ -87,6 +87,7 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md)의 "알림" 절과
 ## 7e/7f 연결 (2026-10-21)
 
 - **실전 주문 알림**: `src/server/trading/alerts.ts`의 `liveAlertEvent`가 유일한 매핑이다. 접수 여부 미확인은 전용 종류 `live-order-unconfirmed`(이전에는 `job-failure`로 보냈다), 권한 문제 정지와 첫 주문 거부 정지는 `algorithm-auto-stop`의 `order-permission`·`first-order-rejected` 사유로 보낸다. 주문 거부(`order-rejected`)와 체결(`fill`)은 이전과 같다. 알림 실패는 주문을 막지 않는다.
-- **위험 증가 설정 변경 알림(추가 인증 없음의 대가)**: 실전 켜기(`live-enabled`), 운용 금액 상향(`budget-raised`), 긴급 정지 해제(`emergency-stop-released`), 알고리즘 자동 정지 해제(`algorithm-stop-released`), 안전장치 완화 네 가지(`max-orders-raised`, `min-holding-lowered`, `loss-stop-loosened`, `liquidity-lowered`)가 **변경이 저장된 직후 변경 종류마다 한 번** 나간다. 줄이는 변경(긴급 정지 켜기, 실전 끄기, 한도 낮추기, 안전장치 강화)은 알리지 않는다. 문구에는 금액·수량·설정 값이 없다. 응답의 `notification(s)`가 `sent|failed|disabled`를 그대로 화면에 알린다.
-- 텔레그램 설정이 없으면 실전 작업은 시작하지 않는다(알림이 필수 안전장치). 실행 중 전송 실패는 주문을 막지 않고 기록된다.
+- **위험 증가 설정 변경 알림(추가 인증 없음의 대가)**: 실전 켜기(`live-enabled`), 운용 금액 상향(`budget-raised`), 긴급 정지 해제(`emergency-stop-released`), 알고리즘 자동 정지 해제(`algorithm-stop-released`), 실전 알고리즘 전략 변경(`live-strategy-changed`), 안전장치 완화 네 가지(`max-orders-raised`, `min-holding-lowered`, `loss-stop-loosened`, `liquidity-lowered`)가 **변경이 저장된 직후 변경 종류마다 한 번** 나간다. 줄이는 변경(긴급 정지 켜기, 실전 끄기, 한도 낮추기, 안전장치 강화)은 알리지 않는다. 문구에는 금액·수량·설정 값이 없다. 응답의 `notification(s)`가 `sent|failed|disabled`를 그대로 화면에 알린다.
+- 새 종류 `live-order-resolved`(소유자가 미확인 주문을 직접 정리함, 결과만 담음)와 자동 정지 사유 `unconfirmed-order`. 실전 자동 정지 알림에는 "보유 종목은 자동으로 팔지 않습니다" 안내가 붙는다.
+- 텔레그램이 설정되어 있지 않으면 웹 서비스는 실전 켜기·운용 금액 상향을 409로 거부하고, 실전 작업은 시작하지 않는다(알림이 필수 안전장치). 실행 중 전송 실패는 주문을 막지 않고 기록된다.
 - 테스트: `tests/notify.test.ts`(새 종류와 모든 변경 문구, 위험 값 정리), `tests/algorithms-api.test.ts`(변경마다 알림), `tests/algo-live-job.test.ts`(주문 거부·권한 정지·미확인), `tests/live-api.test.ts`(정지 해제 알림).
