@@ -1,3 +1,4 @@
+import { aiFromEnvironment } from './ai.js';
 import { FirestoreLoginThrottle, MemoryLoginThrottle } from './login-throttle.js';
 import { FirestoreCalendarRepository, MemoryCalendarRepository } from './calendar.js';
 import { tossFromEnvironment } from './toss.js';
@@ -24,6 +25,7 @@ if (!production && process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
 const app = createApp({
   store,
   production,
+  ai: aiFromEnvironment(production),
   loginThrottle: production ? new FirestoreLoginThrottle() : new MemoryLoginThrottle(),
   staticDirectory: 'dist',
   toss: tossFromEnvironment(production),

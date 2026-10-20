@@ -1,25 +1,29 @@
 # 구현·전달 상태 SOT
 
-기준: 2026-10-20 KST. 완료하지 않은 외부 연결은 완료로 표시하지 않는다.
+기준: 2026-10-20 KST. 외부 서비스의 구현·실제 검증을 구분한다.
 
-| 영역           | 구현                                                                      | 실제 연결/검증                                                                                                         |
-| -------------- | ------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| 앱/경제 캘린더 | 반응형 월·주·일·시간, 필터·상세·영향 시나리오                             | 합성 모드와 관리자 출처 등록·조회 모드 구현                                                                            |
-| 차트           | SMA/EMA/볼린저/RSI/MACD·비교·기준선·관심종목                              | 합성 기본 모드; 토스 캔들 조회 모드 구현, 실제 키 대기                                                                 |
-| 자산·전략      | 통화 분리·프라이버시·전략 계정저장·리밸런싱                               | 토스 성공 응답 시 실주식 보유잔고 표시; 공식 스펙 계약 테스트                                                          |
-| 추천           | 기간별 합성 및 실제 토스 차트·등록일정·저장전략 기반 규칙 분석, 위험·출처 | 실제 데이터 규칙 API/UI 구현; 생성형 AI·자동 뉴스 수집 미연결 명시                                                     |
-| 인증           | 관리자 등록·목록·비활성화·세션·권한·CSRF                                  | 자동 통합 테스트 완료; Firestore 실서비스 테스트 대기                                                                  |
-| 인프라         | Cloud Run 배포 CI + Firestore/WIF/NAT/고정IP Terraform                    | Terraform validate 통과. 개인 전용 프로젝트 생성, 결제 활성화 대기로 apply 미실행                                      |
-| GitHub         | public Bulgogi-Pizza/ai-investing 생성                                    | Secret Scanning/Push Protection 활성화; 초기 소스 push와 Linux 경로 수정 PR 병합 완료; 원격 앱·인프라·컨테이너 CI 통과 |
-| UI QA          | 실제 IAB 데스크톱 렌더 확인 및 Playwright                                 | 최종 재검증 결과 docs/testing/evidence.md 참조                                                                         |
+| 영역        | 구현                                                                   | 실제 연결/검증                                                                                                  |
+| ----------- | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 경제 캘린더 | 월·주·일·시간, 중요도·자산·카테고리·시장 필터, 상세·출처·영향 시나리오 | 합성 모드와 관리자 등록 조회; 한국은행·연준 RSS 수집 통합 검증 진행                                             |
+| 차트        | SMA/EMA/볼린저/RSI/MACD, 기간별 비교, 수동 매수·매도선, 관심종목       | 합성 기본 모드; 실제 토스 캔들 어댑터와 계약 테스트 완료, 키 대기                                               |
+| 자산·전략   | 통화 분리, 잔액 숨김, 계정별 전략 저장, 리밸런싱 시나리오              | 실제 주식 보유잔고 어댑터; 토스 실계좌 호출 대기                                                                |
+| 추천        | 기간별 규칙 분석, 저장전략·차트·등록일정 근거, Vertex 해설 어댑터      | 실제 토스 데이터 대기; Vertex 공개 합성 입력1회 ready 실호출 검증                                               |
+| 인증        | 관리자만 계정 생성, 비활성화, 공유 로그인 제한, 세션 폐기, CSRF        | 운영 Firestore 관리자 로그인·전략조회·로그아웃 후401 실제 통과                                                  |
+| 인프라      | Cloud Run·Firestore·WIF·NAT·고정IP·예산 알림 Terraform                 | 개인 전용 프로젝트 실제 배포; 월15,000원50/90/100% 알림, Firestore 외부 접근차단 적용                           |
+| GitHub      | public Bulgogi-Pizza/ai-investing, main 보호, 필수 CI, 배포 워크플로   | Secret Scanning/Push Protection; 보안 PR14의 필수3개 CI 통과·병합, main4b1033e의 실제 OIDC 자동배포·health 성공 |
+| 협업·QA     | 공통 AGENTS.md + Claude/Gemini 진입 문서, 기능 문서·테스트·브라우저 QA | Codex 병렬 구현 및 Claude Sonnet 독립 검토; 최종 증거는 testing/evidence.md                                     |
 
-## 외부 연결 조건
+## 운영 접속
 
-- GitHub 인증 정상. 최초 sandbox 네트워크 상태가 인증 실패처럼 보였으나 제한 밖 재확인으로 정상 확인.
-- 사용자가 지정한 개인 계정의 GCP CLI 로그인을 완료했고 전용 프로젝트 `folio-investing-60029579`를 생성했다. 개인 결제 계정이 CLOSED 상태이므로 사용자에게 결제 활성화 및 프로젝트 연결을 요청한 상태다. 유료 리소스는 생성하지 않았고 Terraform apply도 실행하지 않았다. 회사 계정이나 기존 회사 리소스는 변경하지 않았다.
-- 토스 OAuth client_id/client_secret, 계좌 시퀀스, 연결할 로컬 사용자ID 및 고정 출구 IP 허용 목록 등록 필요. 키를 채팅/저장소에 붙여 넣지 않는다.
-- 실제 뉴스/경제 일정 자동 공급자와 생성형 AI 공급자는 아직 정해지지 않았다. 등록형 일정과 검증 가능한 규칙 분석을 제공하며 미연결을 명시한다.
+- 서비스: https://ai-investing-688204744640.asia-northeast3.run.app
+- 공개 소스: https://github.com/Bulgogi-Pizza/ai-investing
+- 최초 관리자 자격증명은 gitignore된 `.local/owner-access.json`(0600)에만 있다. 원문을 공개 문서·로그·채팅에 기록하지 않는다.
+- 사용자가 지정한 개인 GCP 계정으로 전용 프로젝트를 생성하고 활성 개인 결제를 연결했다. 모든 CLI에 개인 account/project/billing-project를 명시한다. 회사 계정과 회사 리소스를 사용하지 않는다.
+
+## 남은 실제 데이터 연결 조건
+
+토스 OAuth client_id/client_secret, 계좌 시퀀스, 연결할 로컬 사용자ID를 Secret Manager로 제공하고 고정 출구 IP를 토스 허용 목록에 등록해야 한다. 실제 토스 OAuth·시세·계좌 호출은 아직 검증하지 않았다. 합성 데이터와 검증 fixture를 실데이터라고 표시하지 않는다.
 
 ## 문서 인덱스
 
-요구사항: planning/requirements.md. 시스템: architecture/system.md. 기능: implementation/{auth,integrations,calendar,charts,portfolio,recommendations}. 검증: testing/workflow.md. 운영: operations/{cloud-comparison,deployment}. 협업: agents/collaboration.md + 루트 AGENTS.md.
+요구사항: planning/requirements.md. 시스템: architecture/system.md. 기능: implementation/{auth,integrations,calendar,charts,portfolio,recommendations,news-provider,ai-provider}. 검증: testing/workflow.md. 운영: operations/{cloud-comparison,deployment}. 협업: agents/collaboration.md + 루트 AGENTS.md.

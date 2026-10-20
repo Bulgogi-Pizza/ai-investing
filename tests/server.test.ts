@@ -52,12 +52,49 @@ describe('server authorization', () => {
       '/api/portfolio',
       '/api/strategy',
       '/api/recommendations',
+      '/api/news/sources',
+      '/api/admin/news/sync',
+      '/api/calendar',
       '/api/admin/users',
     ])
       expect((await request(app).get(path)).status).toBe(401);
     expect(
       (await request(app).get('/api/strategy').set('Cookie', 'folio_session=forged')).status,
     ).toBe(401);
+  });
+  it('mounts official news behind authentication, origin and administrator checks', async () => {
+    expect(
+      (await request(app).post('/api/admin/news/sync').set('Origin', origin).send({})).status,
+    ).toBe(401);
+    const cookie = await login();
+    const sources = await request(app).get('/api/news/sources').set('Cookie', cookie);
+    expect(sources.status).toBe(200);
+    expect(sources.body.sources.map((source: { id: string }) => source.id)).toEqual([
+      'fed-press',
+      'bok-press',
+    ]);
+    expect(
+      (await request(app).post('/api/admin/news/sync').set('Cookie', cookie).send({})).status,
+    ).toBe(403);
+    expect(
+      (
+        await request(app)
+          .post('/api/admin/news/sync')
+          .set('Cookie', cookie)
+          .set('Origin', origin)
+          .send({})
+      ).status,
+    ).toBe(403);
+    const admin = await login('admin@example.test');
+    expect(
+      (
+        await request(app)
+          .post('/api/admin/news/sync')
+          .set('Cookie', admin)
+          .set('Origin', origin)
+          .send({ sourceIds: ['https://evil.test'] })
+      ).status,
+    ).toBe(400);
   });
   it('rejects unregistered, inactive and incorrect-password accounts', async () => {
     await store.revokeUser(memberId);
