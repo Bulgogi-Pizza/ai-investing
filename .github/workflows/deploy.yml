@@ -24,6 +24,9 @@ jobs:
       CLOUDSDK_BILLING_QUOTA_PROJECT: ${{ vars.GCP_PROJECT_ID }}
       REGION: asia-northeast3
       APP_ORIGIN: ${{ vars.APP_ORIGIN }}
+      AI_PROVIDER: ${{ vars.AI_PROVIDER }}
+      AI_MODEL: ${{ vars.AI_MODEL }}
+      AI_LOCATION: ${{ vars.AI_LOCATION }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -67,7 +70,7 @@ jobs:
             --port=8080 --cpu=1 --memory=512Mi --min-instances=0 --max-instances=2 \
             --concurrency=40 --timeout=30 --allow-unauthenticated \
             --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
-            --update-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN" \
+            --update-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION" \
             --quiet
           echo "deployed=true" >> "$GITHUB_OUTPUT"
       - name: Verify deployment health

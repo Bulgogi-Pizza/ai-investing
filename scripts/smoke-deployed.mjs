@@ -39,6 +39,24 @@ try {
   const portfolio = await request('/api/portfolio', { headers });
   if (![200, 503].includes(portfolio.status))
     throw new Error(`Owner provider status HTTP${portfolio.status}`);
+  if (process.argv.includes('--sync-news')) {
+    const sources = await request('/api/news/sources', { headers });
+    if (sources.status !== 200) throw new Error(`News sources HTTP${sources.status}`);
+    const sync = await request('/api/admin/news/sync', {
+      method: 'POST',
+      headers: { ...headers, 'Content-Type': 'application/json' },
+      body: '{}',
+    });
+    const result = await sync.json();
+    console.log(
+      JSON.stringify({
+        newsSync: sync.status,
+        count: result.count,
+        sources: result.sources?.map(({ id, status, count }) => ({ id, status, count })),
+      }),
+    );
+    if (sync.status !== 200 || !(result.count > 0)) throw new Error('No official news stored');
+  }
   console.log(
     JSON.stringify({
       health: 200,

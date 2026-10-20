@@ -3,6 +3,7 @@ import { Firestore } from '@google-cloud/firestore';
 
 export interface EconomicEvent {
   id: number;
+  eventKind?: 'scheduled' | 'news-release';
   date: string;
   time: string;
   title: string;
@@ -84,6 +85,12 @@ export function cleanEvent(input: unknown): EconomicEvent | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const item = input as Record<string, unknown>;
   if (
+    item.eventKind !== undefined &&
+    item.eventKind !== 'scheduled' &&
+    item.eventKind !== 'news-release'
+  )
+    return null;
+  if (
     !Number.isSafeInteger(item.id) ||
     Number(item.id) <= 0 ||
     !realDate(item.date) ||
@@ -143,6 +150,7 @@ export function cleanEvent(input: unknown): EconomicEvent | null {
   // Explicit projection excludes account identifiers and administrative metadata from reads.
   return {
     id: item.id as number,
+    eventKind: item.eventKind === 'news-release' ? 'news-release' : 'scheduled',
     date: item.date,
     time: item.time,
     title: item.title,

@@ -2039,3 +2039,96 @@ footer span {
     font-size: 8px;
   }
 }
+/* Keep every account control reachable when an administrator uses a narrow screen. */
+@media (max-width: 760px) {
+  .topbar .breadcrumb {
+    display: none;
+  }
+  .topbar {
+    justify-content: flex-end;
+  }
+  .top-actions {
+    min-width: 0;
+    flex: 1;
+    justify-content: flex-end;
+  }
+}
+@media (max-width: 600px) {
+  .top-actions {
+    justify-content: space-between;
+  }
+  .topbar .search-box {
+    width: 24px;
+    min-width: 24px;
+    padding: 4px;
+  }
+  .top-actions > .button {
+    padding: 6px 7px;
+    font-size: 8px;
+  }
+}
+/* Provider explanations stay readable on phones without changing other feature layouts. */
+@media (max-width: 600px) {
+  .detail-card[aria-label='공식 뉴스 수집 관리'],
+  .invest-ai-narrative,
+  .invest-ai-pending,
+  .invest-news-evidence {
+    font-size: 12px;
+    line-height: 1.8;
+    overflow-wrap: anywhere;
+  }
+  .detail-card[aria-label='공식 뉴스 수집 관리'] .subtle {
+    font-size: 11px;
+    color: #7b8190;
+    line-height: 1.9;
+  }
+  .detail-card[aria-label='공식 뉴스 수집 관리'] .news-sync-summary p,
+  .detail-card[aria-label='공식 뉴스 수집 관리'] .form-error,
+  .invest-ai-narrative > p,
+  .invest-ai-narrative .invest-live-list li,
+  .invest-ai-pending > p,
+  .invest-news-evidence > p {
+    font-size: 12px;
+    line-height: 1.85;
+  }
+  .detail-card[aria-label='공식 뉴스 수집 관리'] .tag-row a {
+    font-size: 11px !important;
+    min-width: 0;
+    max-width: 100%;
+    overflow-wrap: anywhere;
+  }
+  .detail-card[aria-label='공식 뉴스 수집 관리'] .button {
+    font-size: 11px;
+  }
+  .invest-ai-narrative .invest-section-title p,
+  .invest-ai-narrative .invest-footnote,
+  .invest-ai-narrative .invest-live-empty,
+  .invest-ai-pending .invest-footnote,
+  .invest-news-evidence .invest-section-title p,
+  .invest-news-evidence .invest-footnote,
+  .invest-news-evidence .invest-live-empty,
+  .invest-news-evidence .invest-connection,
+  .invest-ai-narrative .invest-event-evidence small,
+  .invest-news-evidence .invest-event-evidence small {
+    font-size: 11px;
+    line-height: 1.85;
+    color: #7b8190;
+  }
+  .invest-ai-narrative .invest-event-evidence > div,
+  .invest-news-evidence .invest-event-evidence > div {
+    flex-wrap: wrap;
+    gap: 9px;
+  }
+  .invest-ai-narrative .invest-event-evidence > div > span,
+  .invest-news-evidence .invest-event-evidence > div > span {
+    min-width: 0;
+    max-width: 100%;
+  }
+  .invest-ai-narrative .invest-event-evidence strong,
+  .invest-news-evidence .invest-event-evidence strong,
+  .invest-ai-narrative .invest-event-evidence a,
+  .invest-news-evidence .invest-event-evidence a {
+    font-size: 12px;
+    overflow-wrap: anywhere;
+  }
+}

@@ -50,7 +50,7 @@ variable "budget_currency" {
 }
 
 locals {
-  services = toset(["cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com"])
+  services = toset(["aiplatform.googleapis.com", "cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com"])
 }
 resource "google_project_service" "api" {
   for_each           = local.services
@@ -175,4 +175,18 @@ resource "google_artifact_registry_repository_iam_member" "deployer_registry" {
   repository = google_artifact_registry_repository.app.repository_id
   role       = "roles/artifactregistry.writer"
   member     = "serviceAccount:${google_service_account.deploy.email}"
+}
+
+resource "google_project_iam_member" "runtime_ai" {
+  project = var.project_id
+  role    = "roles/aiplatform.user"
+  member  = "serviceAccount:${google_service_account.runtime.email}"
+}
+resource "google_firestore_field" "ai_usage_ttl" {
+  project    = var.project_id
+  database   = google_firestore_database.app.name
+  collection = "aiUsage"
+  field      = "ttlAt"
+  ttl_config {}
+  index_config {}
 }

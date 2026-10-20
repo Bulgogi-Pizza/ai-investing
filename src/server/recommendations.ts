@@ -1,4 +1,4 @@
-import { cleanEvent, type CalendarRepository } from './calendar.js';
+import { cleanEvent, type CalendarRepository, type EconomicEvent } from './calendar.js';
 import type { Strategy } from './store.js';
 import { ProviderError, type TossClient } from './toss.js';
 
@@ -18,6 +18,32 @@ export function validRecommendationQuery(
     typeof symbol === 'string' &&
     /^[A-Za-z0-9.\-]{1,30}$/.test(symbol)
   );
+}
+function eventEvidence(
+  event: EconomicEvent,
+): Pick<
+  EconomicEvent,
+  | 'id'
+  | 'eventKind'
+  | 'date'
+  | 'time'
+  | 'title'
+  | 'importance'
+  | 'sourceName'
+  | 'sourceUrl'
+  | 'factualObservedAt'
+> {
+  return {
+    id: event.id,
+    eventKind: event.eventKind ?? 'scheduled',
+    date: event.date,
+    time: event.time,
+    title: event.title,
+    importance: event.importance,
+    sourceName: event.sourceName,
+    sourceUrl: event.sourceUrl,
+    factualObservedAt: event.factualObservedAt,
+  };
 }
 export async function createRecommendation({
   userId,
@@ -45,9 +71,12 @@ export async function createRecommendation({
   const to = new Date(Date.parse(`${from}T00:00:00Z`) + horizon.calendarDays * 86400000)
     .toISOString()
     .slice(0, 10);
-  const [market, records] = await Promise.all([
+  const newsCutoff = now.getTime() - horizon.calendarDays * 86400000;
+  const newsFrom = new Date(newsCutoff + 9 * 3600000).toISOString().slice(0, 10);
+  const [market, records, newsRecords] = await Promise.all([
     toss.candles(symbol, '1d', 90),
     calendar.list(from, to),
+    calendar.list(newsFrom, from),
   ]);
   const candles = market.candles;
   const closes = candles.map((candle) => Number(candle.close));
@@ -88,7 +117,9 @@ export async function createRecommendation({
   const validatedEvents = records
     .slice(0, 2000)
     .map(cleanEvent)
-    .filter((event) => event !== null);
+    .filter(
+      (event): event is EconomicEvent => event !== null && event.eventKind !== 'news-release',
+    );
   const relevantEvents = validatedEvents.filter(
     (event) =>
       event.country === relevantMarket ||
@@ -111,6 +142,30 @@ export async function createRecommendation({
       }
     })
     .sort((a, b) => `${a.date}T${a.time}`.localeCompare(`${b.date}T${b.time}`));
+  const validatedNews = newsRecords
+    .slice(0, 2000)
+    .map(cleanEvent)
+    .filter(
+      (event): event is EconomicEvent => event !== null && event.eventKind === 'news-release',
+    );
+  const relevantNews = validatedNews.filter(
+    (event) =>
+      event.country === relevantMarket ||
+      event.country === '글로벌' ||
+      event.assets.some((asset) => asset.toUpperCase() === symbol.toUpperCase()),
+  );
+  const recentNews = [
+    ...new Map(
+      relevantNews
+        .filter((event) => {
+          const published = Date.parse(`${event.date}T${event.time}:00+09:00`);
+          return (
+            Number.isFinite(published) && published >= newsCutoff && published <= now.getTime()
+          );
+        })
+        .map((event) => [event.id, event]),
+    ).values(),
+  ].sort((a, b) => `${b.date}T${b.time}`.localeCompare(`${a.date}T${a.time}`));
   const highImpact = events.some((event) => event.importance === 3);
   const action =
     returnPercent <= -thresholdPercent || rsi14 >= 70 || highImpact
@@ -149,7 +204,7 @@ export async function createRecommendation({
       action,
       title: titles[action],
       thresholdPercent,
-      rationale: `${horizon.tradingDays}거래일 수익률 ${returnPercent.toFixed(2)}%, SMA20 대비 ${latestClose >= sma20 ? '상회' : '하회'}, RSI14 ${rsi14.toFixed(1)}를 저장된 위험성향 임계치 ${thresholdPercent}% 및 등록된 중요 일정 ${highImpact ? '있음' : '없음'}과 비교했습니다. 자동 매매 지시가 아닌 점검 규칙입니다.`,
+      rationale: `${horizon.tradingDays}거래일 수익률 ${returnPercent.toFixed(2)}%, SMA20 대비 ${latestClose >= sma20 ? '상회' : '하회'}, RSI14 ${rsi14.toFixed(1)}를 저장된 위험성향 임계치 ${thresholdPercent}% 및 등록된 중요 일정 ${highImpact ? '있음' : '없음'}과 비교했습니다. 최근 공개 보도자료 ${recentNews.length}건을 별도 근거로 제공하며 낮은 확신의 제목 분류만으로 판단을 변경하지 않습니다. 자동 매매 지시가 아닌 점검 규칙입니다.`,
     },
     metrics: {
       returnPercent,
@@ -167,19 +222,22 @@ export async function createRecommendation({
         relevanceRule:
           '6자리 숫자 종목은 한국, 그 외는 미국 시장으로 분류하고 같은 시장·글로벌·assets에 종목이 명시된 일정만 포함합니다. 거시 일정의 직접적인 영향은 보장하지 않습니다.',
         excludedCount,
-        events: events.slice(0, 50).map((event) => ({
-          id: event.id,
-          date: event.date,
-          time: event.time,
-          title: event.title,
-          importance: event.importance,
-          sourceName: event.sourceName,
-          sourceUrl: event.sourceUrl,
-          factualObservedAt: event.factualObservedAt,
-        })),
+        events: events.slice(0, 50).map(eventEvidence),
         truncated: records.length > 2000 || events.length > 50,
         coverageWarning:
           '관리자가 등록한 일정만 참조하며 전체 금융 뉴스나 모든 시장 이벤트를 포괄하지 않습니다. 등록 일정이 없다는 것은 위험이 없다는 뜻이 아닙니다.',
+      },
+      news: {
+        from: newsFrom,
+        to: from,
+        source: 'registered-news' as const,
+        relevanceRule:
+          '예정 일정과 같은 시장 관련성 기준을 사용하되, news-release로 구분된 최근 공개 보도자료만 포함합니다.',
+        excludedCount: validatedNews.length - relevantNews.length,
+        events: recentNews.slice(0, 50).map(eventEvidence),
+        truncated: newsRecords.length > 2000 || recentNews.length > 50,
+        coverageWarning:
+          '일·주·월에 따라 최근1·7·30일의 공개 보도자료를 별도로 확인합니다. 게시시각은 미래 지표 발표 일정이 아니며 제목 기반 중요도는 낮은 확신의 추정입니다. 전체 금융 뉴스나 기사 본문을 수집하지 않습니다.',
       },
     },
     stockExposureByCurrency,
@@ -191,6 +249,7 @@ export async function createRecommendation({
       '생성형 AI 또는 전문가 판단이 아닌 설명 가능한 규칙 계산입니다. 예측 정확도나 수익 확률을 산출하지 않습니다.',
       'SMA20·RSI14와 과거 수익률은 후행 지표이며 미래 수익을 보장하지 않습니다. RSI14는 최근14개 변화의 단순 합산 방식입니다.',
       '주식 보유액의 통화별 내부 비중만 제시합니다. 환율 없이 KRW와 USD를 합산하지 않으며 현금·채권·옵션이 제외되어 전체 자산 배분이나 리밸런싱으로 해석할 수 없습니다.',
+      '최근 보도자료는 게시 시각 기준의 별도 근거이며 영향 방향을 추정하지 않습니다. 제목 기반 중요도만으로 위험 판단을 변경하지 않습니다.',
       '비용·세금·유동성·기업 공시와 전체 뉴스는 반영하지 않았습니다. 실제 주문을 실행하지 않습니다.',
     ],
   };

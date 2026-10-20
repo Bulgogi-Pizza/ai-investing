@@ -41,7 +41,30 @@ const periods = {
     text: '투자 기간과 비교 지수를 다시 확인하고, 비용과 세금을 반영한 정기 리밸런싱 계획을 세우는 시나리오입니다.',
   },
 };
+type AiNarrative =
+  | {
+      status: 'ready';
+      type: 'llm';
+      provider: 'vertex';
+      model: string;
+      asOf: string;
+      summary: string;
+      actions: string[];
+      counterScenario: string;
+      dataGaps: string[];
+      confidenceExplanation: string;
+      sourceIds: string[];
+      sources: { id: string; title: string; url?: string }[];
+    }
+  | {
+      status: 'disabled' | 'unavailable';
+      type: 'llm';
+      provider: 'vertex';
+      model?: string;
+      message: string;
+    };
 interface LiveInsight {
+  ai?: AiNarrative;
   engine: 'rules-v1';
   dataMode: 'live';
   asOf: string;
@@ -65,6 +88,7 @@ interface LiveInsight {
     latestTimestamp: string;
   };
   evidence: {
+    news?: LiveInsight['evidence']['calendar'];
     market: { source: string; asOf: string; candles: { timestamp: string; currency?: string }[] };
     calendar: {
       from: string;
@@ -111,13 +135,80 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
           <span>{insight.symbol}</span>
           <span>{insight.horizon.tradingDays}거래일 관찰</span>
           <span>성향별 기준 {decision.thresholdPercent}%</span>
-          <span>{insight.engine} · LLM 미사용</span>
+          <span>{insight.engine} · 이 규칙 카드 LLM 미사용</span>
         </div>
         <div className="invest-insight-disclaimer">
           <Info size={15} /> 실제 입력의 결정 규칙 분석이며 미래 수익이나 투자 성공 확률을 예측하지
           않습니다.
         </div>
       </section>
+      {insight.ai?.status === 'ready' ? (
+        <section className="invest-card invest-ai-narrative" aria-label="Gemini AI 해석">
+          <div className="invest-section-title">
+            <div>
+              <h2>
+                <Sparkles size={18} /> Gemini AI 해석
+              </h2>
+              <p>
+                Vertex AI · {insight.ai.model} · {insight.horizon.tradingDays}거래일 관찰 ·{' '}
+                {kst(insight.ai.asOf)} KST
+              </p>
+            </div>
+          </div>
+          <p>{insight.ai.summary}</p>
+          <h3>검토할 행동</h3>
+          <ul className="invest-live-list">
+            {insight.ai.actions.map((action, index) => (
+              <li key={index}>{action}</li>
+            ))}
+          </ul>
+          <h3>반대 시나리오</h3>
+          <p>{insight.ai.counterScenario}</p>
+          <h3>부족한 데이터</h3>
+          {insight.ai.dataGaps.length ? (
+            <ul className="invest-live-list">
+              {insight.ai.dataGaps.map((gap, index) => (
+                <li key={index}>{gap}</li>
+              ))}
+            </ul>
+          ) : (
+            <p className="invest-live-empty">
+              모델이 추가 데이터 공백을 보고하지 않았습니다. 전체 데이터의 완전성을 뜻하지 않습니다.
+            </p>
+          )}
+          <p className="invest-footnote">불확실성: {insight.ai.confidenceExplanation}</p>
+          <div className="invest-event-evidence">
+            {insight.ai.sources.map((source) => (
+              <div key={source.id}>
+                <span>
+                  <strong>{source.title}</strong>
+                  <small>근거 {source.id}</small>
+                </span>
+                {source.url?.startsWith('https://') && (
+                  <a href={source.url} target="_blank" rel="noopener noreferrer">
+                    원문 확인 ↗
+                  </a>
+                )}
+              </div>
+            ))}
+          </div>
+          <p className="invest-footnote">
+            위 규칙 분석과 아래 출처에 근거한 모델 해석입니다. 추정과 해석에는 오류가 있을 수 있으며
+            자동 주문이나 전략 변경을 수행하지 않습니다.
+          </p>
+        </section>
+      ) : (
+        <section className="invest-card invest-ai-pending" role="status">
+          <h2>LLM 연결 대기</h2>
+          <p>{insight.ai?.message ?? '이 응답에는 생성형 AI 해석이 포함되지 않았습니다.'}</p>
+          <p className="invest-footnote">
+            {insight.ai?.status === 'unavailable'
+              ? 'AI 제공자 응답을 사용할 수 없습니다.'
+              : 'AI 제공자 설정이 비활성화되었거나 준비되지 않았습니다.'}{' '}
+            규칙 기반 분석은 별도로 확인할 수 있습니다.
+          </p>
+        </section>
+      )}
       <div className="invest-evidence-grid">
         <section className="invest-card">
           <div className="invest-evidence-icon blue">
@@ -148,7 +239,8 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
           </p>
           <div className="invest-evidence-note">
             관리자 출처 등록 일정 {evidence.calendar.events.length}건<br />
-            자동 뉴스 수집은 사용하지 않습니다.
+            등록 자료에는 공식 발표 뉴스가 포함될 수 있습니다. 뉴스는 발표 시각 기준이며 미래 일정이
+            아닙니다.
           </div>
           <span className="invest-pill">{evidence.calendar.source}</span>
         </section>
@@ -174,6 +266,59 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
           <span className="invest-pill">내 계정에 저장된 전략</span>
         </section>
       </div>
+      {evidence.news && (
+        <section className="invest-card invest-news-evidence" aria-label="공식 발표 뉴스 근거">
+          <div className="invest-section-title">
+            <div>
+              <h2>공식 발표 뉴스 근거</h2>
+              <p>
+                {evidence.news.from} ~ {evidence.news.to} · 발표 시각 기준의 최근 뉴스{' '}
+                {evidence.news.events.length}건
+              </p>
+            </div>
+          </div>
+          <p className="invest-footnote">
+            미래 경제 일정이 아닙니다. 분류·중요도·영향 태그는 규칙 추정이며 전체 뉴스나 검증된 투자
+            방향을 뜻하지 않습니다.
+          </p>
+          {evidence.news.coverageWarning && (
+            <div className="invest-connection">
+              <Info size={15} />
+              <span>{evidence.news.coverageWarning}</span>
+            </div>
+          )}
+          {evidence.news.truncated && (
+            <p role="status">뉴스 조회 한도를 초과하여 일부 자료만 분석했습니다.</p>
+          )}
+          {evidence.news.relevanceRule && (
+            <p className="invest-live-empty">뉴스 관련성 기준: {evidence.news.relevanceRule}</p>
+          )}
+          {evidence.news.events.length ? (
+            <div className="invest-event-evidence">
+              {evidence.news.events.map((news) => (
+                <div key={news.id}>
+                  <span>
+                    <strong>{news.title}</strong>
+                    <small>
+                      발표 {news.date} {news.time} KST
+                    </small>
+                  </span>
+                  <span>
+                    <a href={news.sourceUrl} target="_blank" rel="noopener noreferrer">
+                      {news.sourceName} ↗
+                    </a>
+                    <small>확인 {kst(news.factualObservedAt)} KST</small>
+                  </span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="invest-live-empty">
+              이 기간에 분석한 공식 발표 뉴스가 없습니다. 시장 위험이 없다는 뜻은 아닙니다.
+            </p>
+          )}
+        </section>
+      )}
       <section className="invest-card">
         <div className="invest-section-title">
           <div>
@@ -320,6 +465,32 @@ export default function Recommendations() {
           !Array.isArray(body.stockExposureByCurrency)
         )
           throw new Error('분석 응답 형식을 확인하지 못했습니다.');
+        if (
+          body.ai?.status === 'ready' &&
+          (!body.ai.model ||
+            !Number.isFinite(Date.parse(body.ai.asOf)) ||
+            typeof body.ai.summary !== 'string' ||
+            typeof body.ai.counterScenario !== 'string' ||
+            typeof body.ai.confidenceExplanation !== 'string' ||
+            !Array.isArray(body.ai.actions) ||
+            !body.ai.actions.every((item: unknown) => typeof item === 'string') ||
+            !Array.isArray(body.ai.dataGaps) ||
+            !body.ai.dataGaps.every((item: unknown) => typeof item === 'string') ||
+            !Array.isArray(body.ai.sources) ||
+            !body.ai.sources.every(
+              (source: { id?: unknown; title?: unknown; url?: unknown }) =>
+                typeof source?.id === 'string' &&
+                typeof source.title === 'string' &&
+                (source.url === undefined || typeof source.url === 'string'),
+            ))
+        ) {
+          body.ai = {
+            status: 'unavailable',
+            type: 'llm',
+            provider: 'vertex',
+            message: 'AI 해석의 응답 형식을 확인하지 못했습니다.',
+          };
+        }
         if (!controller.signal.aborted) setLive(body);
       } catch (error) {
         if (!controller.signal.aborted)
@@ -383,7 +554,7 @@ export default function Recommendations() {
         <span className="invest-demo">
           {sourceMode === 'demo'
             ? 'AI 연결 대기 · 규칙 기반 예시'
-            : '내 데이터 · 규칙 기반 · LLM 미사용'}
+            : '내 데이터 · 규칙 분석 + 선택적 AI 해석'}
         </span>
       </div>
       <div className="invest-source-controls">
@@ -422,7 +593,7 @@ export default function Recommendations() {
           {sourceMode === 'demo' ? (
             <>시장 입력은 합성 데이터입니다. {strategySource} · 주문 없는 규칙 분석입니다.</>
           ) : (
-            '내 계정의 저장 전략, 토스 가격 및 관리자 등록 일정을 서버에서 분석합니다. 자동 뉴스 수집과 LLM은 사용하지 않습니다.'
+            '내 계정의 저장 전략, 토스 가격 및 출처가 등록된 자료를 서버에서 분석합니다. 생성형 AI가 연결된 경우 근거를 포함한 해석을 별도 카드로 표시합니다.'
           )}
         </span>
       </div>

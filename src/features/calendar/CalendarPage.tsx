@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import {
   Activity,
   ArrowRight,
@@ -29,6 +29,80 @@ import {
 const flag = (country: string) => (country === '한국' ? '🇰🇷' : country === '미국' ? '🇺🇸' : '🌐');
 export default function CalendarPage({ search, isAdmin }: { search: string; isAdmin: boolean }) {
   const [view, setView] = useState('월간');
+  const [newsSources, setNewsSources] = useState<
+    { id: string; name: string; feedUrl: string; country: string; coverage: string }[]
+  >([]);
+  const [newsSourceWarnings, setNewsSourceWarnings] = useState<string[]>([]);
+  const [newsError, setNewsError] = useState('');
+  const [newsLoading, setNewsLoading] = useState(false);
+  const [newsSummary, setNewsSummary] = useState<{
+    count: number;
+    sources: { id: string; name: string; status: string; count: number }[];
+    warnings: string[];
+  } | null>(null);
+  const newsRequest = useRef<AbortController | null>(null);
+  useEffect(() => {
+    if (!isAdmin) return;
+    const controller = new AbortController();
+    fetch('/api/news/sources', { signal: controller.signal })
+      .then(async (response) => {
+        const body = await response.json();
+        if (!response.ok)
+          throw new Error(body.error?.message ?? '공식 뉴스 출처를 불러오지 못했습니다.');
+        if (!Array.isArray(body.sources)) throw new Error('뉴스 출처 응답을 확인하지 못했습니다.');
+        if (!controller.signal.aborted) {
+          setNewsSources(body.sources);
+          setNewsSourceWarnings(Array.isArray(body.warnings) ? body.warnings : []);
+        }
+      })
+      .catch((error) => {
+        if (!controller.signal.aborted)
+          setNewsError(error instanceof Error ? error.message : '뉴스 출처 조회 실패');
+      });
+    return () => {
+      controller.abort();
+      newsRequest.current?.abort();
+    };
+  }, [isAdmin]);
+  async function syncNews() {
+    newsRequest.current?.abort();
+    const controller = new AbortController();
+    newsRequest.current = controller;
+    setNewsLoading(true);
+    setNewsError('');
+    setNewsSummary(null);
+    try {
+      const response = await fetch('/api/admin/news/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify(
+          newsSources.length ? { sourceIds: newsSources.map((source) => source.id) } : {},
+        ),
+      });
+      const body = await response.json();
+      if (controller.signal.aborted) return;
+      if (
+        Array.isArray(body.sources) &&
+        Array.isArray(body.warnings) &&
+        typeof body.count === 'number'
+      )
+        setNewsSummary({ count: body.count, sources: body.sources, warnings: body.warnings });
+      if (!response.ok) throw new Error(body.error?.message ?? '공식 뉴스를 수집하지 못했습니다.');
+      if (typeof body.count !== 'number' || body.count < 0)
+        throw new Error('뉴스 수집 결과를 확인하지 못했습니다.');
+      if (body.count > 0) {
+        setSourceMode('registered');
+        setCalendarReload((value) => value + 1);
+      }
+    } catch (error) {
+      if (!controller.signal.aborted)
+        setNewsError(error instanceof Error ? error.message : '뉴스 수집에 실패했습니다.');
+    } finally {
+      if (!controller.signal.aborted) setNewsLoading(false);
+    }
+  }
+
   const [sourceMode, setSourceMode] = useState<'demo' | 'registered'>('demo');
   const [registered, setRegistered] = useState<MarketEvent[]>([]);
   const [calendarLoading, setCalendarLoading] = useState(false);
@@ -277,7 +351,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
         <span>
           {sourceMode === 'demo'
             ? '2026년 10월의 합성 예시입니다.'
-            : '관리자가 출처를 확인해 등록한 일정입니다. 자동 뉴스 수집은 연결 전입니다.'}
+            : '출처를 포함한 등록 일정과 공식 발표 뉴스입니다. 뉴스의 날짜는 발표 시각 기준입니다.'}
         </span>
         {isAdmin && (
           <button
@@ -291,6 +365,78 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           </button>
         )}
       </div>
+      {isAdmin && (
+        <section
+          className="detail-card"
+          style={{ marginBottom: 15 }}
+          aria-label="공식 뉴스 수집 관리"
+        >
+          <div className="card-heading">
+            <h3>공식 발표 뉴스</h3>
+            <button className="button small" disabled={newsLoading} onClick={() => void syncNews()}>
+              {newsLoading ? '공식 뉴스 수집 중…' : '공식 뉴스 수집'}
+            </button>
+          </div>
+          <p className="subtle">
+            발표 시각 기준 뉴스입니다. 미래 경제 일정이 아니며 분류·중요도·영향 자산은 규칙으로
+            추정합니다. 전체 시장 뉴스를 포함하지 않습니다.
+          </p>
+          {newsSources.length > 0 && (
+            <div className="tag-row">
+              {newsSources.map((source) => (
+                <a
+                  key={source.id}
+                  href={source.feedUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  title={source.coverage}
+                  style={{ fontSize: 9, color: '#806aab' }}
+                >
+                  {source.name} ↗
+                </a>
+              ))}
+            </div>
+          )}
+          {newsSourceWarnings.map((warning, index) => (
+            <p key={index} className="subtle">
+              {warning}
+            </p>
+          ))}
+          {newsLoading && (
+            <p role="status" className="subtle">
+              공식 RSS 출처를 확인하고 있습니다.
+            </p>
+          )}
+          {newsError && (
+            <div role="alert" className="form-error">
+              {newsError}
+            </div>
+          )}
+          {newsSummary && (
+            <div className="news-sync-summary" role="status">
+              <p className="subtle">
+                추가·갱신 {newsSummary.count}건 · 동일 뉴스 재수집은 신규 기사 수가 아닙니다.
+              </p>
+              {newsSummary.sources.map((source) => (
+                <p key={source.id} className="subtle">
+                  {source.name} ·{' '}
+                  {source.status === 'failed'
+                    ? '수집 실패'
+                    : source.status === 'cached'
+                      ? '캐시 사용'
+                      : '수집 완료'}{' '}
+                  · {source.count}건
+                </p>
+              ))}
+              {newsSummary.warnings.map((warning, index) => (
+                <p key={index} className="subtle">
+                  {warning}
+                </p>
+              ))}
+            </div>
+          )}
+        </section>
+      )}
       {calendarLoading && (
         <div className="data-notice" role="status">
           등록 일정을 불러오는 중…

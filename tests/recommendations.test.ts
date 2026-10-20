@@ -192,6 +192,47 @@ describe('actual-input rule recommendations', () => {
     expect(relevant.evidence.calendar.events.map((item) => item.id)).toEqual([4, 5]);
     expect(relevant.decision.action).toBe('review-risk');
   });
+  it('keeps recent published news separate from upcoming events without heuristic action flips', async () => {
+    const calendar = new MemoryCalendarRepository();
+    await calendar.upsert(
+      [
+        {
+          ...event,
+          id: 30,
+          eventKind: 'news-release',
+          date: '2026-10-19',
+          time: '15:00',
+          country: '미국',
+        },
+        { ...event, id: 31, eventKind: 'news-release', date: '2026-10-20', time: '11:00' },
+        { ...event, id: 32, eventKind: 'news-release', date: '2026-10-20', time: '13:00' },
+        { ...event, id: 33, date: '2026-10-20', time: '11:00' },
+        { ...event, id: 34, eventKind: 'news-release', date: '2026-10-19', time: '11:00' },
+        {
+          ...event,
+          id: 36,
+          eventKind: 'news-release',
+          date: '2026-10-19',
+          time: '15:00',
+          country: '글로벌',
+        },
+      ],
+      'admin',
+    );
+    const daily = await run(provider(), 'daily', strategy, calendar);
+    expect(daily.evidence.calendar.events).toEqual([]);
+    expect(daily.evidence.news.events.map((item) => item.id)).toEqual([31, 36]);
+    expect(daily.evidence.news.events.every((item) => item.eventKind === 'news-release')).toBe(
+      true,
+    );
+    expect(daily.evidence.news.excludedCount).toBe(1);
+    expect(daily.evidence.news.coverageWarning).toContain('미래 지표 발표 일정이 아니며');
+    expect(daily.decision.action).toBe('hold-plan');
+    expect(daily.decision.rationale).toContain('최근 공개 보도자료 2건');
+    const weekly = await run(provider(), 'weekly', strategy, calendar);
+    expect(weekly.evidence.news.events.map((item) => item.id)).toEqual([31, 36, 34]);
+    expect(weekly.decision.action).toBe('hold-plan');
+  });
   it('keeps KRW and USD stock weights separate and never claims total allocation', async () => {
     const result = await run();
     expect(

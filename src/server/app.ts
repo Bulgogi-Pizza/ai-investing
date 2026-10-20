@@ -16,6 +16,8 @@ import {
   MemoryCalendarRepository,
   type CalendarRepository,
 } from './calendar.js';
+import { createNewsRouter } from './news.js';
+import type { aiFromEnvironment } from './ai.js';
 import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
 import { ProviderError, type TossClient } from './toss.js';
@@ -29,6 +31,7 @@ export type AppOptions = {
   toss?: TossClient;
   calendarRepository?: CalendarRepository;
   loginThrottle?: LoginThrottle;
+  ai?: ReturnType<typeof aiFromEnvironment>;
 };
 const publicUser = (user: User) => ({ id: user.id, email: user.email, role: user.role });
 const failure = (res: Response, status: number, code: string, message: string) =>
@@ -336,18 +339,18 @@ export function createApp(options: AppOptions = {}) {
         failure(res, 409, 'STRATEGY_REQUIRED', '추천 전에 내 계정 전략을 저장하세요.');
         return;
       }
-      res.json(
-        await createRecommendation({
-          userId: res.locals.user.id,
-          strategy,
-          period,
-          symbol: symbol as string,
-          toss: options.toss,
-          calendar: calendarRepository,
-        }),
-      );
+      const rules = await createRecommendation({
+        userId: res.locals.user.id,
+        strategy,
+        period,
+        symbol: symbol as string,
+        toss: options.toss,
+        calendar: calendarRepository,
+      });
+      res.json(options.ai ? await options.ai.enrich(rules, res.locals.user.id) : rules);
     },
   );
+  app.use(createNewsRouter({ repository: calendarRepository }));
   app.use(
     createCalendarRouter({
       repository: calendarRepository,
