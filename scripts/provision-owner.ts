@@ -16,7 +16,13 @@ if (existsSync(destination))
   throw new Error('Owner access file already exists; refusing duplicate bootstrap');
 const token = execFileSync(
   'gcloud',
-  ['auth', 'print-access-token', `--account=${config.account}`],
+  [
+    'auth',
+    'print-access-token',
+    `--account=${config.account}`,
+    `--project=${config.project}`,
+    `--billing-project=${config.project}`,
+  ],
   { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] },
 ).trim();
 const id = randomUUID();

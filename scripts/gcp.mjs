@@ -20,10 +20,19 @@ const action = process.argv[2];
 if (!['doctor', 'plan', 'apply'].includes(action) || process.argv.length !== 3)
   throw new Error('Usage: node scripts/gcp.mjs doctor|plan|apply');
 const gcloud = (args) =>
-  execFileSync('gcloud', [...args, `--account=${config.account}`], {
-    encoding: 'utf8',
-    stdio: ['ignore', 'pipe', 'inherit'],
-  }).trim();
+  execFileSync(
+    'gcloud',
+    [
+      ...args,
+      `--account=${config.account}`,
+      `--project=${config.project}`,
+      `--billing-project=${config.project}`,
+    ],
+    {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'inherit'],
+    },
+  ).trim();
 const billingEnabled = () =>
   gcloud(['billing', 'projects', 'describe', config.project, '--format=value(billingEnabled)']) ===
   'True';

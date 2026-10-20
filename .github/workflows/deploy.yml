@@ -20,6 +20,8 @@ jobs:
       id-token: write
     env:
       PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      CLOUDSDK_CORE_PROJECT: ${{ vars.GCP_PROJECT_ID }}
+      CLOUDSDK_BILLING_QUOTA_PROJECT: ${{ vars.GCP_PROJECT_ID }}
       REGION: asia-northeast3
       APP_ORIGIN: ${{ vars.APP_ORIGIN }}
     steps:
@@ -28,6 +30,7 @@ jobs:
           ref: ${{ github.event.workflow_run.head_sha }}
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
+          project_id: ${{ vars.GCP_PROJECT_ID }}
           workload_identity_provider: ${{ vars.GCP_WORKLOAD_IDENTITY_PROVIDER }}
           service_account: ${{ vars.GCP_DEPLOY_SERVICE_ACCOUNT }}
       - uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
