@@ -113,3 +113,48 @@ jobs:
             --project="$PROJECT" --region="$REGION" \
             --member="serviceAccount:investing-scheduler@$PROJECT.iam.gserviceaccount.com" \
             --role=roles/run.invoker --quiet >/dev/null
+      # Morning calendar job (stage 6b): same image digest, service account and VPC as the snapshot
+      # job. It needs no Toss secrets. FRED/ECOS/Telegram secrets are attached only when the service
+      # is connected to them with numeric versions; a missing one only limits what the job can do
+      # (recorded as a skipped step), it never blocks the deployment. The AI step stays off:
+      # MORNING_AI_ENABLED is false here until the user approves the monthly AI cost.
+      - name: Deploy morning calendar job
+        if: steps.deploy.outputs.deployed == 'true'
+        run: |
+          set -euo pipefail
+          JOB=investing-morning-calendar
+          # Reuse the exact numeric secret versions the service is connected to; no value is read.
+          SECRETS=$(gcloud run services describe ai-investing --region="$REGION" --project="$PROJECT" --format=json | jq -r '
+            [.spec.template.spec.containers[0].env[]?
+              | select(.name | IN("FRED_API_KEY", "ECOS_API_KEY", "TELEGRAM_BOT_TOKEN", "TELEGRAM_CHAT_ID"))
+              | select(.valueFrom.secretKeyRef != null)
+              | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"
+              | select(test("^(FRED_API_KEY=investing-fred-api-key|ECOS_API_KEY=investing-ecos-api-key|TELEGRAM_BOT_TOKEN=investing-telegram-bot-token|TELEGRAM_CHAT_ID=investing-telegram-chat-id):[0-9]+$"))
+            ] | sort | join(",")')
+          for NAME in FRED_API_KEY ECOS_API_KEY TELEGRAM_BOT_TOKEN TELEGRAM_CHAT_ID; do
+            case ",$SECRETS," in
+              *",$NAME="*) ;;
+              *) echo "::warning::$NAME is not connected to the service with a numeric version; the morning job runs without it." ;;
+            esac
+          done
+          ENV_VARS="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,MORNING_AI_ENABLED=false"
+          if [ -n "$AI_PROVIDER" ] && [ -n "$AI_MODEL" ]; then
+            ENV_VARS="$ENV_VARS,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL"
+            if [ -n "$AI_LOCATION" ]; then ENV_VARS="$ENV_VARS,AI_LOCATION=$AI_LOCATION"; fi
+          fi
+          SECRET_ARGS=()
+          if [ -n "$SECRETS" ]; then SECRET_ARGS=(--set-secrets="$SECRETS"); fi
+          gcloud run jobs deploy "$JOB" \
+            --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
+            --service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com" \
+            --command=node --args=--import,tsx,src/jobs/morning-calendar.ts \
+            --set-env-vars="$ENV_VARS" \
+            "${SECRET_ARGS[@]}" \
+            --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
+            --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=900s \
+            --cpu=1 --memory=512Mi --quiet
+          # Least privilege: the scheduler account may start only this job.
+          gcloud run jobs add-iam-policy-binding "$JOB" \
+            --project="$PROJECT" --region="$REGION" \
+            --member="serviceAccount:investing-scheduler@$PROJECT.iam.gserviceaccount.com" \
+            --role=roles/run.invoker --quiet >/dev/null
