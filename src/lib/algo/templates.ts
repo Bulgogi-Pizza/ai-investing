@@ -19,7 +19,7 @@ export type TemplateDefaults = {
 };
 
 export const defaultDualMomentumParams: DualMomentumParams = {
-  lookbackDays: 126,
+  lookbackDays: 252,
   topN: 1,
   absoluteThreshold: 0,
   scale: 0.2,
@@ -50,7 +50,7 @@ export const templateDefaults: Record<AlgorithmTemplateId, TemplateDefaults> = {
   dualMomentum: {
     label: '듀얼 모멘텀',
     description:
-      '대상 목록에서 126거래일 수익률 상위 1종목(상대 모멘텀)만 보유하고, 수익률이 0 이하이면(절대 모멘텀) 보유하지 않는다.',
+      '대상 목록에서 252거래일(12개월) 수익률 상위 1종목(상대 모멘텀)만 보유하고, 수익률이 0 이하이면(절대 모멘텀) 보유하지 않는다.',
     signals: [],
     buyThreshold: 0,
     sellThreshold: 0,

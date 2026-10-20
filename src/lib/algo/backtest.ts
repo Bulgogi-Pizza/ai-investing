@@ -16,7 +16,13 @@ import {
   type ProfitSample,
 } from './expectedProfit';
 import { annualizedVolatility, maxDrawdown } from './metrics';
-import { checkOrder, defaultSafeguards, type OrderRejection, type Safeguards } from './safeguards';
+import {
+  checkOrder,
+  defaultSafeguards,
+  maxQuantityBelowValue,
+  type OrderRejection,
+  type Safeguards,
+} from './safeguards';
 import { computeSignalScores, momentumReturn } from './signals';
 import { requiredBars, validateAlgorithm } from './templates';
 import {
@@ -186,7 +192,13 @@ type Position = {
   entryK: number;
   entryDate: string;
   entryPrice: number;
-  entryCommission: number;
+  /** Entry commission not yet attributed to sold shares. */
+  entryCommissionLeft: number;
+  /** True once a sell started; the rest is sold on later days (order value cap tranches). */
+  liquidating: boolean;
+  soldQuantity: number;
+  soldNotional: number;
+  realizedNet: number;
 };
 
 /**
@@ -384,58 +396,75 @@ export function runBacktest(input: BacktestInput): BacktestResult {
       for (const q of quotes) {
         const d = decisions.get(q.symbol)!;
         const pos = positions.get(q.symbol);
-        if (d.action !== 'sell' || !pos) continue;
+        // A started exit (`liquidating`) continues on later days until the position is closed.
+        if (!pos || (d.action !== 'sell' && !pos.liquidating)) continue;
         const price = q.price * (1 - slip);
-        const res = checkOrder({
-          side: 'sell',
-          quantity: pos.quantity,
-          price,
-          ordersToday,
-          stopped: false,
-          ownQuantity: pos.quantity,
-          heldTradingDays: k - pos.entryK,
-          avgTradedValue: null,
-          expectedProfit: { enforce: false, expected: null, roundTripCost },
-          safeguards: sg,
-        });
-        if (!res.ok) {
-          reject(res.reason);
-          continue;
+        // Orders at or above the value cap are never placed: sell in tranches below it.
+        const trancheMax =
+          sg.maxOrderValue === null ? Infinity : maxQuantityBelowValue(price, sg.maxOrderValue);
+        while (pos.quantity > 0) {
+          const res = checkOrder({
+            side: 'sell',
+            quantity: Math.min(pos.quantity, trancheMax),
+            price,
+            ordersToday,
+            stopped: false,
+            ownQuantity: pos.quantity,
+            heldTradingDays: k - pos.entryK,
+            avgTradedValue: null,
+            expectedProfit: { enforce: false, expected: null, roundTripCost },
+            safeguards: sg,
+          });
+          if (!res.ok) {
+            reject(trancheMax < 1 ? 'order-too-large' : res.reason);
+            break;
+          }
+          pos.liquidating = true;
+          const notional = res.quantity * price;
+          const commission = notional * costs.commissionRate;
+          const tax = notional * costs.sellTaxRate;
+          cash += notional - commission - tax;
+          commissionTotal += commission;
+          transactionTaxTotal += tax;
+          // Entry commission is released in proportion to the shares sold.
+          const entryCommission = pos.entryCommissionLeft * (res.quantity / pos.quantity);
+          pos.entryCommissionLeft -= entryCommission;
+          const netPnl =
+            notional - commission - tax - (res.quantity * pos.entryPrice + entryCommission);
+          const year = date.slice(0, 4);
+          yearGain.set(year, (yearGain.get(year) ?? 0) + netPnl);
+          pos.soldQuantity += res.quantity;
+          pos.soldNotional += notional;
+          pos.realizedNet += netPnl;
+          pos.quantity -= res.quantity;
+          trades.push({
+            date,
+            symbol: q.symbol,
+            side: 'sell',
+            quantity: res.quantity,
+            price,
+            notional,
+            commission,
+            tax,
+            score: d.score,
+          });
+          ordersToday++;
+          if (pos.quantity === 0) {
+            const exitPrice = pos.soldNotional / pos.soldQuantity;
+            roundTrips.push({
+              symbol: q.symbol,
+              quantity: pos.soldQuantity,
+              entryDate: pos.entryDate,
+              exitDate: date,
+              entryPrice: pos.entryPrice,
+              exitPrice,
+              heldTradingDays: k - pos.entryK,
+              grossReturn: exitPrice / pos.entryPrice - 1,
+              netPnl: pos.realizedNet,
+            });
+            positions.delete(q.symbol);
+          }
         }
-        const notional = res.quantity * price;
-        const commission = notional * costs.commissionRate;
-        const tax = notional * costs.sellTaxRate;
-        cash += notional - commission - tax;
-        commissionTotal += commission;
-        transactionTaxTotal += tax;
-        const costBasis = pos.quantity * pos.entryPrice + pos.entryCommission;
-        const netPnl = notional - commission - tax - costBasis;
-        const year = date.slice(0, 4);
-        yearGain.set(year, (yearGain.get(year) ?? 0) + netPnl);
-        roundTrips.push({
-          symbol: q.symbol,
-          quantity: res.quantity,
-          entryDate: pos.entryDate,
-          exitDate: date,
-          entryPrice: pos.entryPrice,
-          exitPrice: price,
-          heldTradingDays: k - pos.entryK,
-          grossReturn: price / pos.entryPrice - 1,
-          netPnl,
-        });
-        trades.push({
-          date,
-          symbol: q.symbol,
-          side: 'sell',
-          quantity: res.quantity,
-          price,
-          notional,
-          commission,
-          tax,
-          score: d.score,
-        });
-        positions.delete(q.symbol);
-        ordersToday++;
       }
 
       const buys = quotes
@@ -495,7 +524,11 @@ export function runBacktest(input: BacktestInput): BacktestResult {
           entryK: k,
           entryDate: date,
           entryPrice: price,
-          entryCommission: commission,
+          entryCommissionLeft: commission,
+          liquidating: false,
+          soldQuantity: 0,
+          soldNotional: 0,
+          realizedNet: 0,
         });
         trades.push({
           date,

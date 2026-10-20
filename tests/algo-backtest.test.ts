@@ -3,6 +3,7 @@ import {
   buildBucketStats,
   createAlgorithm,
   expectedProfit,
+  maxQuantityBelowValue,
   runBacktest,
   type AlgorithmDefinition,
   type BacktestOptions,
@@ -341,6 +342,80 @@ describe('safeguards in simulation', () => {
     });
     expect(r.trades).toHaveLength(0);
     expect(r.rejections['order-too-large']).toBe(1);
+  });
+
+  describe('sells above the order value cap are split, never trapped', () => {
+    // Buy 818 sh at 110,000 (89.98M < 1e8), ride the price up ~4%/day, then a -6% gap sells ~120M.
+    const rise: number[] = [110_000];
+    for (let i = 0; i < 9; i++) rise.push(Math.round(rise[rise.length - 1] * 1.04));
+    const opens = [
+      100_000,
+      100_000,
+      ...rise,
+      Math.round(rise[rise.length - 1] * 0.94),
+      ...Array(6).fill(Math.round(rise[rise.length - 1] * 0.94)),
+    ];
+    const run = (safeguards = {}) =>
+      runBacktest({
+        algorithm: gapAlgorithm(['AAA'], { scale: 1, buy: 0.05, sell: -0.05, budget: 90_000_000 }),
+        bars: { AAA: makeBars(opens) },
+        options: { ...loose, safeguards: { ...loose.safeguards, ...safeguards } },
+      });
+
+    it('sells in tranches below 1e8 KRW and carries the remainder to the next day', () => {
+      const r = run();
+      const buy = r.trades.find((t) => t.side === 'buy')!;
+      const sells = r.trades.filter((t) => t.side === 'sell');
+      expect(buy.quantity).toBe(818);
+      expect(sells.length).toBeGreaterThanOrEqual(2);
+      for (const t of sells) expect(t.notional).toBeLessThan(100_000_000);
+      expect(sells.reduce((a, t) => a + t.quantity, 0)).toBe(818);
+      const price = sells[0].price;
+      expect(sells[0].quantity).toBe(Math.ceil(100_000_000 / price) - 1);
+      // Two tranches fit the 3-orders-per-day limit, so the exit completes on the signal day.
+      expect(sells).toHaveLength(2);
+      expect(sells[0].date).toBe(sells[1].date);
+      expect(r.openPositions).toEqual([]);
+      expect(r.metrics.roundTrips).toBe(1);
+      expect(r.roundTrips[0].quantity).toBe(818);
+      expect(r.roundTrips[0].exitPrice).toBeCloseTo(price, 6);
+    });
+
+    it('counts every tranche toward the per-day order limit and continues on later days', () => {
+      const r = run({ maxOrdersPerDay: 1 });
+      const sells = r.trades.filter((t) => t.side === 'sell');
+      const dates = sells.map((t) => t.date);
+      expect(new Set(dates).size).toBe(dates.length); // one order per day
+      expect(sells.reduce((a, t) => a + t.quantity, 0)).toBe(818);
+      expect(r.rejections['max-orders-per-day']).toBeGreaterThanOrEqual(1);
+      expect(r.openPositions).toEqual([]);
+    });
+
+    it('allocates entry commission across tranches so the round trip net P&L is exact', () => {
+      const r = runBacktest({
+        algorithm: gapAlgorithm(['AAA'], { scale: 1, buy: 0.05, sell: -0.05, budget: 90_000_000 }),
+        bars: { AAA: makeBars(opens) },
+        options: { ...loose, costs: { commissionRate: 0.001, sellTaxRate: 0.002 } },
+      });
+      const buy = r.trades.find((t) => t.side === 'buy')!;
+      const sells = r.trades.filter((t) => t.side === 'sell');
+      const proceeds = sells.reduce((a, t) => a + t.notional - t.commission - t.tax, 0);
+      expect(r.roundTrips[0].netPnl).toBeCloseTo(proceeds - (buy.notional + buy.commission), 4);
+      expect(r.metrics.finalEquity).toBeCloseTo(90_000_000 + r.roundTrips[0].netPnl, 4);
+    });
+
+    it('still rejects buys at or above the cap and rejects a single share above it', () => {
+      const r = runBacktest({
+        algorithm: gapAlgorithm(['AAA'], { budget: 500_000_000 }),
+        bars: { AAA: makeBars([100_000, 100_000, 110_000, 110_000]) },
+        options: loose,
+      });
+      expect(r.trades).toHaveLength(0);
+      expect(r.rejections['order-too-large']).toBe(1);
+      expect(maxQuantityBelowValue(100_000_000, 100_000_000)).toBe(0);
+      expect(maxQuantityBelowValue(1_000, 100_000_000)).toBe(99_999);
+      expect(maxQuantityBelowValue(30_000_000, 100_000_000)).toBe(3);
+    });
   });
 
   it('sells exactly the quantity it bought and never goes short or beyond the budget', () => {

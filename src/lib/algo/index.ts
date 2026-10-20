@@ -32,6 +32,7 @@ export {
 export {
   checkOrder,
   defaultSafeguards,
+  maxQuantityBelowValue,
   type OrderCheckInput,
   type OrderCheckResult,
   type OrderRejection,

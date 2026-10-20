@@ -87,7 +87,7 @@ describe('formula decision', () => {
 });
 
 describe('dual momentum', () => {
-  const p = { lookbackDays: 126, topN: 1, absoluteThreshold: 0, scale: 0.2 };
+  const p = { lookbackDays: 252, topN: 1, absoluteThreshold: 0, scale: 0.2 };
   it('buys only the best-ranked symbol with positive absolute momentum', () => {
     const d = decideDualMomentum({ A: 0.2, B: 0.1, C: -0.05, D: null }, p);
     expect(d.A).toMatchObject({ action: 'buy', score: 1, reason: 'dual-momentum-pass' });
@@ -131,7 +131,7 @@ describe('templates', () => {
     expect(r.params.meanReversion).toEqual({ rsiPeriod: 14, bbPeriod: 20, bbK: 2, rsiScale: 30 });
     const d = createAlgorithm('dualMomentum', base);
     expect(d.dualMomentum).toEqual({
-      lookbackDays: 126,
+      lookbackDays: 252,
       topN: 1,
       absoluteThreshold: 0,
       scale: 0.2,
@@ -157,7 +157,7 @@ describe('templates', () => {
   it('computes the warm-up length', () => {
     expect(requiredBars(createAlgorithm('momentum', base))).toBe(60);
     expect(requiredBars(createAlgorithm('meanReversion', base))).toBe(19);
-    expect(requiredBars(createAlgorithm('dualMomentum', base))).toBe(126);
+    expect(requiredBars(createAlgorithm('dualMomentum', base))).toBe(252);
   });
   it('validates definitions', () => {
     const ok = createAlgorithm('momentum', base);
