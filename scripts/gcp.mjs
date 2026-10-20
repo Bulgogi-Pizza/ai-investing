@@ -3,6 +3,7 @@ import { readFileSync, existsSync } from 'node:fs';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execGcloudSync } from './gcloud-command.mjs';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const configPath = resolve(root, '.local/deployment.json');
 if (!existsSync(configPath))
@@ -20,8 +21,7 @@ const action = process.argv[2];
 if (!['doctor', 'plan', 'apply'].includes(action) || process.argv.length !== 3)
   throw new Error('Usage: node scripts/gcp.mjs doctor|plan|apply');
 const gcloud = (args) =>
-  execFileSync(
-    'gcloud',
+  execGcloudSync(
     [
       ...args,
       `--account=${config.account}`,

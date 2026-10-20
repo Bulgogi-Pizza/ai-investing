@@ -24,7 +24,7 @@ Git에 없는 파일이 있어서 저장소를 clone하는 것만으로는 이�
 Windows 참고(2026-10-21 확인):
 
 - Terraform은 `winget install --id Hashicorp.Terraform --version 1.14.3 --exact`로 설치한다. 처음 `terraform init`을 하면 `.terraform.lock.hcl`에 Windows용 provider 해시가 한 줄 추가되는데, 정상이므로 커밋한다.
-- `scripts/gcp.mjs`와 `scripts/connect-toss.mjs`는 Windows에서 동작하지 않는다. `execFileSync('gcloud')`가 셸 없이 `gcloud.cmd`를 실행하지 못해 `spawnSync gcloud ENOENT`로 끝난다([운영 과제](#남은-작업-순서) 참고). 고치기 전에는 macOS/Linux/WSL에서 돌리거나, 스크립트가 하는 읽기 전용 확인을 gcloud로 직접 실행한다.
+- `scripts/gcp.mjs`, `scripts/connect-toss.mjs`, `scripts/toss-secrets.py`는 Windows에서도 동작한다. 공통 해석 코드(`scripts/gcloud-command.mjs`, `toss-secrets.py`의 `resolve_gcloud`)가 PATH의 `gcloud.cmd`로 SDK 루트를 찾고, `gcloud.cmd`와 같은 방식으로 번들 Python(`CLOUDSDK_PYTHON`이 있으면 그 값)에서 `lib/gcloud.py`를 셸 없이 실행한다. `gcloud.cmd`가 PATH에 없거나 SDK가 손상되었으면 원인을 알려 주고 중단한다. 번들 Python이 없는 SDK는 `CLOUDSDK_PYTHON`에 `python.exe` 경로를 지정한다.
 - Git 전역 설정이 `core.autocrlf=true`이면 체크아웃 파일이 CRLF가 되어 `npm run format:check`(따라서 `npm run check`)가 실패한다. 저장소에 `.gitattributes`(`* text=auto eol=lf`)를 추가하는 것이 근본 해결이다([운영 과제](#남은-작업-순서)). 그 전에는 저장소 로컬 설정 `git config core.autocrlf input` 후 다시 체크아웃한다.
 - 같은 이유로 `infra/gcp/firestore.rules`가 CRLF이면 `plan`이 Firestore 규칙(`google_firebaserules_ruleset`, `_release`)을 교체하려 한다. 내용은 같고 줄바꿈만 다르다. 이 상태로 `apply`하지 않는다. 파일을 LF로 바꾼 뒤 `plan`이 "No changes"인지 다시 확인한다(2026-10-21 확인: LF로 바꾼 뒤 No changes).
 - gcloud 토큰이 만료되면 `invalid_grant`가 난다. `gcloud auth login <지정 개인 계정>`으로 다시 로그인한다.
@@ -241,9 +241,9 @@ Windows 참고(2026-10-21 확인):
 
 함께 처리할 운영 과제:
 
-- `scripts/gcp.mjs`와 `scripts/connect-toss.mjs`를 Windows에서도 동작하게 고친다. 지금은 `execFileSync('gcloud')`가 `gcloud.cmd`를 찾지 못한다. 셸 문자열 실행은 인자 주입 위험이 있으므로 쓰지 않는다. gcloud 실행 경로를 찾아 실행하는 방식으로 고치고, 비밀이 프로세스 인자나 로그에 나오지 않는다는 기존 보장을 유지한다.
+- (완료 2026-10-21) 운영 스크립트 세 개가 Windows에서도 gcloud를 셸 없이 실행한다. 비밀은 계속 stdin으로만 넘긴다. 위 Windows 참고를 본다.
 - `.gitattributes`에 `* text=auto eol=lf`를 추가해 Windows에서도 Prettier 검사가 통과하게 한다.
 
 - Terraform 상태 파일을 로컬에서 접근 제한된 원격 저장소(GCS backend)로 옮긴다. 지금은 한 컴퓨터에만 있어 분실 시 인프라 관리가 끊긴다.
-- `connect-toss.mjs` 사전 확인이 배포 이미지에 `toss-setup.ts`가 있는지 검사하지 않는다.
+- `connect-toss.mjs` 사전 확인은 배포 이미지에 `toss-setup.ts`가 있는지 직접 검사하지 않는다. 읽기 전용으로 이미지 내용을 확인할 방법이 없고, CI `container` 작업이 모든 이미지에서 이 파일을 검증한다. 근거는 [토스 연결 문서](../operations/toss-setup.md)에 있다.
 - 2026-10-20 첫 사전 확인에서 gcloud 응답이 60초 넘게 지연되어 실패한 적이 있다. 재실행 시 정상이었고 원인은 확인하지 못했다.
