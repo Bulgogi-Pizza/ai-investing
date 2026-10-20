@@ -317,7 +317,12 @@ describe('first live order rejected -> stop the algorithm and notify', () => {
           algorithmName: 'KR momentum',
           reason: 'broker-rejected',
         },
-        { kind: 'algorithm-auto-stop', mode: 'live', algorithmName: 'KR momentum' },
+        {
+          kind: 'algorithm-auto-stop',
+          mode: 'live',
+          algorithmName: 'KR momentum',
+          reason: 'order-permission',
+        },
       ]);
       const [rec] = await store.listOrders({ algorithmId: 'algo-1' });
       expect(rec).toMatchObject({ status: 'rejected', error: { status, code } });
@@ -373,7 +378,15 @@ describe('first live order rejected -> stop the algorithm and notify', () => {
     expect((await store.listOrders({ algorithmId: 'algo-1' }))[0]).toMatchObject({
       status: 'unknown',
     });
-    expect(events).toEqual([{ kind: 'job-failure', jobName: 'live-order-unconfirmed' }]);
+    expect(events).toEqual([
+      {
+        kind: 'live-order-unconfirmed',
+        mode: 'live',
+        symbol: '005930',
+        side: 'buy',
+        algorithmName: 'KR momentum',
+      },
+    ]);
     const next = await executor.executeRun(run([buy('005930')], { runId: 'run-next' }));
     expect(next.outcomes[0]).toMatchObject({ status: 'blocked', reasons: ['UNRECONCILED_ORDER'] });
     expect(fake.placeCount()).toBe(3); // three attempts of the first order, nothing since
@@ -930,7 +943,15 @@ describe('retries stop when the system is stopped (M2)', () => {
     expect(report.outcomes[0]).toMatchObject({ status: 'unknown', errorCode: 'retry-aborted' });
     expect(fake.placeCount()).toBe(1);
     expect((await store.listOrders({ algorithmId: 'algo-1' }))[0].status).toBe('unknown');
-    expect(events).toEqual([{ kind: 'job-failure', jobName: 'live-order-unconfirmed' }]);
+    expect(events).toEqual([
+      {
+        kind: 'live-order-unconfirmed',
+        mode: 'live',
+        symbol: '005930',
+        side: 'buy',
+        algorithmName: 'KR momentum',
+      },
+    ]);
   });
   it('an algorithm stopped during the retries also aborts the resend', async () => {
     const { fake, store, executor } = env();
@@ -985,7 +1006,15 @@ describe('an ambiguous attempt followed by a 4xx is unknown, not a broker reject
       expect(report.outcomes[0]).toMatchObject({ status: 'unknown', errorCode: 'forbidden' });
       expect(report.algorithmStopped).toBe(false);
       expect(await store.isAlgorithmStopped('algo-1')).toBe(false);
-      expect(events).toEqual([{ kind: 'job-failure', jobName: 'live-order-unconfirmed' }]);
+      expect(events).toEqual([
+        {
+          kind: 'live-order-unconfirmed',
+          mode: 'live',
+          symbol: '005930',
+          side: 'buy',
+          algorithmName: 'KR momentum',
+        },
+      ]);
       expect((await store.listOrders({ algorithmId: 'algo-1' }))[0].status).toBe('unknown');
     },
   );
@@ -1224,17 +1253,41 @@ describe('alert mapping lives in one function', () => {
     });
     expect(
       liveAlertEvent({ type: 'algorithm-stopped', why: 'order-permission', algorithmName: 'A' }),
-    ).toEqual({ kind: 'algorithm-auto-stop', mode: 'live', algorithmName: 'A' });
+    ).toEqual({
+      kind: 'algorithm-auto-stop',
+      mode: 'live',
+      algorithmName: 'A',
+      reason: 'order-permission',
+    });
     expect(
       liveAlertEvent({
         type: 'algorithm-stopped',
         why: 'first-order-rejected',
         algorithmName: 'A',
       }),
-    ).toEqual({ kind: 'algorithm-auto-stop', mode: 'live', algorithmName: 'A' });
+    ).toEqual({
+      kind: 'algorithm-auto-stop',
+      mode: 'live',
+      algorithmName: 'A',
+      reason: 'first-order-rejected',
+    });
     expect(liveAlertEvent({ type: 'order-unconfirmed' })).toEqual({
-      kind: 'job-failure',
-      jobName: 'live-order-unconfirmed',
+      kind: 'live-order-unconfirmed',
+      mode: 'live',
+    });
+    expect(
+      liveAlertEvent({
+        type: 'order-unconfirmed',
+        symbol: '005930',
+        side: 'sell',
+        algorithmName: 'A',
+      }),
+    ).toEqual({
+      kind: 'live-order-unconfirmed',
+      mode: 'live',
+      symbol: '005930',
+      side: 'sell',
+      algorithmName: 'A',
     });
     expect(liveAlertEvent({ type: 'local-input-failure' })).toEqual({
       kind: 'job-failure',

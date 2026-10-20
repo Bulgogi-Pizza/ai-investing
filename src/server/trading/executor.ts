@@ -596,7 +596,12 @@ export class LiveOrderExecutor {
       else if (firstLiveOrder && error && !TRANSIENT_REJECTION_CODES.has(error.code))
         await this.stopAlgorithm(run, report, 'first-order-rejected');
     } else if (status === 'unknown') {
-      await this.notify({ type: 'order-unconfirmed' });
+      await this.notify({
+        type: 'order-unconfirmed',
+        symbol: record.symbol,
+        side: record.side,
+        algorithmName: this.name(run.algorithm.id),
+      });
     }
     return outcome;
   }
