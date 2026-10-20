@@ -15,18 +15,10 @@ variable "algo_schedules_enabled" {
 
 locals {
   algo_paper_job = "investing-algo-paper"
-  # Telegram notifications (fills, automatic stop, job failure). Delivery failures never block a run.
-  jobs_telegram_secrets = toset(["investing-telegram-bot-token", "investing-telegram-chat-id"])
 }
 
-# Per-secret access only (no project-level secretAccessor).
-resource "google_secret_manager_secret_iam_member" "jobs_telegram" {
-  for_each  = local.jobs_telegram_secrets
-  project   = var.project_id
-  secret_id = google_secret_manager_secret.provider[each.key].secret_id
-  role      = "roles/secretmanager.secretAccessor"
-  member    = "serviceAccount:${google_service_account.jobs.email}"
-}
+# Telegram access for investing-jobs is granted once in jobs-morning.tf (jobs_morning); this job
+# shares that service account, so a second binding here would let one removal drop the other.
 
 # Weekdays 09:05 KST, five minutes after the KRX open. Holidays are skipped by the job.
 resource "google_cloud_scheduler_job" "algo_paper_kr" {

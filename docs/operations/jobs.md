@@ -176,7 +176,7 @@ Cloud Scheduler 2개 ──POST jobs:run (overrides: ALGO_MARKET=KR|US)──▶
 
 ### Terraform (`infra/gcp/jobs-algo.tf`, 변수 `algo_schedules_enabled`, 기본 `false` = 일시 정지)
 
-기대하는 `plan`은 **추가만** 5개다: `google_secret_manager_secret_iam_member.jobs_telegram`(2개: 봇 토큰, chat ID), `google_cloud_scheduler_job.algo_paper_kr`, `google_cloud_scheduler_job.algo_paper_us`(둘 다 `paused=true`). Cloud Run Job 자체와 `run.invoker` 바인딩은 배포 워크플로가 만든다. 기존 리소스의 교체·삭제가 있으면 적용하지 않는다. 일정: KR `5 9 * * 1-5`, US `35 22,23 * * 1-5`(Asia/Seoul).
+기대하는 `plan`은 **추가만** 2개다: `google_cloud_scheduler_job.algo_paper_kr`, `google_cloud_scheduler_job.algo_paper_us`(둘 다 `paused=true`). 텔레그램 비밀 접근은 같은 `investing-jobs` 계정에 `jobs-morning.tf`가 이미 준다. Cloud Run Job 자체와 `run.invoker` 바인딩은 배포 워크플로가 만든다. 기존 리소스의 교체·삭제가 있으면 적용하지 않는다. 일정: KR `5 9 * * 1-5`, US `35 22,23 * * 1-5`(Asia/Seoul).
 
 ### 배포 (`deploy.yml`의 `Deploy paper algorithm job` 단계)
 
