@@ -367,7 +367,13 @@ async function runMarket(
         tally(steps, 'indicators', 'empty');
         continue;
       }
-      if (latestDate(sectionRows) < session.date)
+      const latest = latestDate(sectionRows);
+      // Korean government bond yields are published one business day later (observed 2026-10-21:
+      // KOSPI had the session bar, every KR_BOND_* still ended a day earlier). The trailing window
+      // stores that bar on the next run, so a lag of up to one business day (<= 4 calendar days to
+      // cover weekends and a holiday) is the normal state for bonds, not a stale step.
+      const bondLagOk = indicator.kind === 'BOND' && calendarDaysBetween(latest, session.date) <= 4;
+      if (latest < session.date && !bondLagOk)
         tally(steps, 'indicators', 'stale', 'CANDLE_NOT_YET_PUBLISHED');
       else tally(steps, 'indicators', 'ok');
       await store(
@@ -411,6 +417,10 @@ function finalStatus(run: SnapshotRun): 'complete' | 'partial' | 'failed' {
   const incomplete = steps.some((step) => step.failed || step.stale || step.skipped);
   if (!incomplete) return 'complete';
   return run.counts.documentsWritten > 0 ? 'partial' : 'failed';
+}
+/** Whole calendar days from `from` to `to` (both YYYY-MM-DD). */
+function calendarDaysBetween(from: string, to: string): number {
+  return Math.round((Date.parse(`${to}T00:00:00Z`) - Date.parse(`${from}T00:00:00Z`)) / 86400000);
 }
 /** One job invocation: decide per market from the calendar, snapshot what closed, record the run. */
 export async function runDailySnapshot(deps: SnapshotDependencies): Promise<JobOutcome> {
