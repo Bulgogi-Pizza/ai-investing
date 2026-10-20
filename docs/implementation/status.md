@@ -26,4 +26,4 @@
 
 ## 문서 인덱스
 
-요구사항: planning/requirements.md, 다음 단계 설계: planning/next-phase-design.md. 시스템: architecture/system.md. 기능: implementation/{auth,integrations,calendar,charts,portfolio,recommendations,news-provider,ai-provider}. 검증: testing/workflow.md. 운영: operations/{cloud-comparison,deployment,toss-setup}. 협업: agents/collaboration.md + 루트 AGENTS.md.
+요구사항: planning/requirements.md, 다음 단계 설계: planning/next-phase-design.md, 구현 계획: planning/next-phase-plan.md. 시스템: architecture/system.md. 기능: implementation/{auth,integrations,calendar,charts,portfolio,recommendations,news-provider,ai-provider}. 검증: testing/workflow.md. 운영: operations/{cloud-comparison,deployment,toss-setup}. 협업: agents/collaboration.md + 루트 AGENTS.md.
