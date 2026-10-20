@@ -550,6 +550,7 @@ export function createApp(options: AppOptions = {}) {
         : undefined,
       notify: notifications ? (event) => notifications.notify(event) : undefined,
       liveEnabled: options.algorithmLiveEnabled,
+      alertsConfigured: () => notifications?.configured() === true,
     }),
   );
   const paperRepository = options.paperRepository ?? new MemoryPaperRepository();

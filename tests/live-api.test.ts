@@ -362,8 +362,10 @@ describe('GET /api/algorithms/:id/live', () => {
     expect(body.emergencyStop).toBe(true);
     expect(body.stop).toMatchObject({
       reason: 'first-order-rejected',
-      message: '첫 실전 주문이 증권사에 거부되어 자동 정지되었습니다.',
+      message: expect.stringContaining('첫 실전 주문이 증권사에 거부되어 자동 정지되었습니다.'),
     });
+    // Stopped means stopped: the notice says the owner manages the remaining positions by hand.
+    expect(body.stop.message).toContain('직접 관리하세요');
   });
 
   it('is owner only and answers 404 for an unknown algorithm', async () => {
@@ -444,5 +446,173 @@ describe('POST /api/algorithms/:id/live/release-stop', () => {
       .send({});
     expect(noOrigin.status).toBe(403);
     expect(await trading.isAlgorithmStopped(ID2)).toBe(true);
+  });
+});
+
+describe('POST /api/algorithms/:id/live/orders/:orderId/resolve', () => {
+  const resolve = (
+    app: ReturnType<typeof createApp>,
+    cookie: string,
+    orderId: string,
+    body: unknown,
+    id = ID,
+  ) =>
+    request(app)
+      .post(`/api/algorithms/${id}/live/orders/${orderId}/resolve`)
+      .set('Origin', origin)
+      .set('Cookie', cookie)
+      .send(body as object);
+  const seedUnknown = async () => {
+    await putAlgorithm(record({ mode: 'live' }));
+    await seedOrder(
+      trading,
+      {
+        clientOrderId: 'ai-lost',
+        algorithmId: ID,
+        quantity: 20,
+        createdAt: '2026-10-20T01:00:00.000Z',
+      },
+      'unknown',
+    );
+  };
+
+  it('marks the order filled, updates the ledger, records history and announces it on Telegram', async () => {
+    await seedUnknown();
+    const app = appWith();
+    const cookie = await login(app);
+    const before = (await get(app, cookie)).body;
+    expect(before.orders[0]).toMatchObject({ id: 'ai-lost', resolvable: true, status: 'unknown' });
+    expect(before.unconfirmedCount).toBe(1);
+    const response = await resolve(app, cookie, 'ai-lost', {
+      outcome: 'filled',
+      quantity: 20,
+      averagePrice: 69_900,
+    });
+    expect(response.status, JSON.stringify(response.body)).toBe(200);
+    expect(response.body).toEqual({
+      resolved: true,
+      status: 'filled',
+      notification: { status: 'sent' },
+    });
+    const after = (await get(app, cookie)).body;
+    expect(after.unconfirmedCount).toBe(0);
+    expect(after.orders[0]).toMatchObject({
+      status: 'filled',
+      resolvable: false,
+      filledQuantity: 20,
+    });
+    expect(after.orders[0].error.message).toContain('직접 확인해 정리');
+    expect(after.ledger.positions[0]).toMatchObject({ symbol: '005930', quantity: 20 });
+    const text = JSON.parse(telegram.mock.calls[0][1].body as string).text as string;
+    expect(text).toContain('미확인 주문을 직접 정리했습니다');
+    expect(text).toContain('종목: 005930');
+    expect(text).toContain('정리 결과: 체결됨');
+    expect(text).not.toMatch(/69900|20주/);
+    const events = await request(app).get('/api/algorithm-events').set('Cookie', cookie);
+    expect(events.body.events[0]).toMatchObject({
+      kind: 'live-order-resolved',
+      algorithmId: ID,
+      changes: [{ field: 'liveOrder' }],
+    });
+  });
+  it('canceled and not-placed are accepted; a second resolution is a 409', async () => {
+    await seedUnknown();
+    const app = appWith();
+    const cookie = await login(app);
+    expect((await resolve(app, cookie, 'ai-lost', { outcome: 'not-placed' })).body.status).toBe(
+      'rejected',
+    );
+    const again = await resolve(app, cookie, 'ai-lost', { outcome: 'canceled' });
+    expect(again.status).toBe(409);
+    expect(again.body.error.code).toBe('ORDER_NOT_UNCONFIRMED');
+    expect(telegram).toHaveBeenCalledTimes(1);
+  });
+  it('validates the outcome, quantity and price and changes nothing on a bad request', async () => {
+    await seedUnknown();
+    const app = appWith();
+    const cookie = await login(app);
+    for (const body of [
+      {},
+      { outcome: 'done' },
+      { outcome: 'filled', quantity: 0, averagePrice: 1 },
+      { outcome: 'filled', quantity: 21, averagePrice: 1 },
+      { outcome: 'filled', quantity: 5 },
+      { outcome: 'filled', quantity: 5, averagePrice: -1 },
+      { outcome: 'filled', quantity: '5', averagePrice: 1 },
+    ]) {
+      const response = await resolve(app, cookie, 'ai-lost', body);
+      expect(response.status, JSON.stringify(body)).toBe(400);
+      expect(response.body.error.code).toBe('INVALID_RESOLUTION');
+    }
+    expect((await trading.getOrder('ai-lost'))?.status).toBe('unknown');
+    expect(telegram).not.toHaveBeenCalled();
+  });
+  it('only an unconfirmed order of that algorithm: others are 404/409, ids are validated', async () => {
+    await seedUnknown();
+    await seedOrder(
+      trading,
+      { clientOrderId: 'ai-filled', algorithmId: ID, symbol: '000660' },
+      'filled',
+    );
+    await putAlgorithm(record({ id: ID2, name: '다른 알고리즘', targets: ['000660'] }));
+    const app = appWith();
+    const cookie = await login(app);
+    expect((await resolve(app, cookie, 'ai-filled', { outcome: 'not-placed' })).status).toBe(409);
+    expect((await resolve(app, cookie, 'ai-lost', { outcome: 'not-placed' }, ID2)).status).toBe(
+      404,
+    );
+    expect((await resolve(app, cookie, 'nope', { outcome: 'not-placed' })).status).toBe(404);
+    expect((await resolve(app, cookie, 'a%2Fb', { outcome: 'not-placed' })).status).toBe(404);
+    expect(
+      (await resolve(app, cookie, 'ai-lost', { outcome: 'not-placed' }, 'not-an-id')).status,
+    ).toBe(404);
+  });
+  it('is owner only, needs the app origin, and a failing Telegram never blocks it', async () => {
+    await seedUnknown();
+    const app = appWith();
+    const owner = await login(app);
+    expect(
+      (
+        await resolve(app, await login(app, 'other@example.test'), 'ai-lost', {
+          outcome: 'not-placed',
+        })
+      ).status,
+    ).toBe(403);
+    const noOrigin = await request(app)
+      .post(`/api/algorithms/${ID}/live/orders/ai-lost/resolve`)
+      .set('Cookie', owner)
+      .send({ outcome: 'not-placed' });
+    expect(noOrigin.status).toBe(403);
+    expect((await trading.getOrder('ai-lost'))?.status).toBe('unknown');
+    telegram.mockRejectedValue(new Error('network down'));
+    const response = await resolve(app, owner, 'ai-lost', { outcome: 'not-placed' });
+    expect(response.status).toBe(200);
+    expect(response.body.notification).toMatchObject({ status: 'failed' });
+  });
+});
+
+describe('paper evidence after a strategy change, stale stops', () => {
+  it('flags the paper summary as 변경 전 기록 when the strategy changed after the paper start', async () => {
+    const ledger = createPaperLedger({
+      algorithmId: ID,
+      market: 'KR',
+      budget: 10_000_000,
+      startedOn: '2026-10-01',
+      now: '2026-10-01T00:00:00.000Z',
+    });
+    await paper.commitDay(ledger, []);
+    const app = appWith();
+    const cookie = await login(app);
+    let summary = (await get(app, cookie)).body.paperSummary;
+    expect(summary.strategyChangedAfterStart).toBe(false);
+    await putAlgorithm(record({ strategyChangedAt: '2026-10-15T03:00:00.000Z' }));
+    summary = (await get(app, cookie)).body.paperSummary;
+    expect(summary).toMatchObject({
+      strategyChangedAfterStart: true,
+      strategyChangedAt: '2026-10-15T03:00:00.000Z',
+    });
+  });
+  it('the heartbeat is stale after four days', () => {
+    expect(HEARTBEAT_STALE_DAYS).toBe(4);
   });
 });

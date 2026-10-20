@@ -14,18 +14,22 @@ import { ownerGate } from './owner';
 import type { PaperRepository } from './paper';
 import { REASONS } from './trading/reasons';
 import {
+  RESOLVABLE_STATUSES,
   summarizeLedger,
   type BlockedOrderRecord,
   type LiveOrderRecord,
+  type OrderResolution,
   type TradingStatusStore,
 } from './trading/stores';
 import { describeOrderError, type OrderErrorInfo } from './trading/toss-orders';
 
 /**
  * Owner-only live screen data (stage 7f): everything the live-enable panel and the live ledger
- * need, in one read. Reads only, except `release-stop`, which removes one algorithm's automatic stop
- * (a risk increase: announced on Telegram, recorded in the change history, no extra authentication
- * by decision). It never places, cancels or changes an order.
+ * need, in one read. Reads only, except two owner actions (no extra authentication by decision):
+ * `release-stop` removes one algorithm's automatic stop (a risk increase: announced on Telegram and
+ * recorded in the change history), and `resolve` clears an order whose outcome is unconfirmed after
+ * the owner checked the broker app (recorded, announced, ledger updated). Neither places, cancels or
+ * sends anything to the broker.
  *
  * Nothing here carries an account identifier, a provider response or error text: orders are
  * projected to a fixed set of fields and errors are reduced to a sanitized code plus the Korean
@@ -34,17 +38,24 @@ import { describeOrderError, type OrderErrorInfo } from './trading/toss-orders';
 const idPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const maxOrders = 40;
 const maxBlocked = 25;
-/** A live job heartbeat older than this means the schedule is (still) paused or broken. */
-export const HEARTBEAT_STALE_DAYS = 8;
+/**
+ * A live job heartbeat older than this means the schedule is (still) paused or broken. The job runs
+ * every weekday (holidays included: it records a skipped run), so even a long holiday weekend stays
+ * well inside four days.
+ */
+export const HEARTBEAT_STALE_DAYS = 4;
 const failure = (res: Response, status: number, code: string, message: string) =>
   res.status(status).json({ error: { code, message } });
 
 export const LIVE_SCHEDULE_PAUSED_TEXT =
   '실전 일정이 아직 꺼져 있어 주문이 나가지 않습니다 — 운영자가 일정을 켜야 합니다.';
+export const MANUAL_POSITIONS_TEXT =
+  ' 정지해도 보유 종목은 자동으로 팔지 않으니 남은 보유분은 직접 관리하세요.';
 export const STOP_REASON_TEXT: Record<string, string> = {
-  'loss-limit': '누적 손실이 한도에 닿아 자동 정지되었습니다.',
-  'order-permission': '증권사가 주문 권한을 거부해(인증·권한 문제) 자동 정지되었습니다.',
-  'first-order-rejected': '첫 실전 주문이 증권사에 거부되어 자동 정지되었습니다.',
+  'loss-limit': `누적 손실이 한도에 닿아 자동 정지되었습니다.${MANUAL_POSITIONS_TEXT}`,
+  'order-permission': `증권사가 주문 권한을 거부해(인증·권한 문제) 자동 정지되었습니다.${MANUAL_POSITIONS_TEXT}`,
+  'first-order-rejected': `첫 실전 주문이 증권사에 거부되어 자동 정지되었습니다.${MANUAL_POSITIONS_TEXT}`,
+  'unconfirmed-order': `접수 여부를 확인하지 못한 주문이 한 세션 넘게 남아 자동 정지되었습니다. 토스증권 앱에서 확인한 뒤 아래에서 그 주문을 정리하세요.${MANUAL_POSITIONS_TEXT}`,
 };
 
 export type LiveRouterOptions = {
@@ -88,6 +99,8 @@ function shapeOrder(o: LiveOrderRecord) {
     filledQuantity: o.filledQuantity,
     averageFilledPrice: o.averageFilledPrice ?? null,
     tickCorrected: o.tickCorrected === true,
+    /** Outcome unconfirmed: the owner can clear it by hand after checking the broker app. */
+    resolvable: RESOLVABLE_STATUSES.includes(o.status),
     error: sanitizeError(o.error),
   };
 }
@@ -207,6 +220,104 @@ export function createLiveRouter(options: LiveRouterOptions) {
       res.json({ released: true, notification });
     },
   );
+  const orderIdPattern = /^[a-zA-Z0-9\-_]{1,36}$/;
+  const outcomeLabels = {
+    filled: '체결',
+    canceled: '취소·미체결',
+    'not-placed': '접수되지 않음',
+  } as const;
+  router.post(
+    '/api/algorithms/:id/live/orders/:orderId/resolve',
+    gate,
+    async (req: Request, res: Response) => {
+      const id = String(req.params.id);
+      const orderId = String(req.params.orderId);
+      const record = idPattern.test(id) ? await options.repository.get(id) : null;
+      if (!record) return failure(res, 404, 'ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.');
+      if (!orderIdPattern.test(orderId))
+        return failure(res, 404, 'ORDER_NOT_FOUND', '주문을 찾을 수 없습니다.');
+      const body = req.body as Record<string, unknown> | undefined;
+      const outcome = body?.outcome;
+      let resolution: OrderResolution;
+      if (outcome === 'filled') {
+        resolution = {
+          outcome,
+          quantity: body?.quantity as number,
+          averagePrice: body?.averagePrice as number,
+        };
+      } else if (outcome === 'canceled') {
+        resolution = {
+          outcome,
+          ...(body?.quantity === undefined ? {} : { quantity: body.quantity as number }),
+          ...(body?.averagePrice === undefined
+            ? {}
+            : { averagePrice: body.averagePrice as number }),
+        };
+      } else if (outcome === 'not-placed') resolution = { outcome };
+      else
+        return failure(
+          res,
+          400,
+          'INVALID_RESOLUTION',
+          '정리 결과는 체결, 취소·미체결, 접수되지 않음 중 하나여야 합니다.',
+        );
+      let resolved: LiveOrderRecord;
+      try {
+        resolved = await trading.resolveUnconfirmedOrder(id, orderId, resolution);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '';
+        if (message === 'Unknown order')
+          return failure(res, 404, 'ORDER_NOT_FOUND', '주문을 찾을 수 없습니다.');
+        if (message === 'Invalid filled quantity' || message === 'Invalid average price')
+          return failure(
+            res,
+            400,
+            'INVALID_RESOLUTION',
+            message === 'Invalid average price'
+              ? '체결 수량이 있으면 평균 체결가(0보다 큰 숫자)를 입력하세요.'
+              : '체결 수량은 주문 수량 이하의 정수여야 합니다(체결이면 1 이상).',
+          );
+        return failure(
+          res,
+          409,
+          'ORDER_NOT_UNCONFIRMED',
+          '접수 여부 미확인 상태의 주문만 정리할 수 있습니다. 화면을 새로고침하세요.',
+        );
+      }
+      const event: AlgorithmEvent = {
+        id: (options.newId ?? randomUUID)(),
+        at: now().toISOString(),
+        kind: 'live-order-resolved',
+        algorithmId: record.id,
+        algorithmName: record.name,
+        changes: [{ field: 'liveOrder', from: '접수 여부 미확인', to: outcomeLabels[outcome] }],
+      };
+      try {
+        await options.repository.recordEvent(event);
+      } catch {
+        /* the order itself is already updated; the history row is best effort */
+      }
+      let notification: { status: string; failureCode?: string } = {
+        status: 'disabled',
+        failureCode: 'NOT_CONFIGURED',
+      };
+      if (options.notify) {
+        const result = await options.notify({
+          kind: 'live-order-resolved',
+          mode: 'live',
+          symbol: resolved.symbol,
+          side: resolved.side,
+          algorithmName: record.name,
+          outcome,
+        });
+        notification = {
+          status: result.status,
+          ...(result.failureCode ? { failureCode: result.failureCode } : {}),
+        };
+      }
+      res.json({ resolved: true, status: resolved.status, notification });
+    },
+  );
   return router;
 }
 
@@ -305,6 +416,12 @@ export function shapeLive(input: {
           fills: metrics.fills,
           status: input.paperLedger!.status,
           budget: input.paperLedger!.budget,
+          // The algorithm's targets, thresholds, weights or sizing changed after the paper run began:
+          // the record above is "변경 전 기록" (kept, not reset).
+          strategyChangedAfterStart:
+            (record.strategyChangedAt ?? record.targetsChangedAt) >
+            `${input.paperLedger!.startedOn}T23:59:59`,
+          strategyChangedAt: record.strategyChangedAt ?? record.targetsChangedAt,
         }
       : null,
     emergencyStop: input.emergencyStop,

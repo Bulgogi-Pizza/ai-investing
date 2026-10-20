@@ -24,6 +24,7 @@ import {
   parseCostSettings,
   parseSafeguardSettings,
   safeguardRisks,
+  strategyChanged,
   toDefinition,
   type AlgorithmEvent,
   type AlgorithmInput,
@@ -471,6 +472,12 @@ export type AlgorithmsRouterOptions = {
    * the live job (LIVE_TRADING_ENABLED) and the Cloud Scheduler state, not here.
    */
   liveEnabled?: boolean;
+  /**
+   * True when Telegram alerts can actually be delivered. Turning live on and raising a budget rely on
+   * those alerts (no extra authentication), so both are refused with 409 ALERTS_NOT_CONFIGURED when
+   * this answers false. Absent = not required (unit use).
+   */
+  alertsConfigured?: () => boolean;
   now?: () => Date;
   newId?: () => string;
 };
@@ -675,6 +682,7 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     const timestamp = now().toISOString();
     let raised = false;
     let enabling = false;
+    let strategyUpdated = false;
     const result = await repository.mutate(id, (current, all) => {
       if (!current)
         return { reject: bad(404, 'ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.') };
@@ -709,6 +717,17 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
         };
       const changes = diffAlgorithm(inputOf(current), input);
       raised = budgetRaised(inputOf(current), input);
+      if ((enabling || raised) && options.alertsConfigured && !options.alertsConfigured())
+        return {
+          reject: bad(
+            409,
+            'ALERTS_NOT_CONFIGURED',
+            '텔레그램 알림이 설정되어 있지 않아 실전 켜기와 운용 금액 상향을 할 수 없습니다. 이 변경들은 알림으로 알려야 하는 위험 증가 변경입니다. 텔레그램 봇 설정을 먼저 연결하세요.',
+          ),
+        };
+      strategyUpdated =
+        current.mode === 'live' && input.mode === 'live' && strategyChanged(changes);
+      const strategyTouched = strategyChanged(changes);
       const targetsChanged = changes.some((c) => c.field === 'targets');
       const record: AlgorithmRecord = {
         ...current,
@@ -718,6 +737,11 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
         currency: current.currency,
         params: current.params,
         targetsChangedAt: targetsChanged ? timestamp : current.targetsChangedAt,
+        ...(strategyTouched
+          ? { strategyChangedAt: timestamp }
+          : current.strategyChangedAt
+            ? { strategyChangedAt: current.strategyChangedAt }
+            : {}),
         updatedAt: timestamp,
         version: current.version + 1,
       };
@@ -728,6 +752,9 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     const notifications = [];
     if (enabling) notifications.push(await announce('live-enabled', result.record!.name));
     if (raised) notifications.push(await announce('budget-raised', result.record!.name));
+    // A live algorithm's targets, thresholds, weights or sizing changed: it now trades differently.
+    if (strategyUpdated)
+      notifications.push(await announce('live-strategy-changed', result.record!.name));
     const notification = notifications[0];
     res.json({
       algorithm: result.record,
@@ -832,10 +859,13 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     const parsed = parseSafeguardSettings(req.body?.safeguards);
     if (!parsed.ok) return failure(res, bad(400, 'INVALID_SAFEGUARDS', parsed.message));
     let before: SafeguardSettingsRecord;
+    let repair = false;
     try {
       before = await repository.getSafeguards();
     } catch {
-      // A malformed stored document is repaired by this save; it is compared with the defaults.
+      // A malformed stored document is repaired by this save (always written, even when the values
+      // equal the defaults); the risk comparison is against the defaults.
+      repair = true;
       before = { ...structuredClone(defaultSafeguardSettings), updatedAt: null };
     }
     const after = parsed.value;
@@ -853,6 +883,12 @@ export function createAlgorithmsRouter(options: AlgorithmsRouterOptions) {
     for (const key of Object.keys(a) as (keyof typeof a)[])
       if (a[key] !== b[key])
         changes.push({ field: 'safeguards', from: `${key}: ${b[key]}`, to: `${key}: ${a[key]}` });
+    if (repair && changes.length === 0)
+      changes.push({
+        field: 'safeguards',
+        from: '저장된 값이 올바르지 않음',
+        to: '올바른 값으로 다시 저장',
+      });
     if (changes.length === 0) {
       res.json({ safeguards: before, changed: false, notifications: [] });
       return;

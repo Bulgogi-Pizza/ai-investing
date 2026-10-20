@@ -96,6 +96,11 @@ export type AlgorithmRecord = AlgorithmInput & {
   params: SignalParams;
   /** When the target list last changed; later results are separate from earlier ones. */
   targetsChangedAt: string;
+  /**
+   * When targets, thresholds, weights, position sizing, method or template last changed. Paper
+   * evidence recorded before it is "변경 전 기록". Absent on older records (targetsChangedAt then).
+   */
+  strategyChangedAt?: string;
   createdAt: string;
   updatedAt: string;
   version: number;
@@ -326,7 +331,8 @@ export type ChangeField =
   | 'emergencyStop'
   | 'costs'
   | 'safeguards'
-  | 'liveStop';
+  | 'liveStop'
+  | 'liveOrder';
 export type Change = {
   field: ChangeField;
   from?: string | null;
@@ -342,7 +348,8 @@ export type AlgorithmEventKind =
   | 'emergency-release'
   | 'costs-updated'
   | 'safeguards-updated'
-  | 'live-stop-released';
+  | 'live-stop-released'
+  | 'live-order-resolved';
 export type AlgorithmEvent = {
   id: string;
   at: string;
@@ -393,6 +400,18 @@ export function diffAlgorithm(before: AlgorithmInput | null, after: AlgorithmInp
   );
   return changes;
 }
+
+/** Changes that alter what a live algorithm trades or how much (announced when live). */
+export const strategyFields: readonly ChangeField[] = [
+  'targets',
+  'signals',
+  'thresholds',
+  'dualMomentum',
+  'method',
+  'template',
+];
+export const strategyChanged = (changes: readonly Change[]) =>
+  changes.some((c) => strategyFields.includes(c.field));
 
 /** True when `after` raises an existing budget (the notification case). */
 export function budgetRaised(before: AlgorithmInput, after: AlgorithmInput): boolean {
