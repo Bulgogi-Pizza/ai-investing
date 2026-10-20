@@ -1,4 +1,5 @@
 import { Router } from 'express';
+import { ownerGate } from './owner.js';
 import { Firestore } from '@google-cloud/firestore';
 
 export interface EconomicEvent {
@@ -169,7 +170,13 @@ export function cleanEvent(input: unknown): EconomicEvent | null {
     ...(item.previous === undefined ? {} : { previous: item.previous as string }),
   };
 }
-export function createCalendarRouter({ repository }: { repository: CalendarRepository }) {
+export function createCalendarRouter({
+  repository,
+  ownerUserId,
+}: {
+  repository: CalendarRepository;
+  ownerUserId?: string;
+}) {
   const router = Router();
   router.use(['/api/calendar/events', '/api/admin/calendar/events'], (_req, res, next) => {
     if (!res.locals.user || res.locals.user.active === false) {
@@ -178,6 +185,8 @@ export function createCalendarRouter({ repository }: { repository: CalendarRepos
     }
     next();
   });
+  // Calendar data is owner-only; re-checked here so it never relies on mount order alone.
+  router.use(['/api/calendar/events', '/api/admin/calendar/events'], ownerGate(ownerUserId));
   router.get('/api/calendar/events', async (req, res) => {
     const { from, to, importance, category, asset, market } = req.query;
     if (

@@ -26,14 +26,21 @@ function app(
   role: 'admin' | 'member' | null,
   repository = new MemoryCalendarRepository(),
   options: NewsSyncOptions = {},
+  userId = 'test-admin',
 ) {
   const server = express();
   server.use(express.json());
   server.use((_req, res, next) => {
-    if (role) res.locals.user = { id: 'test-admin', role, active: true };
+    if (role) res.locals.user = { id: userId, role, active: true };
     next();
   });
-  server.use(createNewsRouter({ repository, options: { now, cache: new Map(), ...options } }));
+  server.use(
+    createNewsRouter({
+      repository,
+      ownerUserId: 'test-admin',
+      options: { now, cache: new Map(), ...options },
+    }),
+  );
   return server;
 }
 describe('공식 RSS 뉴스 수집', () => {
@@ -226,5 +233,22 @@ describe('공식 뉴스 API 권한 및 상태', () => {
     expect(limited.status).toBe(429);
     expect(limited.headers['retry-after']).toBeDefined();
     expect(writes).toHaveBeenCalledTimes(3);
+  });
+  it('소유자가 아닌 계정은 출처 조회와 수집을 403으로 거부하고 소유자 미설정이면 닫는다', async () => {
+    const transport = mockTransport();
+    const other = app('admin', new MemoryCalendarRepository(), { transport }, 'someone-else');
+    expect((await request(other).get('/api/news/sources')).body.error.code).toBe('OWNER_REQUIRED');
+    const sync = await request(other).post('/api/admin/news/sync').send({});
+    expect(sync.status).toBe(403);
+    expect(sync.body.error.code).toBe('OWNER_REQUIRED');
+    expect(transport).not.toHaveBeenCalled();
+    expect((await request(app('member')).post('/api/admin/news/sync').send({})).status).toBe(403);
+    const unconfigured = express();
+    unconfigured.use((_req, res, next) => {
+      res.locals.user = { id: 'test-admin', role: 'admin', active: true };
+      next();
+    });
+    unconfigured.use(createNewsRouter({ repository: new MemoryCalendarRepository() }));
+    expect((await request(unconfigured).get('/api/news/sources')).status).toBe(503);
   });
 });

@@ -19,13 +19,16 @@ import {
 import {
   compareEventTime,
   importancePresentation,
-  events,
   filterEvents,
   MarketEvent,
   startOfWeekDay,
   shiftCalendarDate,
   adjacentCalendarDate,
 } from '../../lib/market';
+import { DataState, LoadingState } from '../../components/DataState';
+import { SourceLink } from '../../components/SourceLink';
+import { formatKst, kstToday } from '../../lib/kst';
+import { ApiError, issueOf, signalAuthRequired, type DataIssue } from '../../lib/api';
 const flag = (country: string) => (country === '한국' ? '🇰🇷' : country === '미국' ? '🇺🇸' : '🌐');
 export default function CalendarPage({ search, isAdmin }: { search: string; isAdmin: boolean }) {
   const [view, setView] = useState('월간');
@@ -47,8 +50,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     fetch('/api/news/sources', { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
-        if (!response.ok)
-          throw new Error(body.error?.message ?? '공식 뉴스 출처를 불러오지 못했습니다.');
+        if (!response.ok) {
+          signalAuthRequired(response.status, body.error?.code);
+          throw new ApiError(
+            response.status,
+            body.error?.code ?? 'REQUEST_FAILED',
+            body.error?.message ?? '공식 뉴스 출처를 불러오지 못했습니다.',
+          );
+        }
         if (!Array.isArray(body.sources)) throw new Error('뉴스 출처 응답을 확인하지 못했습니다.');
         if (!controller.signal.aborted) {
           setNewsSources(body.sources);
@@ -56,7 +65,8 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
         }
       })
       .catch((error) => {
-        if (!controller.signal.aborted)
+        // Owner-only is reported once by the calendar request, not as a news error.
+        if (!controller.signal.aborted && issueOf(error).kind !== 'owner-only')
           setNewsError(error instanceof Error ? error.message : '뉴스 출처 조회 실패');
       });
     return () => {
@@ -92,7 +102,6 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
       if (typeof body.count !== 'number' || body.count < 0)
         throw new Error('뉴스 수집 결과를 확인하지 못했습니다.');
       if (body.count > 0) {
-        setSourceMode('registered');
         setCalendarReload((value) => value + 1);
       }
     } catch (error) {
@@ -103,34 +112,33 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     }
   }
 
-  const [sourceMode, setSourceMode] = useState<'demo' | 'registered'>('demo');
   const [registered, setRegistered] = useState<MarketEvent[]>([]);
-  const [calendarLoading, setCalendarLoading] = useState(false);
-  const [calendarError, setCalendarError] = useState('');
+  const [calendarLoading, setCalendarLoading] = useState(true);
+  const [calendarIssue, setCalendarIssue] = useState<DataIssue | null>(null);
   const [calendarTruncated, setCalendarTruncated] = useState(false);
   const [calendarReload, setCalendarReload] = useState(0);
   const [importOpen, setImportOpen] = useState(false);
   const [importJson, setImportJson] = useState('');
   const [importError, setImportError] = useState('');
   const [importLoading, setImportLoading] = useState(false);
-  const [month, setMonth] = useState(9);
-  const [year, setYear] = useState(2026);
+  const today = kstToday();
+  const [month, setMonth] = useState(today.month);
+  const [year, setYear] = useState(today.year);
   const [importance, setImportance] = useState('전체 중요도');
   const [category, setCategory] = useState('전체 카테고리');
   const [asset, setAsset] = useState('전체 자산');
   const [market, setMarket] = useState('전체 시장');
   const [selected, setSelected] = useState<MarketEvent | null>(null);
   const [saved, setSaved] = useState<number[]>([]);
-  const [day, setDay] = useState(20);
+  const [day, setDay] = useState(today.day);
   useEffect(
     () => setSelected(null),
-    [month, year, day, importance, category, asset, market, search, sourceMode],
+    [month, year, day, importance, category, asset, market, search],
   );
   useEffect(() => {
     setRegistered([]);
-    setCalendarError('');
+    setCalendarIssue(null);
     setCalendarTruncated(false);
-    if (sourceMode !== 'registered') return;
     const controller = new AbortController();
     setCalendarLoading(true);
     const iso = (date: Date) =>
@@ -140,8 +148,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     fetch(`/api/calendar/events?from=${from}&to=${to}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
-        if (!response.ok)
-          throw new Error(body.error?.message ?? '등록 일정을 불러오지 못했습니다.');
+        if (!response.ok) {
+          signalAuthRequired(response.status, body?.error?.code);
+          throw new ApiError(
+            response.status,
+            body?.error?.code ?? 'REQUEST_FAILED',
+            body?.error?.message ?? '등록 일정을 불러오지 못했습니다.',
+          );
+        }
         if (!Array.isArray(body.events)) throw new Error('일정 응답을 확인하지 못했습니다.');
         const mapped = body.events.map(
           (event: MarketEvent & { date: string; assets: string[] }) => {
@@ -168,14 +182,13 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
         }
       })
       .catch((error) => {
-        if (!controller.signal.aborted)
-          setCalendarError(error instanceof Error ? error.message : '일정 연결 실패');
+        if (!controller.signal.aborted) setCalendarIssue(issueOf(error));
       })
       .finally(() => {
         if (!controller.signal.aborted) setCalendarLoading(false);
       });
     return () => controller.abort();
-  }, [sourceMode, year, month, calendarReload]);
+  }, [year, month, calendarReload]);
   async function importEvents(e: React.FormEvent) {
     e.preventDefault();
     setImportError('');
@@ -195,7 +208,6 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
       }
       setImportOpen(false);
       setImportJson('');
-      setSourceMode('registered');
       setCalendarReload((v) => v + 1);
     } catch (error) {
       setImportError(error instanceof Error ? error.message : 'JSON 또는 연결을 확인해 주세요.');
@@ -203,10 +215,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
       setImportLoading(false);
     }
   }
+  const todayIso = `${today.year}-${String(today.month + 1).padStart(2, '0')}-${String(today.day).padStart(2, '0')}`;
+  const todayWeekday = ['일', '월', '화', '수', '목', '금', '토'][
+    new Date(today.year, today.month, today.day).getDay()
+  ];
   const weekStart = startOfWeekDay(year, month, day);
   const firstWeekDate = adjacentCalendarDate(year, month, weekStart);
   const lastWeekDate = adjacentCalendarDate(year, month, weekStart + 6);
-  const dataset = sourceMode === 'demo' ? events : registered;
+  const dataset = registered;
   const filtered = filterEvents(dataset, {
     importance: importance === '전체 중요도' ? undefined : Number(importance),
     category: category === '전체 카테고리' ? undefined : category,
@@ -214,11 +230,9 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     country: market === '전체 시장' ? undefined : market,
     search,
   });
-  const isDemoMonth = year === 2026 && month === 9;
+  const isTodayMonth = year === today.year && month === today.month;
   const monthEvents = filtered.filter((event) =>
-    event.date
-      ? event.date.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`)
-      : isDemoMonth,
+    event.date.startsWith(`${year}-${String(month + 1).padStart(2, '0')}`),
   );
   const days = new Date(year, month + 1, 0).getDate();
   const offset = new Date(year, month, 1).getDay();
@@ -229,9 +243,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
   const agendaEvents =
     view === '주간'
       ? filtered.filter((e) => {
-          const stamp = e.date
-            ? new Date(`${e.date}T00:00:00`).getTime()
-            : new Date(2026, 9, e.day).getTime();
+          const stamp = new Date(`${e.date}T00:00:00`).getTime();
           return (
             stamp >= new Date(year, month, weekStart).getTime() &&
             stamp <= new Date(year, month, weekStart + 6).getTime()
@@ -263,6 +275,19 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     setAsset('전체 자산');
     setMarket('전체 시장');
   }
+  if (calendarIssue?.kind === 'owner-only')
+    return (
+      <>
+        <div className="page-heading">
+          <div className="eyebrow">MARKET INTELLIGENCE</div>
+          <h1>
+            경제 캘린더
+            <span className="title-dot" />
+          </h1>
+        </div>
+        <DataState issue={calendarIssue} />
+      </>
+    );
   return (
     <>
       <div className="page-heading">
@@ -278,13 +303,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           <button
             className="button"
             onClick={() => {
-              setYear(2026);
-              setMonth(9);
-              setDay(20);
+              const now = kstToday();
+              setYear(now.year);
+              setMonth(now.month);
+              setDay(now.day);
               setSelected(null);
             }}
           >
-            <CalendarDays size={15} /> 기준일로 이동
+            <CalendarDays size={15} /> 오늘로 이동
           </button>
         </div>
       </div>
@@ -296,13 +322,11 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           <span>
             <small>이번 달 주요 일정</small>
             <strong>
-              {sourceMode === 'demo' ? (isDemoMonth ? events.length : 0) : monthEvents.length}
+              {monthEvents.length}
               <em>개</em>
             </strong>
           </span>
-          <span className="stat-foot">
-            {sourceMode === 'demo' ? '예시 경제 이벤트' : '등록된 경제 이벤트'}
-          </span>
+          <span className="stat-foot">등록된 경제 이벤트</span>
         </div>
         <div>
           <span className="stat-icon red">
@@ -324,34 +348,20 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
             <Globe2 size={19} />
           </span>
           <span>
-            <small>기준일의 주요 일정</small>
+            <small>오늘의 주요 일정</small>
             <strong>
-              {dataset.filter((e) => (e.date ? e.date === '2026-10-20' : e.day === 20)).length}
+              {dataset.filter((e) => e.date === todayIso).length}
               <em>개</em>
             </strong>
           </span>
-          <span className="stat-foot">10월 20일 화요일</span>
+          <span className="stat-foot">
+            {today.month + 1}월 {today.day}일 {todayWeekday}요일
+          </span>
         </div>
       </div>
       <div className="calendar-source-toolbar">
-        <div className="view-toggle">
-          <button
-            className={sourceMode === 'demo' ? 'selected' : ''}
-            onClick={() => setSourceMode('demo')}
-          >
-            합성 데모
-          </button>
-          <button
-            className={sourceMode === 'registered' ? 'selected' : ''}
-            onClick={() => setSourceMode('registered')}
-          >
-            등록 일정
-          </button>
-        </div>
         <span>
-          {sourceMode === 'demo'
-            ? '2026년 10월의 합성 예시입니다.'
-            : '출처를 포함한 등록 일정과 공식 발표 뉴스입니다. 뉴스의 날짜는 발표 시각 기준입니다.'}
+          출처를 포함한 등록 일정과 공식 발표 뉴스입니다. 뉴스의 날짜는 발표 시각 기준입니다.
         </span>
         {isAdmin && (
           <button
@@ -384,16 +394,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           {newsSources.length > 0 && (
             <div className="tag-row">
               {newsSources.map((source) => (
-                <a
+                <SourceLink
                   key={source.id}
-                  href={source.feedUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  url={source.feedUrl}
                   title={source.coverage}
                   style={{ fontSize: 9, color: '#806aab' }}
                 >
                   {source.name} ↗
-                </a>
+                </SourceLink>
               ))}
             </div>
           )}
@@ -437,20 +445,22 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           )}
         </section>
       )}
-      {calendarLoading && (
-        <div className="data-notice" role="status">
-          등록 일정을 불러오는 중…
-        </div>
+      {calendarLoading && <LoadingState label="등록 일정을 불러오는 중…" />}
+      {calendarIssue && (
+        <DataState issue={calendarIssue} onRetry={() => setCalendarReload((v) => v + 1)} />
       )}
-      {calendarError && (
-        <div className="form-error" role="alert">
-          {calendarError}
-          <button className="button small" onClick={() => setCalendarReload((v) => v + 1)}>
-            다시 시도
-          </button>
-        </div>
+      {!calendarLoading && !calendarIssue && registered.length === 0 && (
+        <DataState
+          issue={{
+            kind: 'no-data',
+            message:
+              '이 기간에 등록된 일정이 없습니다. 기간을 이동하거나 관리자가 일정을 등록해야 합니다.',
+            retryable: true,
+          }}
+          title="등록된 일정이 없습니다"
+        />
       )}
-      {sourceMode === 'registered' && calendarTruncated && (
+      {calendarTruncated && (
         <div className="data-notice" role="status">
           일정 조회 한도를 초과해 일부 일정만 표시됩니다. 전체 일정 수가 아니므로 기간을 좁혀 확인해
           주세요.
@@ -473,12 +483,13 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
             <button
               className="today-btn"
               onClick={() => {
-                setYear(2026);
-                setMonth(9);
-                setDay(20);
+                const now = kstToday();
+                setYear(now.year);
+                setMonth(now.month);
+                setDay(now.day);
               }}
             >
-              기준일
+              오늘
             </button>
           </div>
           <div className="view-toggle">
@@ -520,7 +531,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                   '달러',
                   '금',
                   '채권',
-                  ...dataset.flatMap((e) => e.assets ?? [e.asset]),
+                  ...dataset.flatMap((e) => e.assets),
                 ]),
               ],
             ],
@@ -563,7 +574,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               {cells.map((d, i) => (
                 <div
                   key={i}
-                  className={`calendar-day ${d < 1 || d > days ? 'muted-day' : ''} ${isDemoMonth && d === 20 ? 'current-day' : ''}`}
+                  className={`calendar-day ${d < 1 || d > days ? 'muted-day' : ''} ${isTodayMonth && d === today.day ? 'current-day' : ''}`}
                 >
                   <button
                     className="day-number"
@@ -579,7 +590,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                     }}
                   >
                     {d < 1 ? new Date(year, month, 0).getDate() + d : d > days ? d - days : d}
-                    {isDemoMonth && d === 20 && <span>기준일</span>}
+                    {isTodayMonth && d === today.day && <span>오늘</span>}
                   </button>
                   {monthEvents
                     .filter((e) => e.day === d)
@@ -633,7 +644,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                           <button key={e.id} onClick={() => setSelected(e)} className="hour-event">
                             {flag(e.country)} {e.time} · {e.title}
                             <span>
-                              {e.asset} · {importancePresentation(e.importance).label}
+                              {e.assets[0]} · {importancePresentation(e.importance).label}
                             </span>
                           </button>
                         ))}
@@ -645,13 +656,13 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               agendaEvents.sort(compareEventTime).map((e) => (
                 <button className="agenda-event" key={e.id} onClick={() => setSelected(e)}>
                   <span>
-                    {e.date ? `${Number(e.date.slice(5, 7))}.${e.day}` : `10.${e.day}`}
+                    {`${Number(e.date.slice(5, 7))}.${e.day}`}
                     <small>{e.time}</small>
                   </span>
                   <span>
                     {flag(e.country)} {e.title}
                     <small>
-                      {e.category} · {e.asset}
+                      {e.category} · {e.assets[0]}
                     </small>
                   </span>
                   <span
@@ -697,9 +708,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               <span className="section-kicker">COMING UP</span>
               <h3>주목할 경제 일정</h3>
             </div>
-            <span className="subtle">
-              {sourceMode === 'demo' ? '합성 데모' : '등록 일정 · 출처 확인'}
-            </span>
+            <span className="subtle">등록 일정 · 출처 확인</span>
           </div>
           {selectedEvent ? (
             <>
@@ -708,10 +717,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                 <div>
                   <h3>{selectedEvent.title}</h3>
                   <p>
-                    {selectedEvent.date
-                      ? selectedEvent.date.replaceAll('-', '. ')
-                      : `2026. 10. ${selectedEvent.day}`}
-                    . · {selectedEvent.time} KST
+                    {selectedEvent.date.replaceAll('-', '. ')}. · {selectedEvent.time} KST
                   </p>
                 </div>
                 <button
@@ -735,11 +741,11 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               </div>
               <div className="detail-values">
                 <div>
-                  <small>예상치{sourceMode === 'demo' ? ' (예시)' : ''}</small>
+                  <small>예상치</small>
                   <strong>{selectedEvent.forecast}</strong>
                 </div>
                 <div>
-                  <small>이전 수치{sourceMode === 'demo' ? ' (예시)' : ''}</small>
+                  <small>이전 수치</small>
                   <strong>{selectedEvent.previous}</strong>
                 </div>
                 <div>
@@ -755,7 +761,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               </div>
               <div className="tag-row">
                 <span>{selectedEvent.category}</span>
-                {(selectedEvent.assets ?? [selectedEvent.asset]).map((a) => (
+                {selectedEvent.assets.map((a) => (
                   <span key={a}>{a}</span>
                 ))}
                 <span>{selectedEvent.country} 시장</span>
@@ -767,16 +773,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               </div>
               {selectedEvent.sourceUrl && (
                 <div className="event-provenance">
-                  <a href={selectedEvent.sourceUrl} target="_blank" rel="noopener noreferrer">
+                  <SourceLink url={selectedEvent.sourceUrl}>
                     {selectedEvent.sourceName}
                     <ExternalLink size={11} />
-                  </a>
+                  </SourceLink>
                   <span>
                     확인:{' '}
                     {selectedEvent.factualObservedAt
-                      ? new Date(selectedEvent.factualObservedAt).toLocaleString('ko-KR', {
-                          timeZone: 'Asia/Seoul',
-                        })
+                      ? formatKst(selectedEvent.factualObservedAt)
                       : '—'}{' '}
                     KST
                   </span>
@@ -784,9 +788,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               )}
             </>
           ) : (
-            <div className="empty-state">
-              이 기간의 {sourceMode === 'demo' ? '예시' : '등록'} 일정이 없습니다.
-            </div>
+            <div className="empty-state">이 기간의 등록 일정이 없습니다.</div>
           )}
         </section>
         <section className="impact-card">
@@ -805,7 +807,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           </p>
           <div className="impact-assets">
             <span>영향 자산</span>
-            <strong>{selectedEvent?.assets?.join(' · ') ?? selectedEvent?.asset ?? '—'}</strong>
+            <strong>{selectedEvent?.assets.join(' · ') ?? '—'}</strong>
             <span className="impact-divider" />
             <span>분석 시계</span>
             <strong>{selectedEvent?.impactHorizon ?? '발표 후 1–5일'}</strong>
@@ -813,9 +815,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           <div className="impact-disclaimer">
             <CircleHelp size={13} />
             <span>
-              {sourceMode === 'demo'
-                ? '출처: Folio 합성 시나리오 · 확신 낮음'
-                : `출처: ${selectedEvent?.sourceName ?? '등록 일정 없음'} · 확신 ${selectedEvent?.confidence === 'high' ? '높음' : selectedEvent?.confidence === 'medium' ? '보통' : '낮음'} · 방향 ${selectedEvent?.impactDirection === 'up' ? '상승' : selectedEvent?.impactDirection === 'down' ? '하락' : selectedEvent?.impactDirection === 'mixed' ? '혼합' : '미정'}`}{' '}
+              {`출처: ${selectedEvent?.sourceName ?? '등록 일정 없음'} · 확신 ${selectedEvent?.confidence === 'high' ? '높음' : selectedEvent?.confidence === 'medium' ? '보통' : '낮음'} · 방향 ${selectedEvent?.impactDirection === 'up' ? '상승' : selectedEvent?.impactDirection === 'down' ? '하락' : selectedEvent?.impactDirection === 'mixed' ? '혼합' : '미정'}`}{' '}
               · 다른 조건이 동일하다는 가정이며 실제 결과와 다를 수 있습니다.
             </span>
           </div>

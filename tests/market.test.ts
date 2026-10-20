@@ -1,4 +1,5 @@
 import { describe, expect, it } from 'vitest';
+import type { MarketEvent } from '../src/lib/market';
 import {
   bollinger,
   chartWindowLength,
@@ -6,9 +7,7 @@ import {
   importancePresentation,
   formatChartPrice,
   normalizeComparison,
-  demoPrices,
   ema,
-  events,
   filterEvents,
   startOfWeekDay,
   shiftCalendarDate,
@@ -16,7 +15,38 @@ import {
   rsi,
   sma,
 } from '../src/lib/market';
-describe('synthetic technical indicators', () => {
+
+// Synthetic events for filter logic only; never imported by application code.
+const event = (
+  id: number,
+  country: string,
+  category: string,
+  assets: string[],
+  importance: number,
+  title: string,
+): MarketEvent => ({
+  id,
+  date: '2026-10-' + String(id).padStart(2, '0'),
+  day: id,
+  time: '09:00',
+  title,
+  country,
+  category,
+  asset: assets[0],
+  assets,
+  importance,
+  forecast: '—',
+  previous: '—',
+  description: '테스트 전용 합성 이벤트',
+});
+const events: MarketEvent[] = [
+  event(1, '미국', '고용', ['달러'], 2, '미국 신규 실업수당 청구건수'),
+  event(5, '미국', '물가', ['금리'], 3, '미국 소비자물가지수 (CPI)'),
+  event(7, '한국', '통화정책', ['원화'], 3, '한국은행 기준금리 결정'),
+  event(14, '미국', '에너지', ['유가'], 2, '미국 원유 재고'),
+  event(16, '미국', '물가', ['금리'], 3, '미국 개인소비지출 (PCE)'),
+];
+describe('technical indicators', () => {
   it('SMA requires full window and computes mean', () => {
     expect(sma([1, 2, 3, 4], 3)).toEqual([null, null, 2, 3]);
   });
@@ -32,11 +62,6 @@ describe('synthetic technical indicators', () => {
   it('rising and falling RSI are bounded', () => {
     expect(rsi([1, 2, 3, 4], 3)[3]).toBe(100);
     expect(rsi([4, 3, 2, 1], 3)[3]).toBe(0);
-  });
-  it('uses finite deterministic demo prices and distinct event ids', () => {
-    expect(demoPrices).toHaveLength(90);
-    expect(demoPrices.every((p) => Number.isFinite(p.close))).toBe(true);
-    expect(new Set(events.map((e) => e.id)).size).toBe(events.length);
   });
 });
 

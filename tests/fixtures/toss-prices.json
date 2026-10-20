@@ -1,0 +1,16 @@
+{
+  "result": [
+    {
+      "symbol": "005930",
+      "timestamp": "2026-10-20T09:30:00.123+09:00",
+      "lastPrice": "72000",
+      "currency": "KRW"
+    },
+    {
+      "symbol": "AAPL",
+      "timestamp": "2026-10-20T22:30:00.456+09:00",
+      "lastPrice": "185.70",
+      "currency": "USD"
+    }
+  ]
+}

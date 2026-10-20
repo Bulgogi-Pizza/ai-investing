@@ -50,6 +50,8 @@ Cloud Run URL이 아직 없으면 로컬에서 첫 검증 이미지를 Artifact 
 
 DART·FRED·ECOS 키, 텔레그램 봇 토큰·chat ID, SEC User-Agent는 같은 방식으로 저장하며 절차는 [외부 키·텔레그램 봇 준비](provider-setup.md)를 따른다.
 
+`TOSS_OWNER_USER_ID` 계정은 관리자(admin) 계정이어야 한다. 캘린더 JSON 등록과 공식 뉴스 수집은 관리자이면서 소유자인 계정만 할 수 있고, 소유자가 관리자가 아니면 이 쓰기 작업을 할 계정이 없다. `scripts/provision-owner.ts`가 만드는 최초 소유자는 관리자다.
+
 ## 운영
 
 `Verify`가 성공한 main push SHA만 `Deploy GCP`에서 Docker 이미지 digest로 배포한다. PR/fork는 배포되지 않는다. 이미지 보존은 최신5개/30일로 관리한다. `/api/health` 검증 후 Cloud Run revision/트래픽을 확인한다. 실패 시 이전 revision으로 트래픽 복구하고 원인 수정 후 다시 main 검증한다. 동시 배포는 직렬화된다. 런타임 로그에 요청 body/계좌/토큰을 기록하지 않는다.

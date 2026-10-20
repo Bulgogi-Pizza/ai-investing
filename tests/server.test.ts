@@ -41,7 +41,7 @@ beforeEach(async () => {
       version: 1,
     })
   ).id;
-  app = createApp({ store, origin });
+  app = createApp({ store, origin, ownerUserId: memberId });
 });
 describe('server authorization', () => {
   it('exposes health only and denies every anonymous private resource', async () => {
@@ -50,6 +50,9 @@ describe('server authorization', () => {
     for (const path of [
       '/api/auth/me',
       '/api/portfolio',
+      '/api/market/candles?symbol=005930',
+      '/api/market/prices?symbols=005930',
+      '/api/market/indicators',
       '/api/strategy',
       '/api/recommendations',
       '/api/news/sources',
@@ -85,6 +88,8 @@ describe('server authorization', () => {
           .send({})
       ).status,
     ).toBe(403);
+    // Admin AND owner: only an admin who is also the configured owner reaches input validation.
+    app = createApp({ store, origin, ownerUserId: adminId });
     const admin = await login('admin@example.test');
     expect(
       (
@@ -153,7 +158,8 @@ describe('server authorization', () => {
       strategy,
     );
     const admin = await login('admin@example.test');
-    expect((await request(app).get('/api/strategy').set('Cookie', admin)).body.strategy).toBeNull();
+    expect((await request(app).get('/api/strategy').set('Cookie', admin)).status).toBe(403);
+    expect(await store.getStrategy(adminId)).toBeNull();
     expect(
       (
         await request(app)
@@ -248,7 +254,7 @@ describe('server authorization', () => {
       new MemoryTokenCache(),
       transport,
     );
-    app = createApp({ store, origin, toss });
+    app = createApp({ store, origin, toss, ownerUserId: memberId });
     expect((await request(app).get('/api/market/candles?symbol=005930')).status).toBe(401);
     const member = await login();
     const owner = await request(app).get('/api/portfolio').set('Cookie', member);
@@ -261,6 +267,86 @@ describe('server authorization', () => {
       (await request(app).get('/api/market/candles?symbol=005930&count=-1').set('Cookie', member))
         .status,
     ).toBe(400);
+  });
+  it('rejects a valid strategy write from a non-owner and leaves the store unchanged', async () => {
+    const strategy = {
+      name: '비소유자 전략',
+      horizon: '5년',
+      benchmark: 'S&P 500',
+      riskTolerance: 'medium',
+      targetAllocations: [
+        { asset: 'stock', percentage: 60 },
+        { asset: 'bond', percentage: 40 },
+      ],
+      notes: '',
+    };
+    const admin = await login('admin@example.test');
+    const response = await request(app)
+      .put('/api/strategy')
+      .set('Origin', origin)
+      .set('Cookie', admin)
+      .send({ strategy });
+    expect(response.status).toBe(403);
+    expect(response.body.error.code).toBe('OWNER_REQUIRED');
+    expect(await store.getStrategy(adminId)).toBeNull();
+    expect(await store.getStrategy(memberId)).toBeNull();
+    const owner = await login();
+    const saved = await request(app)
+      .put('/api/strategy')
+      .set('Origin', origin)
+      .set('Cookie', owner)
+      .send({ strategy });
+    expect(saved.status).toBe(200);
+    expect(await store.getStrategy(adminId)).toBeNull();
+  });
+  it('gates calendar, news and strategy to the owner while admin user management stays admin-only', async () => {
+    const calendarEvent = {
+      id: 1,
+      date: '2026-10-20',
+      time: '09:00',
+      title: '물가 발표',
+      country: '한국',
+      category: '물가',
+      assets: ['원화'],
+      importance: 3,
+      description: '설명',
+      sourceUrl: 'https://example.com/r',
+      sourceName: '출처',
+      impactDirection: 'mixed',
+      impactHorizon: '1주',
+      confidence: 'low',
+      factualObservedAt: '2026-10-20T00:00:00Z',
+    };
+    const reads = [
+      '/api/strategy',
+      '/api/calendar/events?from=2026-10-01&to=2026-10-31',
+      '/api/news/sources',
+    ];
+    const owner = await login();
+    const admin = await login('admin@example.test');
+    for (const path of reads) {
+      expect((await request(app).get(path).set('Cookie', owner)).status, path).toBe(200);
+      const denied = await request(app).get(path).set('Cookie', admin);
+      expect(denied.status, path).toBe(403);
+      expect(denied.body.error.code).toBe('OWNER_REQUIRED');
+      expect((await request(app).get(path)).status).toBe(401);
+    }
+    const write = (cookie: string, path: string, body: object, method: 'post' | 'put' = 'post') =>
+      request(app)[method](path).set('Origin', origin).set('Cookie', cookie).send(body);
+    expect(
+      (await write(admin, '/api/admin/calendar/events', { events: [calendarEvent] })).body.error
+        .code,
+    ).toBe('OWNER_REQUIRED');
+    expect((await write(admin, '/api/admin/news/sync', {})).status).toBe(403);
+    expect((await write(admin, '/api/strategy', { strategy: {} }, 'put')).status).toBe(403);
+    expect(
+      (await write(owner, '/api/admin/calendar/events', { events: [calendarEvent] })).status,
+    ).toBe(403);
+    expect((await write(owner, '/api/admin/news/sync', {})).status).toBe(403);
+    expect((await request(app).get('/api/admin/users').set('Cookie', admin)).status).toBe(200);
+    const unconfigured = createApp({ store, origin });
+    for (const path of reads)
+      expect((await request(unconfigured).get(path).set('Cookie', admin)).status, path).toBe(503);
   });
   it('rotates existing sessions at login', async () => {
     const first = await login();

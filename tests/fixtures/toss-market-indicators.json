@@ -1,0 +1,8 @@
+{
+  "result": [
+    { "symbol": "KOSPI", "timestamp": "2026-10-20T15:30:00+09:00", "lastPrice": "2812.45" },
+    { "symbol": "KOSDAQ", "timestamp": "2026-10-20T15:30:00+09:00", "lastPrice": "845.32" },
+    { "symbol": "KR_BOND_2Y", "timestamp": "2026-10-20T15:29:55+09:00", "lastPrice": "2.98" },
+    { "symbol": "KR_BOND_10Y", "timestamp": null, "lastPrice": "3.25" }
+  ]
+}

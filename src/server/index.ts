@@ -29,6 +29,8 @@ const app = createApp({
   loginThrottle: production ? new FirestoreLoginThrottle() : new MemoryLoginThrottle(),
   staticDirectory: 'dist',
   toss: tossFromEnvironment(production),
+  // Same value the Toss client is bound to; owner-only routes fail closed when unset.
+  ownerUserId: process.env.TOSS_OWNER_USER_ID,
   calendarRepository: production
     ? new FirestoreCalendarRepository()
     : new MemoryCalendarRepository(),

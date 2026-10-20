@@ -17,10 +17,11 @@ import {
   type CalendarRepository,
 } from './calendar.js';
 import { createNewsRouter } from './news.js';
+import { ownerGate } from './owner.js';
 import type { aiFromEnvironment } from './ai.js';
 import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
-import { ProviderError, type TossClient } from './toss.js';
+import { ProviderError, parsePriceSymbols, type TossClient } from './toss.js';
 import { MemoryStore, type Store, type Strategy, type User } from './store.js';
 
 export type AppOptions = {
@@ -29,6 +30,8 @@ export type AppOptions = {
   origin?: string;
   staticDirectory?: string;
   toss?: TossClient;
+  /** Same TOSS_OWNER_USER_ID the Toss client is bound to. Missing => owner routes fail closed. */
+  ownerUserId?: string;
   calendarRepository?: CalendarRepository;
   loginThrottle?: LoginThrottle;
   ai?: ReturnType<typeof aiFromEnvironment>;
@@ -80,6 +83,21 @@ export function createApp(options: AppOptions = {}) {
   const loginThrottle = options.loginThrottle ?? new MemoryLoginThrottle();
   const store = options.store ?? new MemoryStore();
   const calendarRepository = options.calendarRepository ?? new MemoryCalendarRepository();
+  // Owner-only gates. Authentication has already run; both read the server-side session user.
+  // Toss-backed data additionally needs the Toss client; owner-account data needs only the id.
+  const ownerAccount = ownerGate(options.ownerUserId);
+  const requireOwner = (req: Request, res: Response, next: NextFunction) => {
+    if (!options.toss) {
+      failure(
+        res,
+        503,
+        'TOSS_INTEGRATION_UNAVAILABLE',
+        '토스 API 환경변수와 소유 계정 연결 설정이 필요합니다.',
+      );
+      return;
+    }
+    ownerAccount(req, res, next);
+  };
   const app = express();
   app.disable('x-powered-by');
   // Cloud Run has one trusted ingress proxy; never trust arbitrary forwarded chains.
@@ -252,10 +270,10 @@ export function createApp(options: AppOptions = {}) {
     }
     res.sendStatus(204);
   });
-  app.get('/api/strategy', async (_req, res) =>
+  app.get('/api/strategy', ownerAccount, async (_req, res) =>
     res.json({ strategy: await store.getStrategy(res.locals.user.id) }),
   );
-  app.put('/api/strategy', async (req, res) => {
+  app.put('/api/strategy', ownerAccount, async (req, res) => {
     const input = req.body?.strategy;
     if (!validStrategy(input)) {
       failure(
@@ -280,23 +298,10 @@ export function createApp(options: AppOptions = {}) {
     await store.putStrategy(res.locals.user.id, strategy);
     res.json({ strategy });
   });
-  app.get('/api/portfolio', async (_req, res) => {
-    if (!options.toss) {
-      failure(
-        res,
-        503,
-        'TOSS_INTEGRATION_UNAVAILABLE',
-        '토스 API 환경변수와 소유 계정 연결 설정이 필요합니다.',
-      );
-      return;
-    }
-    res.json(await options.toss.portfolio(res.locals.user.id));
+  app.get('/api/portfolio', requireOwner, async (_req, res) => {
+    res.json(await options.toss!.portfolio(res.locals.user.id));
   });
-  app.get('/api/market/candles', async (req, res) => {
-    if (!options.toss) {
-      failure(res, 503, 'TOSS_INTEGRATION_UNAVAILABLE', '토스 API 연결 설정이 필요합니다.');
-      return;
-    }
+  app.get('/api/market/candles', requireOwner, async (req, res) => {
     if (
       typeof req.query.symbol !== 'string' ||
       (req.query.interval !== undefined && typeof req.query.interval !== 'string') ||
@@ -307,15 +312,27 @@ export function createApp(options: AppOptions = {}) {
       return;
     }
     res.json(
-      await options.toss.candles(
+      await options.toss!.candles(
         req.query.symbol,
         req.query.interval ?? '1d',
         req.query.count === undefined ? 100 : Number(req.query.count),
       ),
     );
   });
+  app.get('/api/market/prices', requireOwner, async (req, res) => {
+    const symbols = parsePriceSymbols(req.query.symbols);
+    if (!symbols) {
+      failure(res, 400, 'INVALID_MARKET_QUERY', '종목 코드 목록을 확인하세요. 최대 50개입니다.');
+      return;
+    }
+    res.json(await options.toss!.prices(symbols));
+  });
+  app.get('/api/market/indicators', requireOwner, async (_req, res) => {
+    res.json(await options.toss!.marketIndicators());
+  });
   app.get(
     '/api/recommendations',
+    requireOwner,
     rateLimit({
       windowMs: 60000,
       limit: 3,
@@ -330,10 +347,6 @@ export function createApp(options: AppOptions = {}) {
         failure(res, 400, 'INVALID_RECOMMENDATION_QUERY', '추천 기간과 종목을 확인하세요.');
         return;
       }
-      if (!options.toss) {
-        failure(res, 503, 'TOSS_INTEGRATION_UNAVAILABLE', '토스 API 연결 설정이 필요합니다.');
-        return;
-      }
       const strategy = await store.getStrategy(res.locals.user.id);
       if (!strategy) {
         failure(res, 409, 'STRATEGY_REQUIRED', '추천 전에 내 계정 전략을 저장하세요.');
@@ -344,16 +357,17 @@ export function createApp(options: AppOptions = {}) {
         strategy,
         period,
         symbol: symbol as string,
-        toss: options.toss,
+        toss: options.toss!,
         calendar: calendarRepository,
       });
       res.json(options.ai ? await options.ai.enrich(rules, res.locals.user.id) : rules);
     },
   );
-  app.use(createNewsRouter({ repository: calendarRepository }));
+  app.use(createNewsRouter({ repository: calendarRepository, ownerUserId: options.ownerUserId }));
   app.use(
     createCalendarRouter({
       repository: calendarRepository,
+      ownerUserId: options.ownerUserId,
     }),
   );
   app.use('/api', (_req, res) => failure(res, 404, 'NOT_FOUND', '요청한 API를 찾을 수 없습니다.'));

@@ -294,6 +294,7 @@ describe('actual-input rule recommendations', () => {
       store,
       origin: 'http://127.0.0.1:5173',
       toss: toss as unknown as TossClient,
+      ownerUserId: user.id,
     });
     expect((await request(app).get('/api/recommendations')).status).toBe(401);
     const login = await request(app)

@@ -1,16 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import {
   Activity,
-  ArrowDownRight,
   ArrowRight,
-  ArrowUpRight,
   Bell,
   CalendarDays,
   ChartNoAxesCombined,
   ChevronRight,
   CircleHelp,
   ExternalLink,
-  LogIn,
   LogOut,
   Plus,
   Search,
@@ -24,6 +21,11 @@ import Portfolio from './features/portfolio';
 import Recommendations from './features/recommendations';
 import CalendarPage from './features/calendar/CalendarPage';
 import ChartsPage from './features/charts/ChartsPage';
+import LoginScreen, { type SessionUser } from './features/LoginScreen';
+import MarketStrip from './features/MarketStrip';
+import { DataState, LoadingState } from './components/DataState';
+import { ApiError, AUTH_REQUIRED_EVENT, useApiResource } from './lib/api';
+
 type Page = 'calendar' | 'charts' | 'portfolio' | 'ai';
 const nav = [
   { id: 'calendar', label: '경제 캘린더', icon: CalendarDays },
@@ -31,22 +33,106 @@ const nav = [
   { id: 'portfolio', label: '내 자산', icon: Wallet },
   { id: 'ai', label: 'AI 인사이트', icon: Sparkles },
 ] as const;
+const watchlist = [
+  { label: '삼성전자', symbol: '005930', icon: '삼', tone: 'samsung' },
+  { label: 'Apple', symbol: 'AAPL', icon: 'A', tone: 'apple' },
+] as const;
+type Session =
+  | { status: 'checking' }
+  | { status: 'anonymous' }
+  | { status: 'unavailable' }
+  | { status: 'authenticated'; user: SessionUser };
+
+type WatchPrices = { prices: { symbol: string; lastPrice: string; currency: 'KRW' | 'USD' }[] };
+function parseWatchPrices(body: unknown): WatchPrices {
+  const v = body as WatchPrices;
+  if (
+    !Array.isArray(v?.prices) ||
+    !v.prices.every(
+      (p) =>
+        typeof p?.symbol === 'string' &&
+        Number.isFinite(Number(p.lastPrice)) &&
+        (p.currency === 'KRW' || p.currency === 'USD'),
+    )
+  )
+    throw new ApiError(502, 'INVALID_RESPONSE', '시세 응답 형식을 확인하지 못했습니다.');
+  return v;
+}
+const priceLabel = (price: WatchPrices['prices'][number]) =>
+  price.currency === 'KRW'
+    ? `${Number(price.lastPrice).toLocaleString('ko-KR')}원`
+    : `$${Number(price.lastPrice).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 export default function App() {
+  const [session, setSession] = useState<Session>({ status: 'checking' });
+  const [attempt, setAttempt] = useState(0);
+  useEffect(() => {
+    const controller = new AbortController();
+    setSession({ status: 'checking' });
+    fetch('/api/auth/me', { signal: controller.signal })
+      .then(async (response) => {
+        if (controller.signal.aborted) return;
+        if (response.status === 401) return setSession({ status: 'anonymous' });
+        if (!response.ok) throw new Error('session check failed');
+        const body = await response.json();
+        if (!body?.user?.email) throw new Error('invalid session');
+        setSession({ status: 'authenticated', user: body.user });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setSession({ status: 'unavailable' });
+      });
+    return () => controller.abort();
+  }, [attempt]);
+  useEffect(() => {
+    // A 401 on any private request means the session ended: show the login screen again.
+    const expired = () =>
+      setSession((current) =>
+        current.status === 'authenticated' ? { status: 'anonymous' } : current,
+      );
+    window.addEventListener(AUTH_REQUIRED_EVENT, expired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, expired);
+  }, []);
+  if (session.status === 'checking')
+    return (
+      <main className="login-screen">
+        <LoadingState label="로그인 상태를 확인하는 중…" />
+      </main>
+    );
+  if (session.status === 'unavailable')
+    return (
+      <main className="login-screen">
+        <DataState
+          issue={{
+            kind: 'error',
+            message: '서버에 연결할 수 없습니다. 잠시 후 다시 시도해 주세요.',
+            retryable: true,
+          }}
+          onRetry={() => setAttempt((v) => v + 1)}
+        />
+      </main>
+    );
+  if (session.status === 'anonymous')
+    return <LoginScreen onLoggedIn={(user) => setSession({ status: 'authenticated', user })} />;
+  return <Workspace user={session.user} onLoggedOut={() => setSession({ status: 'anonymous' })} />;
+}
+
+function Workspace({ user, onLoggedOut }: { user: SessionUser; onLoggedOut: () => void }) {
   const searchRef = useRef<HTMLInputElement>(null);
   const [page, setPage] = useState<Page>('calendar');
   const [initialSymbol, setInitialSymbol] = useState('삼성전자');
-  const [authVersion, setAuthVersion] = useState(0);
   const [sessionError, setSessionError] = useState('');
   const [accounts, setAccounts] = useState<
     { id: string; email: string; role: string; active: boolean }[]
   >([]);
   const [adminLoading, setAdminLoading] = useState(false);
-  const [user, setUser] = useState<{ email: string; role: string } | null>(null);
-  const [login, setLogin] = useState(false);
   const [admin, setAdmin] = useState(false);
   const [authError, setAuthError] = useState('');
   const [notice, setNotice] = useState(false);
   const [search, setSearch] = useState('');
+  const watch = useApiResource(
+    `/api/market/prices?symbols=${watchlist.map((w) => w.symbol).join(',')}`,
+    parseWatchPrices,
+  );
   useEffect(() => {
     const shortcut = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
@@ -57,37 +143,19 @@ export default function App() {
     document.addEventListener('keydown', shortcut);
     return () => document.removeEventListener('keydown', shortcut);
   }, []);
-  useEffect(() => {
-    fetch('/api/auth/me')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => setUser(d?.user ?? null))
-      .catch(() => {});
-  }, []);
-  async function submit(e: React.FormEvent<HTMLFormElement>) {
+  async function createAccount(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
     setAuthError('');
     const form = new FormData(e.currentTarget);
     try {
-      const r = await fetch(admin ? '/api/admin/users' : '/api/auth/login', {
+      const r = await fetch('/api/admin/users', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: form.get('email'), password: form.get('password') }),
       });
-      if (!r.ok)
-        throw new Error(
-          admin
-            ? '계정 생성에 실패했습니다. 관리자 권한과 입력값을 확인해 주세요.'
-            : '이메일 또는 비밀번호를 확인해 주세요. 활성화된 관리자 등록 계정만 로그인할 수 있습니다.',
-        );
-      const d = await r.json();
-      if (!admin) {
-        setUser(d.user);
-        setAuthVersion((v) => v + 1);
-        setLogin(false);
-      } else {
-        await loadAccounts();
-        setAuthError('계정을 등록했습니다.');
-      }
+      if (!r.ok) throw new Error('계정 생성에 실패했습니다. 관리자 권한과 입력값을 확인해 주세요.');
+      await loadAccounts();
+      setAuthError('계정을 등록했습니다.');
     } catch (error) {
       setAuthError(error instanceof Error ? error.message : '연결에 실패했습니다.');
     }
@@ -111,8 +179,7 @@ export default function App() {
       const r = await fetch('/api/auth/logout', { method: 'POST' });
       if (!r.ok && r.status !== 401)
         throw new Error('로그아웃에 실패했습니다. 다시 시도해 주세요.');
-      setUser(null);
-      setAuthVersion((v) => v + 1);
+      onLoggedOut();
     } catch (e) {
       setSessionError(e instanceof Error ? e.message : '연결 오류');
     }
@@ -163,32 +230,40 @@ export default function App() {
         <div className="sidebar-caption">
           나의 워치리스트 <Star size={13} />
         </div>
-        <button
-          className="watch-item"
-          onClick={() => {
-            setInitialSymbol('삼성전자');
-            setPage('charts');
-          }}
-        >
-          <span className="stock-icon samsung">삼</span>
-          <span>
-            삼성전자<small>005930</small>
-          </span>
-          <span className="watch-change">+1.24%</span>
-        </button>
-        <button
-          className="watch-item"
-          onClick={() => {
-            setInitialSymbol('Apple');
-            setPage('charts');
-          }}
-        >
-          <span className="stock-icon apple">A</span>
-          <span>
-            Apple<small>AAPL</small>
-          </span>
-          <span className="watch-change">+0.82%</span>
-        </button>
+        {watchlist.map((item) => {
+          const price =
+            watch.state.status === 'ready'
+              ? watch.state.data.prices.find((p) => p.symbol === item.symbol)
+              : undefined;
+          return (
+            <button
+              key={item.symbol}
+              className="watch-item"
+              onClick={() => {
+                setInitialSymbol(item.label);
+                setPage('charts');
+              }}
+            >
+              <span className={`stock-icon ${item.tone}`}>{item.icon}</span>
+              <span>
+                {item.label}
+                <small>{item.symbol}</small>
+              </span>
+              <span
+                className="watch-price"
+                title={
+                  watch.state.status === 'issue'
+                    ? watch.state.issue.message
+                    : price
+                      ? '토스증권 현재가'
+                      : undefined
+                }
+              >
+                {price ? priceLabel(price) : watch.state.status === 'loading' ? '…' : '—'}
+              </span>
+            </button>
+          );
+        })}
         <button className="watch-add" onClick={() => setPage('charts')}>
           <Plus size={15} /> 관심종목 관리
         </button>
@@ -206,24 +281,13 @@ export default function App() {
             <CircleHelp size={17} /> 데이터 안내 <ExternalLink size={13} />
           </button>
           <div className="profile">
-            <span className="avatar">{user ? 'U' : 'D'}</span>
+            <span className="avatar">U</span>
             <div>
-              <strong>{user ? '내 투자 계정' : '데모 워크스페이스'}</strong>
-              <small>{user ? '로그인됨' : '둘러보기 모드'}</small>
+              <strong>내 투자 계정</strong>
+              <small>{user.role === 'admin' ? '관리자 · 로그인됨' : '로그인됨'}</small>
             </div>
-            <button
-              aria-label={user ? '로그아웃' : '로그인'}
-              onClick={async () => {
-                if (user) {
-                  await logout();
-                } else {
-                  setAdmin(false);
-                  setAuthError('');
-                  setLogin(true);
-                }
-              }}
-            >
-              {user ? <LogOut size={17} /> : <LogIn size={17} />}
+            <button aria-label="로그아웃" onClick={() => void logout()}>
+              <LogOut size={17} />
             </button>
           </div>
         </div>
@@ -253,58 +317,25 @@ export default function App() {
               <Bell size={19} />
               <i />
             </button>
-            {user?.role === 'admin' && (
+            {user.role === 'admin' && (
               <button
                 className="button small"
                 onClick={() => {
                   setAdmin(true);
                   setAuthError('');
-                  setLogin(true);
                   void loadAccounts();
                 }}
               >
                 계정 등록
               </button>
             )}
-            <button
-              className="button small header-login"
-              onClick={() => {
-                if (user) void logout();
-                else {
-                  setAdmin(false);
-                  setAuthError('');
-                  setLogin(true);
-                }
-              }}
-            >
-              {user ? '로그아웃' : '로그인'}
+            <button className="button small header-login" onClick={() => void logout()}>
+              로그아웃
             </button>
-            <span className="demo-pill">
-              <span /> {user ? '샘플 시세 포함' : '합성 데모'}
-            </span>
           </div>
         </header>
         <main>
-          <div className="market-strip">
-            {[
-              { name: 'KOSPI', value: '2,641.25', change: '+0.74%', up: true },
-              { name: 'S&P 500', value: '5,892.16', change: '+0.42%', up: true },
-              { name: 'NASDAQ', value: '18,421.09', change: '+0.86%', up: true },
-              { name: 'USD/KRW', value: '1,365.20', change: '−0.18%', up: false },
-              { name: 'GOLD', value: '2,734.80', change: '+0.31%', up: true },
-            ].map((m) => (
-              <div className="market-item" key={m.name}>
-                <span>{m.name}</span>
-                <strong>{m.value}</strong>
-                <small className={m.up ? 'positive' : 'negative'}>
-                  {m.up ? <ArrowUpRight size={12} /> : <ArrowDownRight size={12} />} {m.change}
-                </small>
-              </div>
-            ))}
-            <span className="market-demo">
-              예시 시세 <CircleHelp size={12} />
-            </span>
-          </div>
+          <MarketStrip />
           {sessionError && (
             <div role="alert" className="form-error">
               {sessionError}
@@ -314,8 +345,9 @@ export default function App() {
             <div className="data-notice">
               <ShieldCheck size={17} />
               <span>
-                샘플 시세와 합성 데모는 실제 금융 정보가 아닙니다. 등록 일정과 토스 조회 모드는 각
-                화면에 표시된 출처와 조회 시각을 확인하세요. 모든 시간은 KST입니다.
+                시세·자산은 소유자 계정에 연결된 토스증권 조회 결과이고, 일정은 관리자가 출처와 함께
+                등록한 자료입니다. 데이터를 받지 못하면 예시 값으로 대체하지 않고 원인을 안내합니다.
+                모든 시간은 KST입니다.
               </span>
               <button aria-label="안내 닫기" onClick={() => setNotice(false)}>
                 <X size={16} />
@@ -323,89 +355,66 @@ export default function App() {
             </div>
           )}
           {page === 'calendar' ? (
-            <CalendarPage
-              key={`calendar-${authVersion}`}
-              search={search}
-              isAdmin={user?.role === 'admin'}
-            />
+            <CalendarPage search={search} isAdmin={user.role === 'admin'} />
           ) : page === 'charts' ? (
             <ChartsPage key={initialSymbol} initialSymbol={initialSymbol} />
           ) : page === 'portfolio' ? (
-            <Portfolio key={`portfolio-${authVersion}`} />
+            <Portfolio />
           ) : (
-            <Recommendations key={`recommendations-${authVersion}`} />
+            <Recommendations />
           )}
           <footer>
             folio — 더 넓게 보고, 나답게 투자하기.
-            <span>샘플 시세 포함 · 데모 기준일 2026.10.20 · KST (UTC+9)</span>
+            <span>실제 조회 데이터만 표시 · KST (UTC+9)</span>
           </footer>
         </main>
       </div>
-      {login && (
-        <div
-          className="modal-backdrop"
-          onClick={() => {
-            setLogin(false);
-            setAdmin(false);
-          }}
-        >
+      {admin && (
+        <div className="modal-backdrop" onClick={() => setAdmin(false)}>
           <section
             className="modal"
             role="dialog"
             aria-modal="true"
-            aria-label={admin ? '계정 등록' : '로그인'}
+            aria-label="계정 등록"
             onClick={(e) => e.stopPropagation()}
           >
-            <button
-              className="modal-close"
-              aria-label="닫기"
-              onClick={() => {
-                setLogin(false);
-                setAdmin(false);
-              }}
-            >
+            <button className="modal-close" aria-label="닫기" onClick={() => setAdmin(false)}>
               <X size={19} />
             </button>
             <div className="modal-symbol">
               <ShieldCheck size={24} />
             </div>
-            <h2>{admin ? '계정 관리' : '나의 투자 공간에 로그인'}</h2>
-            <p>
-              {admin
-                ? '관리자가 등록한 활성 계정만 접근할 수 있습니다.'
-                : '관리자가 등록한 계정으로 안전하게 접속하세요.'}
-            </p>
-            {admin && (
-              <section className="admin-account-list" aria-label="등록된 계정">
-                <h3>등록된 계정</h3>
-                {adminLoading ? (
-                  <p role="status">불러오는 중…</p>
-                ) : accounts.length ? (
-                  accounts.map((account) => (
-                    <div className="admin-account-row" key={account.id}>
-                      <div>
-                        <strong>{account.email}</strong>
-                        <small>
-                          {account.role === 'admin' ? '관리자' : '일반 계정'} ·{' '}
-                          {account.active ? '활성' : '비활성'}
-                        </small>
-                      </div>
-                      {account.role !== 'admin' && account.active && (
-                        <button className="button small" onClick={() => void revoke(account.id)}>
-                          접근 해제
-                        </button>
-                      )}
+            <h2>계정 관리</h2>
+            <p>관리자가 등록한 활성 계정만 접근할 수 있습니다.</p>
+            <section className="admin-account-list" aria-label="등록된 계정">
+              <h3>등록된 계정</h3>
+              {adminLoading ? (
+                <p role="status">불러오는 중…</p>
+              ) : accounts.length ? (
+                accounts.map((account) => (
+                  <div className="admin-account-row" key={account.id}>
+                    <div>
+                      <strong>{account.email}</strong>
+                      <small>
+                        {account.role === 'admin' ? '관리자' : '일반 계정'} ·{' '}
+                        {account.active ? '활성' : '비활성'}
+                      </small>
                     </div>
-                  ))
-                ) : (
-                  <p>표시할 계정이 없습니다.</p>
-                )}
-              </section>
-            )}
-            <form onSubmit={submit}>
+                    {account.role !== 'admin' && account.active && (
+                      <button className="button small" onClick={() => void revoke(account.id)}>
+                        접근 해제
+                      </button>
+                    )}
+                  </div>
+                ))
+              ) : (
+                <p>표시할 계정이 없습니다.</p>
+              )}
+            </section>
+            <form onSubmit={createAccount}>
               <label>
                 이메일
-                <input name="email" type="email" autoComplete="username" required />
+                <input name="email" type="email" autoComplete="off" required />
               </label>
               <label>
                 비밀번호
@@ -413,7 +422,7 @@ export default function App() {
                   name="password"
                   type="password"
                   minLength={12}
-                  autoComplete={admin ? 'new-password' : 'current-password'}
+                  autoComplete="new-password"
                   required
                 />
               </label>
@@ -423,7 +432,7 @@ export default function App() {
                 </div>
               )}
               <button className="button primary" type="submit">
-                {admin ? '계정 등록' : '로그인'}
+                계정 등록
                 <ArrowRight size={16} />
               </button>
             </form>

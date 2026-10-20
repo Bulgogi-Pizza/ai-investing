@@ -2,7 +2,7 @@
 
 SOT: `docs/planning/requirements.md` AUTH. 서버 구현: `src/server/app.ts`, `auth.ts`, `store.ts`. 기능 테스트: `tests/auth.test.ts`, `tests/server.test.ts`, `tests/login-throttle.test.ts`.
 
-관리자만 `/api/admin/users`로 회원을 만든다. 공개 가입은 없다. API로 생성되는 계정은 항상 member이며 클라이언트 role 필드를 무시한다. 모든 `/api` 요청은 health/login을 제외하고 세션 검사, 계정 활성 상태 및 버전 검사를 통과해야 한다. 관리자 계정 비활성화는 서버가 즉시 기존 세션도 차단한다. 본인 비활성화는 관리 API에서 차단한다.
+관리자만 `/api/admin/users`로 회원을 만든다. 인증과 별개로 소유자 전용 경로(자산·시장·추천·전략·캘린더·뉴스와 관리자 쓰기 경로)는 서버에서 `TOSS_OWNER_USER_ID`와 세션 사용자를 비교해 소유자가 아니면 403 `OWNER_REQUIRED`로 막는다([금융 서비스 연결](integrations.md)). 계정 관리 경로는 관리자 전용으로 유지된다. 공개 가입은 없다. API로 생성되는 계정은 항상 member이며 클라이언트 role 필드를 무시한다. 모든 `/api` 요청은 health/login을 제외하고 세션 검사, 계정 활성 상태 및 버전 검사를 통과해야 한다. 관리자 계정 비활성화는 서버가 즉시 기존 세션도 차단한다. 본인 비활성화는 관리 API에서 차단한다.
 
 비밀번호는 32바이트 난수 salt와 scrypt 64바이트 파생키로 저장한다. 로그인 비밀번호는 12–256자다. 원문 비밀번호를 로그에 남기지 않는다. 세션은 32바이트 난수 토큰이고 서버에는 SHA-256 해시만 저장한다. 만료는 8시간으로 서버가 검증한다. production 쿠키는 HttpOnly, Secure, SameSite=Strict다. 로그인 보호는 운영 Firestore loginAttempts에 IP별15분10회 및 정규화 이메일별15분5회를 두 키 트랜잭션으로 공유한다. 성공과 실패 모두 횟수에 포함하고 비밀번호 검증 전에 차감한다. 알 수 없는 계정에도 동일하게 적용하여 계정 존재 여부를 노출하지 않는다. 여러 IP에서 같은 이메일을 시도해도 이메일 한도를 공유하며 scale-to-zero·인스턴스 교체에도 보존된다. 문서 ID는 접두어를 포함한 IP/이메일의 SHA-256 해시이며 원문 IP/이메일을 저장하지 않는다. IPv6 IP는 /56으로 정규화한다. 제한 시429와 Retry-After, 저장소 오류 시 계정 조회 전에503으로 차단한다. ttlAt Timestamp의 TTL을 켜서 만료 문서를 정리하며 TTL 삭제가 늦어져도 resetAt 서버 검증으로 창을 갱신한다. 개발·테스트 MemoryLoginThrottle도 같은 두 한도를 사용한다. 별도로 기존 인스턴스 IP15분10회 및 전체API 분당120회 제한을 유지한다. 전체API 제한은 인스턴스별이며 엄격한 전체API 공유한도는 후속 과제다. 모든 API 변경 요청에 정확히 일치하는 Origin을 요구한다. 로그인 시에도 동일하다. 사용자 정보 응답에는 비밀번호 해시를 포함하지 않는다. 인증 응답은 no-store다.
 

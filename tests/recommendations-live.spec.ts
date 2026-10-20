@@ -1,83 +1,15 @@
 import { test, expect } from '@playwright/test';
+import { liveInsight, mockApi, ownerUser } from './fixtures/api-mock';
 
-const liveInsight = {
-  engine: 'rules-v1',
-  dataMode: 'live',
-  asOf: '2026-10-20T01:00:00Z',
-  period: 'daily',
-  symbol: '005930',
-  horizon: { tradingDays: 1, calendarDays: 1 },
-  strategy: {
-    name: '검증용 장기 전략',
-    horizon: '5',
-    benchmark: 'KOSPI 200',
-    riskTolerance: 'medium',
-    targetAllocations: [
-      { asset: 'stock', percentage: 60 },
-      { asset: 'bond', percentage: 30 },
-      { asset: 'cash', percentage: 10 },
-    ],
-    notes: '분산 투자',
-  },
-  decision: {
-    action: 'hold-plan',
-    title: '저장된 투자 원칙 점검',
-    rationale: '실제 입력 계약을 모사한 응답으로 기간 수익률과 목표 배분을 점검합니다.',
-    thresholdPercent: 4,
-  },
-  metrics: {
-    returnPercent: 1.25,
-    sma20: 71000,
-    rsi14: 58.4,
-    latestClose: 72400,
-    latestTimestamp: '2026-10-20T00:00:00Z',
-  },
-  evidence: {
-    market: {
-      source: 'Toss Securities OpenAPI',
-      asOf: '2026-10-20T01:00:00Z',
-      candles: [{ timestamp: '2026-10-20T00:00:00Z' }],
-    },
-    calendar: {
-      from: '2026-10-20',
-      to: '2026-10-21',
-      source: 'admin-curated',
-      events: [
-        {
-          id: 4,
-          date: '2026-10-20',
-          time: '09:00',
-          title: '검증용 등록 경제 일정',
-          importance: 3,
-          sourceName: '공식 발표 출처',
-          sourceUrl: 'https://example.com/release',
-          factualObservedAt: '2026-10-20T00:00:00Z',
-        },
-      ],
-      truncated: false,
-      coverageWarning: '관리자가 등록한 일정만 포함하며 전체 뉴스가 아닙니다.',
-      relevanceRule: '한국 시장 또는 글로벌 일정과 해당 종목 직접 태그',
-      excludedCount: 2,
-    },
-  },
-  scenarios: ['목표 비중 유지 후 다음 기간 재점검'],
-  risks: ['과거 가격 변화는 미래 수익을 보장하지 않습니다.'],
-  stockExposureByCurrency: [
-    { currency: 'KRW', holdings: [{ symbol: '005930', weightWithinStocksPercent: 70 }] },
-  ],
-};
 test.beforeEach(async ({ page }) => {
-  await page.route('**/api/auth/me', (route) =>
-    route.fulfill({
-      status: 401,
-      contentType: 'application/json',
-      body: JSON.stringify({ error: { code: 'AUTH_REQUIRED' } }),
-    }),
-  );
+  await mockApi(page, { user: ownerUser });
   await page.goto('/');
-  await page.getByRole('button', { name: 'AI 인사이트', exact: false }).click();
 });
-test('내 데이터 분석 shows sourced rules and reloads by horizon without demo evidence', async ({
+const openInsights = (page: import('@playwright/test').Page) =>
+  page.getByRole('button', { name: 'AI 인사이트', exact: false }).click();
+const analyze = (page: import('@playwright/test').Page) =>
+  page.getByRole('button', { name: '분석 실행', exact: true }).click();
+test('AI 인사이트 shows sourced rules and reloads by horizon without demo evidence', async ({
   page,
 }, info) => {
   await page.route('**/api/recommendations?**', (route) => {
@@ -94,7 +26,8 @@ test('내 데이터 분석 shows sourced rules and reloads by horizon without de
       }),
     });
   });
-  await page.getByRole('button', { name: '내 데이터 분석', exact: true }).click();
+  await openInsights(page);
+  await analyze(page);
   await expect(page.getByRole('heading', { name: '저장된 투자 원칙 점검' })).toBeVisible();
   await expect(page.getByText('Toss Securities OpenAPI', { exact: true })).toBeVisible();
   await expect(page.getByText('검증용 등록 경제 일정', { exact: true })).toBeVisible();
@@ -109,6 +42,7 @@ test('내 데이터 분석 shows sourced rules and reloads by horizon without de
   await expect(page.getByRole('heading', { name: '판단의 전제와 위험' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '배분 시나리오 적용' })).toHaveCount(0);
   await page.getByRole('button', { name: '주간', exact: true }).click();
+  await analyze(page);
   await expect(page.getByText('5거래일 관찰', { exact: true })).toBeVisible();
   await expect(
     page.getByText('과거 가격 변화는 미래 수익을 보장하지 않습니다.', { exact: true }),
@@ -117,10 +51,9 @@ test('내 데이터 분석 shows sourced rules and reloads by horizon without de
     path: info.outputPath('recommendations-live.png'),
     fullPage: true,
   });
-  await page.getByRole('button', { name: '합성 예시', exact: true }).click();
-  await expect(page.getByRole('button', { name: '배분 시나리오 적용' })).toBeVisible();
+  await expect(page.getByRole('button', { name: '합성 예시' })).toHaveCount(0);
 });
-test('내 데이터 분석 errors stay explicit and never substitute synthetic analysis', async ({
+test('AI 인사이트 errors stay explicit and never substitute synthetic analysis', async ({
   page,
 }) => {
   await page.route('**/api/recommendations?**', (route) =>
@@ -132,9 +65,12 @@ test('내 데이터 분석 errors stay explicit and never substitute synthetic a
       }),
     }),
   );
-  await page.getByRole('button', { name: '내 데이터 분석', exact: true }).click();
-  await expect(page.getByRole('alert')).toContainText('검증된 실제 시장 데이터가 필요합니다.');
-  await expect(page.getByText('실제 분석 실패 시 합성 추천으로 대체하지 않습니다.')).toBeVisible();
+  await openInsights(page);
+  await analyze(page);
+  await expect(page.locator('.invest-page').getByRole('alert')).toContainText(
+    '검증된 실제 시장 데이터가 필요합니다.',
+  );
+  await expect(page.getByText('예시 값으로 대체하지 않습니다.')).toHaveCount(0);
   await expect(page.locator('.invest-insight-hero')).toHaveCount(0);
   await expect(page.getByRole('button', { name: '다시 시도' })).toBeVisible();
 });
