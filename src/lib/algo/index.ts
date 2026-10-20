@@ -71,3 +71,28 @@ export {
   type RoundTrip,
   type Trade,
 } from './backtest';
+export {
+  createPaperLedger,
+  heldTradingDays,
+  maxPaperEquityPoints,
+  maxPaperSamples,
+  paperMetrics,
+  runPaperDay,
+  type ExternalDecision,
+  type PaperDayInput,
+  type PaperDayResult,
+  type PaperDecisionRecord,
+  type PaperEquityPoint,
+  type PaperFill,
+  type PaperLedger,
+  type PaperMetrics,
+  type PaperPosition,
+  type PaperQuote,
+  type PaperShadow,
+} from './paper';
+export {
+  defaultSupplyParams,
+  supplyScore,
+  type InvestorFlowDay,
+  type SupplyParams,
+} from './supply';

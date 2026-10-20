@@ -7,6 +7,8 @@ import { dartFromEnvironment, secFromEnvironment } from './fundamentals/index.js
 import { tossFromEnvironment } from './toss.js';
 import { createApp } from './app.js';
 import { FirestoreAlgorithmRepository, MemoryAlgorithmRepository } from './algorithms.js';
+import { algorithmAiEnabled } from './algorithm-ai.js';
+import { FirestorePaperRepository, MemoryPaperRepository } from './paper.js';
 import {
   FirestoreNotificationRepository,
   MemoryNotificationRepository,
@@ -61,6 +63,8 @@ const app = createApp({
   algorithmRepository: production
     ? new FirestoreAlgorithmRepository()
     : new MemoryAlgorithmRepository(),
+  paperRepository: production ? new FirestorePaperRepository() : new MemoryPaperRepository(),
+  algorithmAiEnabled: algorithmAiEnabled(),
   notificationRepository,
   notifications,
   calendarRepository: production

@@ -34,6 +34,7 @@ import {
   validAppOrigin,
   type NotificationRepository,
 } from './notify.js';
+import { createPaperRouter, MemoryPaperRepository, type PaperRepository } from './paper.js';
 import { createAnalysisRouter } from './analysis.js';
 import { createFundamentalsRouter } from './fundamentals/index.js';
 import type { FundamentalsRouterOptions } from './fundamentals/router.js';
@@ -70,6 +71,10 @@ export type AppOptions = {
   algorithmRepository?: AlgorithmRepository;
   /** Stage 7a keeps live mode off. Only tests set this, to exercise the live-overlap rule. */
   algorithmLiveEnabled?: boolean;
+  /** Paper (virtual) ledger, fills and run history for the 모의 운용 section (owner-only API). */
+  paperRepository?: PaperRepository;
+  /** Mirrors the job's ALGO_AI_ENABLED so the screen can explain idle AI algorithms. */
+  algorithmAiEnabled?: boolean;
   notificationRepository?: NotificationRepository;
   notifications?: NotificationService;
   ai?: ReturnType<typeof aiFromEnvironment>;
@@ -465,6 +470,14 @@ export function createApp(options: AppOptions = {}) {
         : undefined,
       notify: notifications ? (event) => notifications.notify(event) : undefined,
       liveEnabled: options.algorithmLiveEnabled,
+    }),
+  );
+  app.use(
+    createPaperRouter({
+      repository: options.paperRepository ?? new MemoryPaperRepository(),
+      algorithmRepository,
+      ownerUserId: options.ownerUserId,
+      aiEnabled: options.algorithmAiEnabled,
     }),
   );
   app.use('/api', (_req, res) => failure(res, 404, 'NOT_FOUND', '요청한 API를 찾을 수 없습니다.'));
