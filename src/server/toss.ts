@@ -302,6 +302,30 @@ export class TossClient {
     }
     return structuredClone(await pending) as T;
   }
+  // Setup job only: share the production bearer lease and never expose raw account data.
+  async discoverBrokerageAccountSeq(): Promise<string> {
+    const accounts = await this.get('/api/v1/accounts');
+    if (!Array.isArray(accounts) || accounts.length > 1000) throw invalid();
+    const brokerage = accounts.filter((value) => record(value).accountType === 'BROKERAGE');
+    if (brokerage.length !== 1)
+      throw new ProviderError(
+        503,
+        brokerage.length === 0
+          ? 'PROVIDER_ACCOUNT_UNAVAILABLE'
+          : 'PROVIDER_ACCOUNT_SELECTION_REQUIRED',
+        '자동 연결할 단일 거래 계좌를 확인하지 못했습니다.',
+      );
+    const seq = record(brokerage[0]).accountSeq;
+    // Official schema is integer/int64. Reject lossy JS numbers and unexpected strings.
+    if (
+      typeof seq !== 'number' ||
+      !Number.isSafeInteger(seq) ||
+      seq <= 0 ||
+      String(seq).length > 15
+    )
+      throw invalid();
+    return String(seq);
+  }
   async portfolio(userId: string) {
     if (userId !== this.config.ownerUserId)
       throw new ProviderError(403, 'PORTFOLIO_OWNER_REQUIRED', '이 계정에 연결된 자산이 없습니다.');

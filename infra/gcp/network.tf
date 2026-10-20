@@ -19,6 +19,10 @@ resource "google_compute_address" "egress" {
   name       = "investing-egress"
   region     = var.region
   depends_on = [google_project_service.compute]
+  # Registered in the Toss allowlist; a new address silently breaks provider auth.
+  lifecycle {
+    prevent_destroy = true
+  }
 }
 resource "google_compute_router" "app" {
   name    = "investing-router"

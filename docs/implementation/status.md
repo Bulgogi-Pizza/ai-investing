@@ -5,9 +5,9 @@
 | 영역        | 구현                                                                   | 실제 연결/검증                                                                                                          |
 | ----------- | ---------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------- |
 | 경제 캘린더 | 월·주·일·시간, 중요도·자산·카테고리·시장 필터, 상세·출처·영향 시나리오 | 합성 모드와 관리자 등록 조회; 운영 서버에서 한국은행100건·연준20건 실제 저장 및 관리자 권한 검증                        |
-| 차트        | SMA/EMA/볼린저/RSI/MACD, 기간별 비교, 수동 매수·매도선, 관심종목       | 합성 기본 모드; 실제 토스 캔들 어댑터와 계약 테스트 완료, 키 대기                                                       |
-| 자산·전략   | 통화 분리, 잔액 숨김, 계정별 전략 저장, 리밸런싱 시나리오              | 실제 주식 보유잔고 어댑터; 토스 실계좌 호출 대기                                                                        |
-| 추천        | 기간별 규칙 분석, 저장전략·차트·등록일정 근거, Vertex 해설 어댑터      | 실제 토스 데이터 대기; Vertex 공개 합성 입력1회 ready 실호출 검증                                                       |
+| 차트        | SMA/EMA/볼린저/RSI/MACD, 기간별 비교, 수동 매수·매도선, 관심종목       | 합성 기본 모드; 실제 토스 캔들 어댑터와 계약 테스트 완료, 실호출 미검증                                                 |
+| 자산·전략   | 통화 분리, 잔액 숨김, 계정별 전략 저장, 리밸런싱 시나리오              | 실제 주식 보유잔고 어댑터; 토스 실계좌 호출 미검증                                                                      |
+| 추천        | 기간별 규칙 분석, 저장전략·차트·등록일정 근거, Vertex 해설 어댑터      | 실제 토스 데이터 미검증; Vertex 공개 합성 입력1회 ready 실호출 검증                                                     |
 | 인증        | 관리자만 계정 생성, 비활성화, 공유 로그인 제한, 세션 폐기, CSRF        | 운영 Firestore 관리자 로그인·전략조회·로그아웃 후401 실제 통과                                                          |
 | 인프라      | Cloud Run·Firestore·WIF·NAT·고정IP·예산 알림 Terraform                 | 개인 전용 프로젝트 실제 배포; 월15,000원50/90/100% 알림, Firestore 외부 접근차단 적용                                   |
 | GitHub      | public Bulgogi-Pizza/ai-investing, main 보호, 필수 CI, 배포 워크플로   | Secret Scanning/Push Protection; 보안 PR14의 필수3개 CI 통과·병합, main10beb6d의 뉴스·AI 버전 OIDC 자동배포·health 성공 |
@@ -22,8 +22,8 @@
 
 ## 남은 실제 데이터 연결 조건
 
-토스 OAuth client_id/client_secret, 계좌 시퀀스, 연결할 로컬 사용자ID를 Secret Manager로 제공하고 고정 출구 IP를 토스 허용 목록에 등록해야 한다. 실제 토스 OAuth·시세·계좌 호출은 아직 검증하지 않았다. 합성 데이터와 검증 fixture를 실데이터라고 표시하지 않는다.
+토스 키 발급·허용 IP 등록부터 계좌 연결까지의 절차는 [토스 키 입력 및 계좌 연결](../operations/toss-setup.md)을 따른다. 실제 토스 OAuth·시세·계좌 호출은 아직 검증하지 않았다. 합성 데이터와 검증 fixture를 실데이터라고 표시하지 않는다.
 
 ## 문서 인덱스
 
-요구사항: planning/requirements.md. 시스템: architecture/system.md. 기능: implementation/{auth,integrations,calendar,charts,portfolio,recommendations,news-provider,ai-provider}. 검증: testing/workflow.md. 운영: operations/{cloud-comparison,deployment}. 협업: agents/collaboration.md + 루트 AGENTS.md.
+요구사항: planning/requirements.md. 시스템: architecture/system.md. 기능: implementation/{auth,integrations,calendar,charts,portfolio,recommendations,news-provider,ai-provider}. 검증: testing/workflow.md. 운영: operations/{cloud-comparison,deployment,toss-setup}. 협업: agents/collaboration.md + 루트 AGENTS.md.

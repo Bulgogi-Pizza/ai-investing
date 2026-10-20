@@ -16,3 +16,7 @@ test-results/
 *.tsbuildinfo
 gha-creds-*.json
 *.tfplan
+
+# Python operator-tool bytecode
+__pycache__/
+*.py[cod]

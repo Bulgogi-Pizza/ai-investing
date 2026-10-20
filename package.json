@@ -14,7 +14,8 @@
     "check": "npm run format:check && npm run build && npm test && npm run security:check",
     "security:check": "node scripts/check-secrets.mjs",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "test:ops": "python3 -m unittest discover -s tests -p 'test_*.py'"
   },
   "dependencies": {
     "@google-cloud/firestore": "^8.7.1",

@@ -17,6 +17,7 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      - run: npm run test:ops
       - run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -46,6 +47,8 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - run: docker build -t investing-smoke .
+      - name: Verify one-off setup entry is packaged
+        run: docker run --rm --entrypoint sh investing-smoke -c 'test -f /app/src/server/toss-setup.ts'
       - name: Verify production startup and private API boundary
         run: |
           docker run -d --name investing-smoke -p 127.0.0.1:8080:8080 -e GOOGLE_CLOUD_PROJECT=ci-placeholder -e APP_ORIGIN=https://ci.example.test investing-smoke

@@ -46,7 +46,7 @@ Cloud Run URL이 아직 없으면 로컬에서 첫 검증 이미지를 Artifact 
 
 ## 런타임 비밀
 
-토스 공식 명세 기반 어댑터의 계약 테스트가 구현되어 있다. 실제 자격증명을 발급받은 뒤 Secret Manager에 키를 넣고 필요한 개별 secret accessor만 런타임 계정에 부여한다. `gcloud run services update --set-secrets`로 참조한다. CLI 인수에 비밀 값을 직접 넣지 말고 안전한 표준입력을 사용한다. TOSS_CLIENT_ID/TOSS_CLIENT_SECRET을 Secret Manager 참조로 설정하고 TOSS_ACCOUNT_SEQ/TOSS_OWNER_USER_ID는 서버 전용 환경값으로 바인딩한다. `terraform output -raw toss_allowlist_ip` 주소를 토스 API 허용IP에 먼저 등록한다. read-only 조회로 실연동 검증하며 실제 주문은 지원하지 않는다.
+토스 환경변수 네 개(`TOSS_CLIENT_ID`, `TOSS_CLIENT_SECRET`, `TOSS_ACCOUNT_SEQ`, `TOSS_OWNER_USER_ID`)는 모두 Secret Manager에만 두고 서비스에는 비밀 참조로 연결한다. 키 발급, 허용 IP 등록, 키 저장, 계좌 연결, 실조회 검증 절차는 [토스 키 입력 및 계좌 연결](toss-setup.md)을 따른다. 실제 주문은 지원하지 않는다.
 
 ## 운영
 
@@ -57,6 +57,8 @@ Firestore TTL 삭제는 즉시가 아니므로 만료는 항상 앱에서 검사
 ## 고정 출구 IP
 
 network.tf가 VPC/subnet/Cloud Router/NAT/정적IP를 생성한다. CI의 Cloud Run 설정은 모든 외부 요청을 Direct VPC egress로 보낸다. 기본 Cloud Run 직접 출구를 사용하면 토스 IP 허용 목록을 만족하지 못한다. 정적IP/NAT는 scale-to-zero 상태에도 비용이 발생할 수 있다. 월비용은 cloud-comparison.md 참조.
+
+정적IP `investing-egress`는 토스 허용 목록에 등록되는 주소이므로 `prevent_destroy`로 보호한다. 이 리소스를 삭제하거나 다시 만드는 plan은 Terraform이 오류로 막는다. 주소를 바꿔야 한다면 보호 설정을 의도적으로 해제하고, 새 주소를 토스 허용 목록에 다시 등록한다.
 
 ## 최초 관리자 생성
 
