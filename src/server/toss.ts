@@ -168,6 +168,37 @@ export function normalizeHoldings(value: unknown): PortfolioResponse {
     holdings,
   };
 }
+// Symbol catalog of GET /api/v1/market-indicators/prices (official spec v1.2.24).
+export const MARKET_INDICATOR_CATALOG = [
+  { symbol: 'KOSPI', name: '코스피', kind: 'INDEX', unit: 'point' },
+  { symbol: 'KOSDAQ', name: '코스닥', kind: 'INDEX', unit: 'point' },
+  { symbol: 'KR_BOND_2Y', name: '국채 2년', kind: 'BOND', unit: 'percent' },
+  { symbol: 'KR_BOND_3Y', name: '국채 3년', kind: 'BOND', unit: 'percent' },
+  { symbol: 'KR_BOND_5Y', name: '국채 5년', kind: 'BOND', unit: 'percent' },
+  { symbol: 'KR_BOND_10Y', name: '국채 10년', kind: 'BOND', unit: 'percent' },
+  { symbol: 'KR_BOND_20Y', name: '국채 20년', kind: 'BOND', unit: 'percent' },
+  { symbol: 'KR_BOND_30Y', name: '국채 30년', kind: 'BOND', unit: 'percent' },
+] as const;
+export const MAX_PRICE_SYMBOLS = 50;
+const SYMBOL = /^[A-Za-z0-9.\-]{1,30}$/;
+/** Returns de-duplicated symbols, or null for any malformed or oversized input. */
+export function parsePriceSymbols(value: unknown): string[] | null {
+  if (typeof value !== 'string' || value.length > 2000) return null;
+  const parts = value.split(',');
+  if (parts.length > MAX_PRICE_SYMBOLS || parts.some((part) => !SYMBOL.test(part))) return null;
+  return [...new Set(parts)];
+}
+function nullableTimestamp(value: unknown) {
+  if (value === null || value === undefined) return null;
+  const result = text(value, 50);
+  if (!Number.isFinite(Date.parse(result))) throw invalid();
+  return result;
+}
+function timestamp(value: unknown) {
+  const result = text(value, 50);
+  if (!Number.isFinite(Date.parse(result))) throw invalid();
+  return result;
+}
 export class TossClient {
   private cooldownUntil = 0;
   private reads = new Map<string, { expiresAt: number; value: unknown }>();
@@ -216,6 +247,12 @@ export class TossClient {
           Number.isInteger(seconds) && seconds > 0 ? Math.min(seconds, 3600) : 60,
         );
       }
+      if (response.status === 404)
+        throw new ProviderError(
+          404,
+          'PROVIDER_NOT_FOUND',
+          '제공자에 해당 종목 또는 지표 데이터가 없습니다.',
+        );
       throw new ProviderError(
         503,
         response.status === 401 || response.status === 403
@@ -387,6 +424,86 @@ export class TossClient {
         interval,
         adjusted: true,
         candles: candles.reverse(),
+      };
+    });
+  }
+  async prices(symbols: string[]) {
+    if (
+      !symbols.length ||
+      symbols.length > MAX_PRICE_SYMBOLS ||
+      symbols.some((symbol) => !SYMBOL.test(symbol))
+    )
+      throw new ProviderError(400, 'INVALID_MARKET_QUERY', '종목 코드 목록을 확인하세요.');
+    const requested = [...new Set(symbols)];
+    const query = new URLSearchParams({ symbols: requested.join(',') });
+    return this.cached(`prices:${query}`, async () => {
+      const result = await this.get(`/api/v1/prices?${query}`);
+      if (!Array.isArray(result) || result.length > requested.length) throw invalid();
+      const known = new Set(requested.map((symbol) => symbol.toUpperCase()));
+      const seen = new Set<string>();
+      const prices = result.map((value) => {
+        const p = record(value);
+        const symbol = text(p.symbol, 30);
+        if (
+          !known.has(symbol.toUpperCase()) ||
+          seen.has(symbol.toUpperCase()) ||
+          !SYMBOL.test(symbol)
+        )
+          throw invalid();
+        seen.add(symbol.toUpperCase());
+        if (!['KRW', 'USD'].includes(p.currency as string)) throw invalid();
+        return {
+          symbol,
+          lastPrice: decimal(p.lastPrice),
+          currency: p.currency as 'KRW' | 'USD',
+          timestamp: nullableTimestamp(p.timestamp),
+        };
+      });
+      return { source: 'Toss Securities OpenAPI', asOf: new Date().toISOString(), prices };
+    });
+  }
+  async marketIndicators() {
+    const query = new URLSearchParams({
+      symbols: MARKET_INDICATOR_CATALOG.map((item) => item.symbol).join(','),
+    });
+    return this.cached('market-indicators', async () => {
+      const [prices, fx] = await Promise.all([
+        this.get(`/api/v1/market-indicators/prices?${query}`),
+        this.get(
+          `/api/v1/exchange-rate?${new URLSearchParams({ baseCurrency: 'USD', quoteCurrency: 'KRW' })}`,
+        ),
+      ]);
+      if (!Array.isArray(prices) || prices.length > MARKET_INDICATOR_CATALOG.length)
+        throw invalid();
+      const seen = new Set<string>();
+      const indicators = prices.map((value) => {
+        const p = record(value);
+        const item = MARKET_INDICATOR_CATALOG.find((entry) => entry.symbol === p.symbol);
+        if (!item || seen.has(item.symbol)) throw invalid();
+        seen.add(item.symbol);
+        return {
+          ...item,
+          lastPrice: decimal(p.lastPrice),
+          timestamp: nullableTimestamp(p.timestamp),
+        };
+      });
+      const rate = record(fx);
+      if (rate.baseCurrency !== 'USD' || rate.quoteCurrency !== 'KRW') throw invalid();
+      return {
+        source: 'Toss Securities OpenAPI',
+        asOf: new Date().toISOString(),
+        indicators,
+        exchangeRate: {
+          baseCurrency: 'USD' as const,
+          quoteCurrency: 'KRW' as const,
+          midRate: decimal(rate.midRate),
+          rate: decimal(rate.rate),
+          rateChangeType: ['UP', 'EQUAL', 'DOWN'].includes(rate.rateChangeType as string)
+            ? (rate.rateChangeType as 'UP' | 'EQUAL' | 'DOWN')
+            : null,
+          validFrom: timestamp(rate.validFrom),
+          validUntil: timestamp(rate.validUntil),
+        },
       };
     });
   }

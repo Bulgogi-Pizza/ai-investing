@@ -50,6 +50,9 @@ describe('server authorization', () => {
     for (const path of [
       '/api/auth/me',
       '/api/portfolio',
+      '/api/market/candles?symbol=005930',
+      '/api/market/prices?symbols=005930',
+      '/api/market/indicators',
       '/api/strategy',
       '/api/recommendations',
       '/api/news/sources',
@@ -248,7 +251,7 @@ describe('server authorization', () => {
       new MemoryTokenCache(),
       transport,
     );
-    app = createApp({ store, origin, toss });
+    app = createApp({ store, origin, toss, ownerUserId: memberId });
     expect((await request(app).get('/api/market/candles?symbol=005930')).status).toBe(401);
     const member = await login();
     const owner = await request(app).get('/api/portfolio').set('Cookie', member);
