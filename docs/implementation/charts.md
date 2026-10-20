@@ -1,6 +1,6 @@
 # 종목 분석 (구 차트 분석)
 
-SOT: docs/planning/requirements.md(ANALYSIS), 설계 [next-phase-design.md 2절](../planning/next-phase-design.md). 구현: `src/features/analysis/`(화면), `src/lib/analysis.ts`·`chartData.ts`·`format.ts`(순수 계산), `src/lib/indicators/`(지표 계산·설명), 서버 `src/server/toss-analysis.ts`·`analysis.ts`, 상태 표시 `src/components/DataState.tsx`, 도움말 `src/components/InfoTip.tsx`. 탭 이름은 "차트 분석"에서 "종목 분석"으로 바꿨다. 이벤트 수직선(5d)과 시장 비교·내 매매 마커(5e)는 이 문서의 범위가 아니다.
+SOT: docs/planning/requirements.md(ANALYSIS), 설계 [next-phase-design.md 2절](../planning/next-phase-design.md). 구현: `src/features/analysis/`(화면), `src/lib/analysis.ts`·`chartData.ts`·`format.ts`(순수 계산), `src/lib/indicators/`(지표 계산·설명), 서버 `src/server/toss-analysis.ts`·`analysis.ts`, 상태 표시 `src/components/DataState.tsx`, 도움말 `src/components/InfoTip.tsx`. 탭 이름은 "차트 분석"에서 "종목 분석"으로 바꿨다. 이벤트 수직선(5d)과 시장 비교·내 매매(5e)는 아래 같은 이름의 절이다.
 
 ## 배치(시안 A)
 
@@ -47,7 +47,7 @@ SOT: docs/planning/requirements.md(ANALYSIS), 설계 [next-phase-design.md 2절]
 - 일목균형표: 선행스팬(구름대)을 26봉 앞으로 이동해 미래 구간까지 그린다. 오른쪽 `+N봉`은 거래일이 정해지지 않은 위치이며 날짜가 아니다(화면에 설명). 선행스팬 1≥2/1<2에 따라 구름색을 나눈다.
 - VWAP: 일봉에서는 표시 구간 첫 봉부터 누적(구간을 바꾸면 값이 달라짐, 화면에 설명). 피보나치 되돌림: 표시 구간의 고가·저가 기준.
 - 기간: 1주·1개월·3개월·6개월·1년·3년(약 5·21·63·126·252·756거래일). 구간이 길면 일봉을 `before`로 더 받는다: 첫 쪽은 200개, 필요한 개수(기간+워밍업 120)가 모자라면 `nextBefore`를 `before`로 넘겨 **최대 5쪽(1,000개 일봉)** 까지만 순차 조회한다. 받은 쪽은 종목별로 보관해 기간을 넓힐 때 모자란 쪽만 더 받는다. 더 오래된 쪽이 실패하면 받은 만큼 표시하고 알린다. 제공된 일봉이 요청 기간보다 적으면 그만큼만 그리고 개수를 알린다. **토스가 일봉을 몇 년 전까지 주는지는 아직 실호출로 확인하지 않았다**(계획 "구현 전 확인 목록").
-- 차트 접근성: 차트 컨테이너는 `role="img"`와 요약 `aria-label`을 갖고, 범례를 글로 제공한다.
+- 차트 접근성: 차트 컨테이너는 `role="group"`과 요약 `aria-label`을 갖고(이벤트 이름표가 포커스 가능하므로 `img`가 아니다), 범례를 글로 제공한다.
 
 ## 분석 탭
 
@@ -61,8 +61,63 @@ SOT: docs/planning/requirements.md(ANALYSIS), 설계 [next-phase-design.md 2절]
 
 매수·매도 검토선(기본 비어 있음, 입력한 종목의 차트에만 그림, 종목을 바꾸면 초기화)과 가격 메모(현재 세션만)는 그대로다. 이전 화면의 관심종목 토글과 정적 "분석 노트"는 세션 한정 장식이어서 제거했다.
 
+## 5d 이벤트 수직선
+
+구현: 서버 `src/server/analysis-events.ts`(병합 라우터), `src/server/fundamentals/filings.ts`(DART·SEC 분류), 어댑터 `DartAdapter.disclosures`·`SecAdapter.filings`, 화면 `EventControls.tsx`(필터·출처 상태·목록)·`EventLayer.tsx`(차트 안 점선·이름표)·`EventTooltip.tsx`, 순수 함수 `src/lib/chartEvents.ts`.
+
+**위치**: 지표 선택 아래 "이벤트 수직선" 카드(필터, 출처별 상태, 이벤트 목록), 차트 위에 점선과 이름표. 필터는 중요도(최상·높음·보통 = 3·2·1), 종류(금리 결정·실적 발표·경제 지표·공시), 시장(미국·국내)이며 AND다. **기본값은 최상·높음만 켜고 나머지 종류·시장은 모두 켠다**(보통은 정기 공시 등으로 차트를 덮기 때문). 필터 상태는 페이지 메모리에만 있고 브라우저에 저장하지 않으며 필터를 바꿔도 다시 조회하지 않는다.
+
+**API** `GET /api/analysis/events?market=KR|US&symbol=&from=&to=`: 로그인 → 소유자(소유자 ID만 필요, 토스 연결과 무관) → 분당 60회 → 검증(추가·반복·객체 파라미터, 없는 날짜, `from>to`, **400일 초과**는 400 `INVALID_EVENTS_QUERY`) → 소스를 병렬 조회. 화면은 차트의 첫·마지막 거래일을 창으로 보내고, 차트 기간이 400일보다 길면(3년) 최근 400일로 줄여 보내며 카드에 그렇게 쓴다. 응답은 `{asOf, market, symbol, from, to, windowDays, events[], truncated, limit:300, sources[], notice}`이고 최대 300건이다(날짜순, 같은 날 중요도순). 응답은 5분 캐시하되 오류가 있는 소스가 있으면 캐시하지 않는다.
+
+**항목**: `date`, `title`, `titleLanguage`(`ko`/`original`), `kind`(`rate-decision`·`earnings`·`economic-indicator`·`disclosure`), `importance`(1~3), `market`(`US`/`KR`), `source`(이름), `url`(https), `origin`(`calendar`·`fred`·`dart`·`sec`). 우리가 만든 제목(FRED 카탈로그, SEC 양식)은 한국어이고 DART는 `report_nm` 그대로(한국어), 등록 일정은 등록된 제목이다. 한글이 없으면 `original`이라 화면에 "(원문 표기)"를 붙인다.
+
+**날짜 규칙**: 국내 이벤트는 KST 날짜(DART `rcept_dt`, 등록 일정 `date`), 미국 이벤트는 미국 현지(동부) 날짜(FRED 발표일, SEC `filingDate`). 등록 일정은 KST 날짜·시각으로 저장되어 있어 미국 일정은 `America/New_York`로 환산한 날짜를 쓴다(예: 2026-09-17 03:00 KST → 2026-09-16). 국가가 "글로벌"인 일정은 조회한 종목의 시장으로 본다. 차트에서는 이벤트 날짜가 휴장일이면 **다음 거래일** 위치에 그리고(툴팁에 실제 날짜 표시), 첫 거래일 앞이나 마지막 거래일 뒤(예정 일정)는 그리지 않고 "구간 밖 N건 제외"로 센다.
+
+**소스와 분류 규칙**
+
+| 소스(`origin`)            | 읽는 것                                                                                                                                                    | 종류                                                                                                                                     | 중요도                                               |
+| ------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- |
+| 등록 일정(`calendar`)     | `economicEvents`(관리자 등록 일정, 한국은행·연준 금리 결정 포함). 공식 보도자료 수집분(`eventKind: news-release`)은 게시 시각일 뿐 예정 발표가 아니라 제외 | 제목·분류가 `금리 결정`·`기준금리`·`FOMC`·`정책금리`면 금리 결정, `실적`·`earnings`면 실적, 그 외 경제 지표                              | 등록된 값(1~3)                                       |
+| FRED(`fred`)              | 카탈로그 발표(CPI·고용·GDP·PCE·FOMC 성명)의 발표일. 120일 단위로 나눠 조회                                                                                 | FOMC 성명(rid 101) = 금리 결정, 나머지 경제 지표                                                                                         | 카탈로그 값([macro-data.md](macro-data.md))          |
+| DART(`dart`, 국내 종목만) | `list.json`을 정기공시(A)·주요사항보고(B)·거래소공시(I)로 따로 읽음(분류별 최대 3쪽×100건, 넘으면 "일부만 읽음" 표시)                                      | A: 사업보고서·반기·분기보고서 = 실적, 그 외 A = 공시. B = 공시. I: 보고서명에 `잠정`과 `실적`이 있는 것만 실적(나머지 거래소공시는 버림) | 사업보고서 3, 반기·분기 2, A 기타 1, B 2, 잠정실적 3 |
+| SEC(`sec`, 미국 종목만)   | `data.sec.gov/submissions/CIK##########.json`의 `filings.recent`에서 10-K·10-Q·8-K(정정본 `/A` 제외)                                                       | 10-K·10-Q = 실적, 8-K 항목 2.02 포함 = 실적 발표, 그 외 8-K = 공시                                                                       | 10-K 3, 10-Q 2, 8-K(2.02) 3, 그 외 8-K 1             |
+
+- 같은 시장·날짜·종류의 등록 일정이 있으면 FRED 항목은 버린다(등록 일정 우선, 중복 선 방지).
+- **미국 실적 발표 예정일은 무료 공식 출처가 없어 발표 후 공시 날짜(SEC)만 그린다.** 한국은행 금리 결정일·한국 지표 발표일은 ECOS에 발표 일정 API가 없어 등록 일정으로만 나온다.
+- 링크: DART는 `https://dart.fss.or.kr/dsaf001/main.do?rcpNo=<접수번호>`(DART 공시뷰어), SEC는 `https://www.sec.gov/Archives/edgar/data/<CIK>/<접수번호(대시 제거)>/<접수번호>-index.htm`. 두 주소 형식은 이번 확인에서 공식 문서로 검증하지 못했고 첫 실호출 때 열어 본다.
+- 확인한 공식 문서: DART 공시검색 [DS001/2019001](https://opendart.fss.or.kr/guide/detail.do?apiGrpCd=DS001&apiId=2019001)(2026-10-21; `pblntf_ty` A·B·I, `report_nm`·`rcept_no`·`rcept_dt`, `last_reprt_at`, `page_count` 최대 100). SEC 두 문서(EDGAR APIs, API 문서)는 submissions를 "최소 1년 또는 최근 1,000건의 compact columnar data array"와 추가 파일 목록으로만 설명하고 `accessionNumber`·`filingDate`·`form`·`items` 필드명은 적지 않았다. 이 이름들은 널리 쓰이는 응답 모양이며 **첫 실호출에서 확인해야 한다**(다르면 `PROVIDER_SCHEMA_INVALID`로 드러난다). `filings.recent`보다 오래된 구간은 읽지 않고 `incomplete`로 알린다.
+
+**소스별 독립 상태**: 한 소스가 실패해도 응답은 200이고 `sources[]`에 `{id, name, status, count, asOf, code?, message?}`가 온다. `status`: `ok`, `unavailable`(미연결: 키 없음), `error`(제공자 오류, 다시 시도 버튼), `no-data`(DART에 없는 종목 코드), `not-applicable`(국내 종목의 SEC 등, 화면에 표시하지 않음). 화면은 칩으로 소스마다 보여 주고, 요청 전체가 실패하면(401·403·네트워크) 그 카드에만 `DataState`를 두고 가격 차트는 그대로 그린다.
+
+**차트 그리기**: 이벤트 날짜(거래일 행)마다 점선 한 줄(색: 최상 빨강·높음 주황·보통 회색)과 이름표. 같은 날 여러 건이면 줄 하나에 "제목 외 N건". 이름표는 `layoutEventLabels`가 중요도 높은 것부터 3줄(tier)로 배치해 같은 줄에서 겹치지 않게 하고, 자리가 없으면 이름표 대신 작은 점 표시(줄은 유지)를 둔다. 이름표와 점은 포커스 가능한 버튼이고 마우스 올림·**포커스**·클릭·Enter로 툴팁이 열린다. 툴팁에는 그날의 모든 이벤트(중요도·종류·시장·날짜·제목)와 `SourceLink`(https만 링크) 출처가 있다. Enter로 고정하면 포커스가 툴팁으로 이동하고 Esc가 닫으며 이름표로 돌려준다. 툴팁은 차트 안쪽으로 위치를 보정한다. 키보드·스크린리더용으로 필터된 모든 이벤트를 `이벤트 목록` 펼침 목록에도 쓴다(이름표가 없는 이벤트 포함). 차트 컨테이너는 포커스 가능한 자식 때문에 `role="img"` 대신 `role="group"`과 요약 `aria-label`이다.
+
+## 5e 시장 비교·내 매매
+
+구현: `src/lib/compare.ts`(정규화·체결 위치·평균 매수가 선 판정), `overlays.ts`(요청 훅), `OverlayControls.tsx`, `PriceChart.tsx`; 서버 `GET /api/market/indicator-candles`(app.ts), `src/server/algorithm-fills.ts`.
+
+**비교(기준 100)**: 차트 카드 위의 토글 4개. 켠 계열만 요청하고 계열마다 따로 상태를 보여 준다.
+
+| 계열          | 출처                                                                                                                                | 요청                                                                                                                                                                 |
+| ------------- | ----------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 코스피·코스닥 | 토스 시장 지표 일봉(`/market-indicators/{symbol}/candles`) 종가                                                                     | `GET /api/market/indicator-candles?symbol=KOSPI\|KOSDAQ&count&before`(소유자+토스, 카탈로그 심볼만, 일봉 과거→최신, 통화 필드 없음). 쪽 조회는 종목 일봉과 같은 로더 |
+| S&P 500       | 토스 SPY 일봉(수정주가) 종가. 라벨 "S&P 500 (SPY ETF 기준)" — 지수가 아니라 ETF 가격(토스 시장 지표 캔들이 S&P 500을 지원하지 않음) | 기존 `/api/market/candles?symbol=SPY`                                                                                                                                |
+| 원/달러       | 한국은행 ECOS `kr-usdkrw`(매매기준율, 일별)                                                                                         | `GET /api/macro/series?source=ecos&id=kr-usdkrw&from&to`                                                                                                             |
+
+- **정규화**: 종목과 켠 계열(데이터가 도착한 것만)이 모두 값을 가진 **첫 공통 날짜**를 100으로 맞춘다(`computeComparison`). 날짜는 정확히 일치해야 하고(각 계열은 자기 시장 거래일을 따름) 값이 없는 날은 비워 선이 이어진다. 비교 모드에서는 가격 단위 지표(SMA 등)·피보나치·검토선·평균 매수가·체결 마커도 같은 비율(`100 ÷ 기준일 종가`)로 바꿔 그리고, 축은 "기준 100" 상대 값이다. 공통 날짜가 없으면 일반 차트를 그리고 이유를 쓴다.
+- 각 계열의 출처·조회 시각(KST)·일별 값 개수를 차트 위 목록에 쓴다. 제공자가 없으면(`TOSS_INTEGRATION_UNAVAILABLE`·`ECOS_UNAVAILABLE` 등) 토글에 "미연결"을 쓰고 가짜 선을 그리지 않는다. 오류·데이터 없음·권한 없음도 그 계열에만 표시하며 다시 시도 버튼이 있다.
+- 알려진 한계: 미국 종목 차트에 코스피를 겹치면 두 시장의 휴장일이 달라 공통 날짜가 드물 수 있다. 환율 날짜는 한국 영업일이다.
+
+**내 매매**
+
+- **평균 매수가 선**: `/api/portfolio`의 보유 종목에서 심볼이 같은(대소문자 무시) 항목의 `averagePurchasePrice`를 가로선으로 그린다. 보유하지 않으면 그렇게 쓰고, 값이 없거나 통화가 차트와 다르면 그리지 않는다. 표시 구간 가격의 0.7배~1.3배를 벗어나면 차트가 눌리므로 선을 그리지 않고 이유를 쓴다(`costLineState`).
+- **알고리즘 체결 ▲▼**: `GET /api/analysis/algorithm-fills?symbol&from&to`. 서버는 `AlgorithmFillSource`(`listFills(symbol, from, to)`, `connected`)를 읽고 모든 필드를 다시 검증한다(잘못된 행·다른 종목·기간 밖은 버림, 기록의 다른 필드는 응답에 내지 않음). **7c가 `paperTrades`를, 7f가 `liveOrders`를 쓰기 전까지 구현은 `NoAlgorithmFills`(빈 목록, `connected:false`)뿐이고 화면은 "아직 연결되지 않았습니다"를 쓴다.** 7c 이후에는 두 컬렉션을 읽는 `AlgorithmFillSource` 구현을 `createApp({ algorithmFills })`에 넘기면 된다. 마커: ▲ 매수(빨강), ▼ 매도(파랑), **속이 빈 표시 = 가상(`paper`), 채운 표시 = 실제(`live`)**, 호버 제목과 목록에 "가상/실제 매수/매도·알고리즘 이름·수량·가격". 체결 날짜가 휴장일이면 다음 거래일 행에 놓고 구간 밖은 개수만 알린다.
+- 토글(`평균 매수가 선`, `알고리즘 체결 ▲▼`)은 기본 켬이며 세션 메모리 상태다.
+
 ## 검증
 
+- `tests/analysis-events.test.ts`(5d·5e 서버): 인증·소유자(401·403·503)·검증(400)·병합·정렬·중복 제거·300건 상한·400일 창·FRED 120일 분할·소스 미설정/실패/캐시·공시 분류·DART·SEC 어댑터·체결 API·`createApp` 연결(토스 없이 소유자 읽기, `/api/macro` 소유자 마운트, `indicator-candles`).
+- `tests/chart-events.test.ts`(5d·5e 순수 함수): 필터, 휴장일 이벤트 위치, 이름표 배치(겹침 없음·중요도 우선·경계 보정), 400일 창, 기준 100 정규화·공통 날짜·재기준·평균 매수가 선 판정·체결 위치.
+- `tests/analysis-events.spec.ts`(가짜 API, 데스크톱·모바일): 점선·이름표 개수, 필터 3종(재요청 없음), 호버·포커스·Enter·Esc 툴팁과 https 링크, 이름표 비겹침, 소스 하나 실패·미연결·전체 실패·빈 상태, 비교 4종과 정규화 축·출처·"미연결"·계열별 오류, 평균 매수가·체결 마커(가상/실제)·미연결, 브라우저 저장소 미사용, 가로 넘침 없음.
 - `tests/analysis.test.ts`: 등락 기준(경계·오프셋·불가 사유), 상하한가 근접 경계, 시가총액, 업종 통계(제외 사유), 서식, 차트 모델(워밍업·일목 미래 26칸·VWAP 기준), 일봉 쪽 파싱.
 - `tests/analysis-api.test.ts`: 서버 접근(401·403·503), 입력 검증, 정규화·스키마 위반 502, 403 권한 구분, 섹터 트리 탐색·상한, `before` 전달, 재무 마운트. `tests/ui-state.test.ts`: 상태 분류.
 - `tests/analysis.spec.ts`(가짜 API): 요약·유의사항·상하한가 근접, ⓘ 키보드·호버, 일목 미래 구름, 기간별 `before` 쪽 조회와 상한, 가치·수급·호가 탭, 상태(소유자 전용·미연결·403·DART 미연결·빈 값·오류 후 재시도), 탭 키보드, 가로 넘침·차트 폭.

@@ -2,6 +2,8 @@
 // src/server/toss-analysis.ts and src/server/fundamentals/router.ts; anything shaped differently
 // becomes a visible error instead of a guessed value.
 import { ApiError, NoDataError } from '../../lib/api';
+import type { ChartEvent, EventKind, EventOrigin } from '../../lib/chartEvents';
+import type { DatedValue, FillInput } from '../../lib/compare';
 import type { FinancialStatement, PerShareMetrics } from '../../lib/valuation';
 
 const bad = (text = '응답 형식을 확인하지 못했습니다.') =>
@@ -432,4 +434,180 @@ export function parseTrades(body: unknown): Trades {
   });
   if (!trades.length) throw new NoDataError('토스가 당일 체결 내역을 돌려주지 않았습니다.');
   return { asOf, trades };
+}
+
+// ---- Event lines, comparison series, own trades (stages 5d, 5e) -------------------------------
+
+export type EventSourceReport = {
+  id: 'calendar' | 'fred' | 'dart' | 'sec';
+  name: string;
+  status: 'ok' | 'unavailable' | 'error' | 'no-data' | 'not-applicable';
+  count: number;
+  asOf: string | null;
+  code?: string;
+  message?: string;
+  retryAfter?: number;
+};
+export type EventsResponse = {
+  asOf: string;
+  from: string;
+  to: string;
+  events: ChartEvent[];
+  truncated: boolean;
+  sources: EventSourceReport[];
+  notice: string;
+};
+const kinds: EventKind[] = ['rate-decision', 'earnings', 'economic-indicator', 'disclosure'];
+const origins: EventOrigin[] = ['calendar', 'fred', 'dart', 'sec'];
+const day = (value: unknown) => {
+  const result = str(value);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(result)) throw bad();
+  return result;
+};
+/** `GET /api/analysis/events`. Items that do not match the contract make the whole response invalid. */
+export function parseEvents(body: unknown): EventsResponse {
+  const d = obj(body);
+  const asOf = when(d.asOf);
+  const events = arr(d.events).map((raw): ChartEvent => {
+    const e = obj(raw);
+    const importance = e.importance;
+    if (importance !== 1 && importance !== 2 && importance !== 3) throw bad();
+    if (!kinds.includes(e.kind as EventKind)) throw bad();
+    if (e.market !== 'US' && e.market !== 'KR') throw bad();
+    if (!origins.includes(e.origin as EventOrigin)) throw bad();
+    return {
+      id: str(e.id),
+      date: day(e.date),
+      title: str(e.title),
+      titleLanguage: e.titleLanguage === 'original' ? 'original' : 'ko',
+      kind: e.kind as EventKind,
+      importance,
+      market: e.market,
+      source: str(e.source),
+      url: str(e.url),
+      origin: e.origin as EventOrigin,
+    };
+  });
+  const sources = arr(d.sources).map((raw): EventSourceReport => {
+    const s = obj(raw);
+    const status = s.status;
+    if (
+      status !== 'ok' &&
+      status !== 'unavailable' &&
+      status !== 'error' &&
+      status !== 'no-data' &&
+      status !== 'not-applicable'
+    )
+      throw bad();
+    if (!origins.includes(s.id as EventOrigin)) throw bad();
+    return {
+      id: s.id as EventSourceReport['id'],
+      name: str(s.name),
+      status,
+      count: typeof s.count === 'number' ? s.count : 0,
+      asOf: strOrNull(s.asOf),
+      ...(typeof s.code === 'string' ? { code: s.code } : {}),
+      ...(typeof s.message === 'string' ? { message: s.message } : {}),
+      ...(typeof s.retryAfter === 'number' ? { retryAfter: s.retryAfter } : {}),
+    };
+  });
+  return {
+    asOf,
+    from: day(d.from),
+    to: day(d.to),
+    events,
+    truncated: d.truncated === true,
+    sources,
+    notice: typeof d.notice === 'string' ? d.notice : '',
+  };
+}
+
+export type FillsResponse = {
+  asOf: string;
+  connected: boolean;
+  fills: (FillInput & { filledAt: string })[];
+  notice: string;
+};
+/** `GET /api/analysis/algorithm-fills`. */
+export function parseFills(body: unknown): FillsResponse {
+  const d = obj(body);
+  const fills = arr(d.fills).map((raw): FillsResponse['fills'][number] => {
+    const f = obj(raw);
+    if (f.side !== 'buy' && f.side !== 'sell') throw bad();
+    if (f.mode !== 'paper' && f.mode !== 'live') throw bad();
+    return {
+      id: str(f.id),
+      algorithmName: str(f.algorithmName),
+      side: f.side,
+      mode: f.mode,
+      date: day(f.date),
+      filledAt: when(f.filledAt),
+      price: dec(f.price),
+      quantity: dec(f.quantity),
+      currency: cur(f.currency),
+    };
+  });
+  return {
+    asOf: when(d.asOf),
+    connected: d.connected === true,
+    fills,
+    notice: typeof d.notice === 'string' ? d.notice : '',
+  };
+}
+
+export type HoldingCost = {
+  asOf: string;
+  source: string;
+  /** Matching holding of the symbol, or null when the owner does not hold it. */
+  holding: {
+    currency: 'KRW' | 'USD';
+    quantity: string;
+    averagePurchasePrice: number | null;
+  } | null;
+};
+/** `GET /api/portfolio`, reduced to the one holding of `symbol` (case-insensitive). */
+export function parseHoldingCost(symbol: string) {
+  return (body: unknown): HoldingCost => {
+    const { d, source, asOf } = header(body);
+    const match = arr(d.holdings)
+      .map(obj)
+      .find((h) => str(h.symbol).toUpperCase() === symbol.toUpperCase());
+    if (!match) return { asOf, source, holding: null };
+    const average = decOrNull(match.averagePurchasePrice);
+    return {
+      asOf,
+      source,
+      holding: {
+        currency: cur(match.currency),
+        quantity: dec(match.quantity),
+        averagePurchasePrice: average === null || !(Number(average) > 0) ? null : Number(average),
+      },
+    };
+  };
+}
+
+export type MacroSeries = {
+  source: string;
+  sourceName: string;
+  titleKo: string;
+  asOf: string;
+  points: DatedValue[];
+};
+/** `GET /api/macro/series`; missing values (null) are skipped, never filled. */
+export function parseMacroSeries(body: unknown): MacroSeries {
+  const d = obj(body);
+  const points: DatedValue[] = [];
+  for (const raw of arr(d.observations)) {
+    const o = obj(raw);
+    const value = decOrNull(o.value);
+    if (value !== null) points.push({ date: day(o.date), value: Number(value) });
+  }
+  if (!points.length) throw new NoDataError('??湲곌컙???쒓났?먭? ?뚮젮以 媛믪씠 ?놁뒿?덈떎.');
+  return {
+    source: str(d.source),
+    sourceName: str(d.sourceName),
+    titleKo: str(d.titleKo),
+    asOf: when(d.asOf),
+    points,
+  };
 }

@@ -4,6 +4,7 @@ import { FirestoreCalendarRepository, MemoryCalendarRepository } from './calenda
 import { FirestoreMorningRunRepository, MemoryMorningRunRepository } from './morning.js';
 import { FirestoreSnapshotRepository, MemorySnapshotRepository } from './snapshots.js';
 import { dartFromEnvironment, secFromEnvironment } from './fundamentals/index.js';
+import { ecosFromEnvironment, fredFromEnvironment } from './macro/index.js';
 import { tossFromEnvironment } from './toss.js';
 import { createApp } from './app.js';
 import { FirestoreAlgorithmRepository, MemoryAlgorithmRepository } from './algorithms.js';
@@ -58,6 +59,9 @@ const app = createApp({
   // A missing or malformed value leaves that market answering 503 instead of guessing.
   dart: dartFromEnvironment(),
   sec: secFromEnvironment(),
+  // Macro providers: FRED_API_KEY and ECOS_API_KEY (secrets). Missing or malformed => 503 / "미연결".
+  fred: fredFromEnvironment(),
+  ecos: ecosFromEnvironment(),
   // Same value the Toss client is bound to; owner-only routes fail closed when unset.
   ownerUserId: process.env.TOSS_OWNER_USER_ID,
   algorithmRepository: production

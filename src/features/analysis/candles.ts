@@ -100,8 +100,12 @@ type Entry = {
   failure: string | null;
 };
 
-const url = (symbol: string, before: string | null) =>
+export const stockUrl = (symbol: string, before: string | null) =>
   `/api/market/candles?symbol=${encodeURIComponent(symbol)}&interval=1d&count=${PAGE_SIZE}` +
+  (before ? `&before=${encodeURIComponent(before)}` : '');
+/** Toss market-indicator daily candles (KOSPI, KOSDAQ): same paging contract, other route. */
+export const indicatorUrl = (symbol: string, before: string | null) =>
+  `/api/market/indicator-candles?symbol=${encodeURIComponent(symbol)}&count=${PAGE_SIZE}` +
   (before ? `&before=${encodeURIComponent(before)}` : '');
 
 /**
@@ -109,11 +113,28 @@ const url = (symbol: string, before: string | null) =>
  * `nextBefore`) only while the chosen window still needs bars, at most MAX_PAGES pages. Fetched
  * pages are kept per symbol, so widening the window loads only the missing older pages.
  */
+const IDLE = { status: 'idle' } as const;
 export function useCandleHistory(symbol: string, wantedBars: number) {
+  return useCandleSeries(symbol, stockUrl, wantedBars, true) as {
+    state: CandleHistory;
+    retry: () => void;
+  };
+}
+/**
+ * The same paged loader for any candle route. `key` identifies the series in the per-hook cache and
+ * in the returned `symbol` field; `enabled=false` loads nothing and reports `idle`.
+ */
+export function useCandleSeries(
+  symbol: string,
+  urlFor: (symbol: string, before: string | null) => string,
+  wantedBars: number,
+  enabled: boolean,
+): { state: CandleHistory | { status: 'idle' }; retry: () => void } {
   const [state, setState] = useState<CandleHistory>({ status: 'loading' });
   const [attempt, setAttempt] = useState(0);
   const cache = useRef(new Map<string, Entry>());
   useEffect(() => {
+    if (!enabled) return;
     const controller = new AbortController();
     const entryFor = () => cache.current.get(symbol);
     const publish = () => {
@@ -151,7 +172,7 @@ export function useCandleHistory(symbol: string, wantedBars: number) {
           const first = !entry;
           let page: CandlePage;
           try {
-            const body = await apiGet(url(symbol, entry?.nextBefore ?? null), controller.signal);
+            const body = await apiGet(urlFor(symbol, entry?.nextBefore ?? null), controller.signal);
             page = first ? parseCandles(body) : parseCandlePage(body);
           } catch (error) {
             if (controller.signal.aborted) return;
@@ -191,9 +212,9 @@ export function useCandleHistory(symbol: string, wantedBars: number) {
       }
     })();
     return () => controller.abort();
-  }, [symbol, wantedBars, attempt]);
+  }, [symbol, wantedBars, attempt, enabled]);
   return {
-    state,
+    state: enabled ? state : IDLE,
     retry: () => {
       const entry = cache.current.get(symbol);
       if (entry) entry.failure = null;

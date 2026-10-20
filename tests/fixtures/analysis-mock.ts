@@ -365,3 +365,289 @@ export function analysisReply(path: string, params: URLSearchParams): MockReply 
     });
   return null;
 }
+
+// ---- 5d event lines and 5e comparison / own trades ---------------------------------------------
+export type EventsMode = 'ok' | 'fred-unavailable' | 'dart-error' | 'empty' | 'fail';
+export type FillsMode = 'unconnected' | 'some' | 'error';
+
+type MockEvent = {
+  id: string;
+  date: string;
+  title: string;
+  titleLanguage: 'ko' | 'original';
+  kind: 'rate-decision' | 'earnings' | 'economic-indicator' | 'disclosure';
+  importance: 1 | 2 | 3;
+  market: 'US' | 'KR';
+  source: string;
+  url: string;
+  origin: 'calendar' | 'fred' | 'dart' | 'sec';
+};
+const ev = (
+  id: string,
+  date: string,
+  title: string,
+  kind: MockEvent['kind'],
+  importance: MockEvent['importance'],
+  market: MockEvent['market'],
+  origin: MockEvent['origin'],
+  source: string,
+  titleLanguage: MockEvent['titleLanguage'] = 'ko',
+): MockEvent => ({
+  id,
+  date,
+  title,
+  titleLanguage,
+  kind,
+  importance,
+  market,
+  source,
+  url: `https://source.example.test/${id}`,
+  origin,
+});
+/** Synthetic events around the fixed reference day 2026-10-20 (every title and source is invented). */
+export const mockEvents: MockEvent[] = [
+  ev(
+    'calendar-1',
+    '2026-09-16',
+    '테스트 FOMC 금리 결정',
+    'rate-decision',
+    3,
+    'US',
+    'calendar',
+    '테스트 연준',
+  ),
+  ev(
+    'calendar-2',
+    '2026-10-15',
+    '테스트 기준금리 결정',
+    'rate-decision',
+    3,
+    'KR',
+    'calendar',
+    '테스트 한국은행',
+  ),
+  ev(
+    'fred-10-2026-10-13',
+    '2026-10-13',
+    '테스트 미국 소비자물가 발표',
+    'economic-indicator',
+    3,
+    'US',
+    'fred',
+    'FRED',
+  ),
+  ev(
+    'fred-50-2026-10-02',
+    '2026-10-02',
+    '테스트 미국 고용 보고서 발표',
+    'economic-indicator',
+    3,
+    'US',
+    'fred',
+    'FRED',
+  ),
+  ev('dart-1', '2026-08-26', '분기보고서 (2026.06)', 'earnings', 2, 'KR', 'dart', 'DART 전자공시'),
+  ev(
+    'dart-2',
+    '2026-10-15',
+    '주요사항보고서(테스트 결정)',
+    'disclosure',
+    2,
+    'KR',
+    'dart',
+    'DART 전자공시',
+  ),
+  ev('dart-3', '2026-10-06', '감사보고서 (테스트)', 'disclosure', 1, 'KR', 'dart', 'DART 전자공시'),
+  ev(
+    'dart-4',
+    '2026-10-08',
+    '연결재무제표기준영업(잠정)실적(공정공시)',
+    'earnings',
+    3,
+    'KR',
+    'dart',
+    'DART 전자공시',
+  ),
+  ev('sec-1', '2026-09-03', '실적 발표(8-K 항목 2.02)', 'earnings', 3, 'US', 'sec', 'SEC EDGAR'),
+  ev(
+    'sec-2',
+    '2026-09-20',
+    '수시 보고(8-K) · 항목 5.02',
+    'disclosure',
+    1,
+    'US',
+    'sec',
+    'SEC EDGAR',
+  ),
+];
+const sourceReport = (
+  id: 'calendar' | 'fred' | 'dart' | 'sec',
+  name: string,
+  status: string,
+  count: number,
+  extra: Record<string, unknown> = {},
+) => ({ id, name, status, count, asOf: status === 'ok' ? asOf : null, ...extra });
+
+/** Reply of GET /api/analysis/events in the same shape as the server. */
+export function eventsReply(params: URLSearchParams, mode: EventsMode): MockReply {
+  if (mode === 'fail')
+    return {
+      status: 503,
+      body: {
+        error: { code: 'PROVIDER_UNAVAILABLE', message: '이벤트 제공자 상태를 확인하세요.' },
+      },
+    };
+  const market = params.get('market') as 'KR' | 'US';
+  const from = params.get('from') ?? '';
+  const to = params.get('to') ?? '';
+  const relevant = (e: MockEvent) =>
+    e.origin === 'calendar' ||
+    e.origin === 'fred' ||
+    (market === 'KR' ? e.origin === 'dart' : e.origin === 'sec');
+  let items = mockEvents.filter((e) => relevant(e) && e.date >= from && e.date <= to);
+  if (mode === 'empty') items = [];
+  if (mode === 'fred-unavailable') items = items.filter((e) => e.origin !== 'fred');
+  if (mode === 'dart-error') items = items.filter((e) => e.origin !== 'dart');
+  const count = (origin: MockEvent['origin']) => items.filter((e) => e.origin === origin).length;
+  const sources = [
+    sourceReport('calendar', '등록 일정', 'ok', count('calendar')),
+    mode === 'fred-unavailable'
+      ? sourceReport('fred', 'FRED 발표 일정(미국)', 'unavailable', 0, {
+          code: 'FRED_UNAVAILABLE',
+          message: '미국 경제지표(FRED)가 설정되지 않았습니다.',
+        })
+      : sourceReport('fred', 'FRED 발표 일정(미국)', 'ok', count('fred')),
+    market === 'KR'
+      ? mode === 'dart-error'
+        ? sourceReport('dart', 'DART 공시(국내)', 'error', 0, {
+            code: 'PROVIDER_RATE_LIMITED',
+            message: '제공자 요청 한도로 잠시 대기해야 합니다.',
+          })
+        : sourceReport('dart', 'DART 공시(국내)', 'ok', count('dart'))
+      : sourceReport('dart', 'DART 공시(국내)', 'not-applicable', 0),
+    market === 'US'
+      ? sourceReport('sec', 'SEC 공시(미국)', 'ok', count('sec'))
+      : sourceReport('sec', 'SEC 공시(미국)', 'not-applicable', 0),
+  ];
+  return {
+    status: 200,
+    body: {
+      asOf,
+      market,
+      symbol: params.get('symbol'),
+      from,
+      to,
+      windowDays: 1,
+      events: [...items].sort(
+        (a, b) => a.date.localeCompare(b.date) || b.importance - a.importance,
+      ),
+      truncated: false,
+      limit: 300,
+      sources,
+      notice: '합성 테스트 이벤트입니다.',
+    },
+  };
+}
+
+/** Reply of GET /api/market/indicator-candles (KOSPI / KOSDAQ), 200 per page, oldest first. */
+export function indicatorCandlePage(symbol: string, before: string | null, count = 200) {
+  const total = 600;
+  const base = symbol === 'KOSPI' ? 2600 : 850;
+  const all = Array.from({ length: total }, (_, i) => {
+    const close = base + i * 0.8 + (i % 7) * 3;
+    return {
+      timestamp: `${dateOf(i - (total - 1))}T00:00:00+09:00`,
+      open: close.toFixed(2),
+      high: (close + 5).toFixed(2),
+      low: (close - 5).toFixed(2),
+      close: close.toFixed(2),
+      volume: '0',
+    };
+  });
+  let end = all.length;
+  if (before) end = all.filter((c) => Date.parse(c.timestamp) <= Date.parse(before)).length;
+  const slice = all.slice(Math.max(0, end - count), end);
+  const nextBefore = end - count > 0 ? all[end - count - 1].timestamp : null;
+  return {
+    source,
+    asOf,
+    symbol,
+    interval: '1d',
+    candles: slice,
+    ...(nextBefore ? { nextBefore } : {}),
+  };
+}
+
+/** Reply of GET /api/macro/series for ECOS 원/달러: one value per calendar day, 1,300 and up. */
+export function macroSeriesReply(params: URLSearchParams): MockReply {
+  const from = params.get('from') ?? '2026-10-01';
+  const to = params.get('to') ?? '2026-10-20';
+  const observations: { date: string; value: string | null }[] = [];
+  for (
+    let t = Date.parse(`${from}T00:00:00Z`), i = 0;
+    t <= Date.parse(`${to}T00:00:00Z`);
+    t += 86400000, i++
+  )
+    observations.push({
+      date: new Date(t).toISOString().slice(0, 10),
+      value: (1300 + i * 0.6).toFixed(1),
+    });
+  return {
+    status: 200,
+    body: {
+      id: 'kr-usdkrw',
+      source: 'ecos',
+      titleKo: '원/달러 환율(매매기준율)',
+      country: '한국',
+      unit: '원',
+      sourceName: '한국은행 ECOS(테스트)',
+      sourceUrl: 'https://ecos.example.test/',
+      asOf,
+      observations,
+      notice: '합성 테스트 값입니다.',
+    },
+  };
+}
+
+export function fillsReply(params: URLSearchParams, mode: FillsMode): MockReply {
+  if (mode === 'error')
+    return {
+      status: 500,
+      body: {
+        error: { code: 'FILLS_FAILED', message: '알고리즘 체결 기록을 가져오지 못했습니다.' },
+      },
+    };
+  const base = {
+    asOf,
+    symbol: params.get('symbol'),
+    from: params.get('from'),
+    to: params.get('to'),
+  };
+  if (mode === 'unconnected')
+    return { status: 200, body: { ...base, connected: false, fills: [], notice: '미연결' } };
+  const fill = (id: string, side: string, kind: string, date: string, price: string) => ({
+    id,
+    algorithmId: 'algo-1',
+    algorithmName: '테스트 모멘텀',
+    symbol: params.get('symbol'),
+    side,
+    mode: kind,
+    date,
+    filledAt: `${date}T00:31:00.000Z`,
+    price,
+    quantity: '3',
+    currency: 'KRW',
+  });
+  return {
+    status: 200,
+    body: {
+      ...base,
+      connected: true,
+      fills: [
+        fill('f1', 'buy', 'paper', '2026-09-10', '72000'),
+        fill('f2', 'sell', 'live', '2026-10-10', '74000'),
+      ],
+      notice: '합성 체결입니다.',
+    },
+  };
+}

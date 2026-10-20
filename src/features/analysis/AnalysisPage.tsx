@@ -3,16 +3,39 @@ import { Bell, Check } from 'lucide-react';
 import { DataState, LoadingState } from '../../components/DataState';
 import { useApiResource } from '../../lib/api';
 import { marketOf, type Market } from '../../lib/analysis';
-import { buildChartModel, targetBars } from '../../lib/chartData';
+import { buildChartModel, MAX_PAGES, PAGE_SIZE, targetBars, windowBars } from '../../lib/chartData';
+import {
+  clusterEvents,
+  defaultEventFilter,
+  eventWindow,
+  filterEvents,
+  type EventFilter,
+} from '../../lib/chartEvents';
+import {
+  compareDef,
+  computeComparison,
+  costLineState,
+  placeFills,
+  type CompareId,
+} from '../../lib/compare';
 import { formatPrice } from '../../lib/format';
 import { formatKst } from '../../lib/kst';
 import type { IndicatorId } from '../../lib/indicators';
 import { priceRatios } from '../../lib/valuation';
 import { useCandleHistory } from './candles';
+import { EventPanel } from './EventControls';
+import { CompareControls, TradeControls, type TradeToggles } from './OverlayControls';
+import { useAlgorithmFills, useCompareSeries, useHoldingCost } from './overlays';
 import { FlowPanel } from './FlowPanel';
 import { IndicatorPicker } from './IndicatorPicker';
 import { IndicatorPane, PriceChart, separatePanes } from './PriceChart';
-import { parsePriceLimits, parsePriceQuote, parseStockLookup, parseWarnings } from './parsers';
+import {
+  parseEvents,
+  parsePriceLimits,
+  parsePriceQuote,
+  parseStockLookup,
+  parseWarnings,
+} from './parsers';
 import { QuotePanel } from './QuotePanel';
 import { Summary, SymbolSearch, SYMBOL_PATTERN, type Valuation } from './Summary';
 import { useFundamentals, ValuePanel } from './ValuePanel';
@@ -37,6 +60,16 @@ export default function AnalysisPage({ initialSymbol }: { initialSymbol: string 
       if (!next.delete(id)) next.add(id);
       return next;
     });
+  // Filters and overlay choices live in memory for this session only (nothing is stored in the browser).
+  const [eventFilter, setEventFilter] = useState<EventFilter>(defaultEventFilter);
+  const [compare, setCompare] = useState<ReadonlySet<CompareId>>(new Set());
+  const toggleCompare = (id: CompareId) =>
+    setCompare((current) => {
+      const next = new Set(current);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  const [trade, setTrade] = useState<TradeToggles>({ cost: true, fills: true });
   return (
     <div className="analysis">
       <div className="page-heading">
@@ -63,6 +96,12 @@ export default function AnalysisPage({ initialSymbol }: { initialSymbol: string 
         onPeriod={setPeriod}
         selected={selected}
         onToggle={toggle}
+        eventFilter={eventFilter}
+        onEventFilter={setEventFilter}
+        compare={compare}
+        onCompare={toggleCompare}
+        trade={trade}
+        onTrade={(key) => setTrade((current) => ({ ...current, [key]: !current[key] }))}
       />
     </div>
   );
@@ -74,12 +113,24 @@ function AnalysisBody({
   onPeriod,
   selected,
   onToggle,
+  eventFilter,
+  onEventFilter,
+  compare,
+  onCompare,
+  trade,
+  onTrade,
 }: {
   symbol: string;
   period: string;
   onPeriod: (label: string) => void;
   selected: ReadonlySet<IndicatorId>;
   onToggle: (id: IndicatorId) => void;
+  eventFilter: EventFilter;
+  onEventFilter: (next: EventFilter) => void;
+  compare: ReadonlySet<CompareId>;
+  onCompare: (id: CompareId) => void;
+  trade: TradeToggles;
+  onTrade: (key: keyof TradeToggles) => void;
 }) {
   const [tab, setTab] = useState<TabId>('value');
   const [buy, setBuy] = useState('');
@@ -116,6 +167,77 @@ function AnalysisBody({
     () => (readyHistory ? buildChartModel(readyHistory.candles, selected, period) : null),
     [readyHistory, selected, period],
   );
+  // ---- 5d event lines, 5e comparison and own trades ---------------------------------------------
+  const rowDates = useMemo(
+    () => (model ? model.rows.map((row) => (row.future ? null : row.date)) : []),
+    [model],
+  );
+  const closes = useMemo(() => (model ? model.rows.map((row) => row.close) : []), [model]);
+  const firstDate = rowDates.find((date) => date !== null) ?? null;
+  const lastDate = [...rowDates].reverse().find((date) => date !== null) ?? null;
+  const eventWin = useMemo(
+    () => (firstDate && lastDate ? eventWindow(firstDate, lastDate) : null),
+    [firstDate, lastDate],
+  );
+  const dateWin = useMemo(
+    () => (firstDate && lastDate ? { from: firstDate, to: lastDate } : null),
+    [firstDate, lastDate],
+  );
+  const events = useApiResource(
+    eventWin && market
+      ? `/api/analysis/events?market=${market}&symbol=${enc}&from=${eventWin.from}&to=${eventWin.to}`
+      : null,
+    parseEvents,
+  );
+  const shownEvents = useMemo(
+    () =>
+      events.state.status === 'ready' ? filterEvents(events.state.data.events, eventFilter) : [],
+    [events.state, eventFilter],
+  );
+  const placedEvents = useMemo(() => clusterEvents(shownEvents, rowDates), [shownEvents, rowDates]);
+
+  const compareBars = Math.min(windowBars(period) + 10, PAGE_SIZE * MAX_PAGES);
+  const compareStates = useCompareSeries(compare, compareBars, dateWin);
+  const readyValues = useMemo(
+    () =>
+      Object.fromEntries(
+        compareStates.flatMap((state) =>
+          state.status === 'ready' && state.values ? [[state.def.id, state.values] as const] : [],
+        ),
+      ),
+    [compareStates],
+  );
+  const comparison = useMemo(
+    () => (rowDates.length ? computeComparison(rowDates, closes, readyValues) : null),
+    [rowDates, closes, readyValues],
+  );
+  const compareView = useMemo(
+    () =>
+      comparison
+        ? {
+            comparison,
+            series: Object.keys(readyValues).map((id) => compareDef(id as CompareId)),
+          }
+        : null,
+    [comparison, readyValues],
+  );
+  const holding = useHoldingCost(symbol, trade.cost && model !== null);
+  const algoFills = useAlgorithmFills(symbol, dateWin, trade.fills);
+  const averagePrice =
+    holding.state.status === 'ready' &&
+    holding.state.data.holding &&
+    holding.state.data.holding.currency === readyHistory?.currency
+      ? holding.state.data.holding.averagePurchasePrice
+      : null;
+  const costState = costLineState(averagePrice, closes);
+  const fillMarks = useMemo(
+    () =>
+      placeFills(
+        trade.fills && algoFills.state.status === 'ready' ? algoFills.state.data.fills : [],
+        rowDates,
+      ),
+    [trade.fills, algoFills.state, rowDates],
+  );
   const buyLine = Number(buy) > 0 ? Number(buy) : null;
   const sellLine = Number(sell) > 0 ? Number(sell) : null;
   const unknownSymbol = stock.state.status === 'issue' && stock.state.issue.kind === 'no-data';
@@ -128,6 +250,9 @@ function AnalysisBody({
     warnings.retry();
     limits.retry();
     history.retry();
+    events.retry();
+    holding.retry();
+    algoFills.retry();
   };
   const tabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const onTabKey = (event: KeyboardEvent, index: number) => {
@@ -188,6 +313,18 @@ function AnalysisBody({
             onToggle={onToggle}
           />
 
+          <EventPanel
+            resource={events.state}
+            retry={events.retry}
+            filter={eventFilter}
+            onFilter={onEventFilter}
+            shown={shownEvents}
+            clusters={placedEvents.clusters}
+            outside={placedEvents.outside}
+            clamped={eventWin?.clamped === true}
+            windowDays={eventWin ? 400 : null}
+          />
+
           <section className="analysis-card" aria-label="가격 차트">
             <h2>가격 차트 (일봉, 수정주가)</h2>
             {(history.state.status === 'loading' ||
@@ -199,12 +336,36 @@ function AnalysisBody({
             )}
             {readyHistory && model && (
               <>
+                <div className="overlay-controls">
+                  <CompareControls
+                    enabled={compare}
+                    onToggle={onCompare}
+                    states={compareStates}
+                    comparisonBase={compareView ? compareView.comparison.baseDate : null}
+                    noCommonDate={compareView === null && Object.keys(readyValues).length > 0}
+                  />
+                  <TradeControls
+                    toggles={trade}
+                    onToggle={onTrade}
+                    holding={holding.state}
+                    fills={algoFills.state}
+                    marks={fillMarks}
+                    costState={costState}
+                    currency={readyHistory.currency}
+                    retryHolding={holding.retry}
+                    retryFills={algoFills.retry}
+                  />
+                </div>
                 <PriceChart
                   model={model}
                   selected={selected}
                   currency={readyHistory.currency}
                   buyLine={buyLine}
                   sellLine={sellLine}
+                  compare={compareView}
+                  costLine={costState === 'draw' ? averagePrice : null}
+                  fillMarks={fillMarks.marks}
+                  eventClusters={placedEvents.clusters}
                   summary={`${symbol} 일봉 종가 차트. 표시 ${model.shownBars}개, 마지막 종가 ${formatPrice(
                     readyHistory.candles.at(-1)!.close,
                     readyHistory.currency,

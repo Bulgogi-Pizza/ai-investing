@@ -1,6 +1,6 @@
 # 거시 지표 데이터 — FRED·ECOS 어댑터 (5d·5e·6b)
 
-상태: 서버 어댑터, 고정 지표 카탈로그, 라우터 팩토리, 합성 fixture 테스트까지 구현했다. **앱에는 아직 연결하지 않았다**(`src/server/app.ts`·`index.ts`, 화면, 아침 작업은 감독이 연결한다). FRED·ECOS 실제 호출은 하지 않았다(키가 아직 없다). 용도는 세 가지다: 5d 이벤트 수직선(발표일), 5e 원/달러 비교 차트(ECOS 일별 환율), 6b 아침 캘린더 갱신(다가오는 발표와 지난 발표의 실제값·이전값). 설계 근거는 [next-phase-design.md](../planning/next-phase-design.md) 2절(이벤트 수직선, 시장 지표 겹쳐 보기)·3절(아침 캘린더 갱신)이다.
+상태: 서버 어댑터, 고정 지표 카탈로그, 라우터 팩토리, 합성 fixture 테스트까지 구현했고 **5d·5e에서 앱에 연결했다**(`app.ts`가 `/api/macro`를 소유자 전용으로 마운트하고 `index.ts`가 `fredFromEnvironment()`·`ecosFromEnvironment()`를 넘긴다. 5d 이벤트 수직선의 FRED 발표일, 5e 원/달러 비교의 ECOS `kr-usdkrw`가 쓴다). 아침 작업(6b)과 Cloud Run 비밀 참조는 아직 연결하지 않았다. FRED·ECOS 실제 호출은 하지 않았다(키가 아직 없다). 용도는 세 가지다: 5d 이벤트 수직선(발표일), 5e 원/달러 비교 차트(ECOS 일별 환율), 6b 아침 캘린더 갱신(다가오는 발표와 지난 발표의 실제값·이전값). 설계 근거는 [next-phase-design.md](../planning/next-phase-design.md) 2절(이벤트 수직선, 시장 지표 겹쳐 보기)·3절(아침 캘린더 갱신)이다.
 
 코드는 `src/server/macro/`에 있다: `shared.ts`(오류·소수 문자열 정규화·고정 호스트 GET), `catalog.ts`(지표 카탈로그), `fred.ts`, `ecos.ts`, `router.ts`, `events.ts`(캘린더 연결), `index.ts`.
 
@@ -135,10 +135,13 @@ FRED는 발표일(날짜)만 주고 **시각과 시간대를 문서에서 밝히
 
 `tests/macro-fred.test.ts`, `tests/macro-ecos.test.ts`, `tests/macro-router.test.ts`, `tests/macro-catalog.test.ts`가 외부 통신 없이 주입한 transport와 `tests/fixtures/macro/`의 **합성** 응답으로 확인한다(실데이터 검증이 아니다). 형식 검사, 결측, vintage 걸러내기, 키 비노출, ECOS 결과 코드, 라우터 인증·검증·503, 카탈로그 id 전용 입력, 캘린더 변환을 다룬다.
 
-## 아직 연결하지 않은 것
+## 앱 연결(5d·5e)과 아직 연결하지 않은 것
 
-- `app.ts`·`index.ts`에서 라우터 마운트, Cloud Run 서비스·작업의 `FRED_API_KEY`/`ECOS_API_KEY` 비밀 참조(Terraform), 화면(5d 수직선·5e 환율 비교), 6b 아침 작업의 발표 시각·KST 변환·실제값 붙이기·AI 요약.
-- 5e의 코스피·코스닥·S&P 500(ETF)은 토스 캔들이 맡는다. 이 어댑터는 원/달러만 제공한다.
+- 연결됨: `app.use('/api/macro', ownerAccount)` + `createMacroRouter({ fred, ecos, ownerUserId })`(`createApp` 옵션 `fred`·`ecos`, 테스트는 `tests/analysis-events.test.ts`의 "앱 연결"). 키가 없으면 `/api/macro/series`는 503 `FRED_UNAVAILABLE`/`ECOS_UNAVAILABLE`이고 화면은 해당 토글·소스를 "미연결"로 표시한다.
+- `GET /api/analysis/events`([charts.md](charts.md) 5d)는 `FredAdapter.upcomingReleases`를 이 문서의 `/api/macro/releases`와 별개로 직접 호출한다. 120일 제한 때문에 400일 창을 120일 단위(최대 4구간, 발표 5종 × 4 = 20회, 호출 간격 600ms)로 나눠 읽는다. 처음 조회(캐시 없음)는 수 초 걸릴 수 있다.
+- 5d의 한국 지표 날짜: ECOS에는 발표 일정 API가 없어 이벤트 수직선의 한국 지표·한국은행 금리 결정일은 등록 일정에서만 온다.
+- 5e의 원/달러는 `ecos.observations('kr-usdkrw')`의 일별 값이다(차트 표시 전용, 과거 시점 판단에 쓰지 않는다). 코스피·코스닥·S&P 500(SPY ETF)은 토스 캔들이 맡는다.
+- 아직 없음: Cloud Run 서비스·작업의 `FRED_API_KEY`/`ECOS_API_KEY` 비밀 참조(Terraform), 6b 아침 작업의 발표 시각·KST 변환·실제값 붙이기·AI 요약.
 
 ## 확인하지 못한 항목(첫 실호출 때 확인)
 
