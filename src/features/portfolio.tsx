@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Eye, EyeOff, ShieldCheck, SlidersHorizontal, Info } from 'lucide-react';
 import { DataState, LoadingState } from '../components/DataState';
 import { ApiError, signalAuthRequired, useApiResource } from '../lib/api';
@@ -11,6 +11,7 @@ import {
   parseStoredStrategy,
   type Strategy,
 } from '../lib/strategy';
+import AlgorithmsScreen from './algorithms/AlgorithmsScreen';
 import './investing.css';
 
 interface LivePortfolio {
@@ -229,11 +230,90 @@ function StrategyEditor({ initial, isNew }: { initial: Strategy; isNew: boolean 
     </section>
   );
 }
+type PortfolioTab = 'assets' | 'algorithms';
+/** Telegram links point at /algorithms; the app has no router, so the path only picks the tab. */
+const initialTab = (): PortfolioTab =>
+  typeof window !== 'undefined' && window.location.pathname === '/algorithms'
+    ? 'algorithms'
+    : 'assets';
+function setPath(path: string) {
+  try {
+    if (window.location.pathname !== path) window.history.replaceState(null, '', path);
+  } catch {
+    // The address bar is a convenience only.
+  }
+}
+function PortfolioTabs({
+  tab,
+  onChange,
+}: {
+  tab: PortfolioTab;
+  onChange: (tab: PortfolioTab) => void;
+}) {
+  return (
+    <div className="invest-tabs" role="tablist" aria-label="내 자산 하위 화면">
+      {(
+        [
+          ['assets', '보유 자산'],
+          ['algorithms', '알고리즘'],
+        ] as const
+      ).map(([id, label]) => (
+        <button
+          key={id}
+          role="tab"
+          id={`portfolio-tab-${id}`}
+          aria-selected={tab === id}
+          aria-controls="portfolio-tabpanel"
+          className={tab === id ? 'active' : ''}
+          onClick={() => onChange(id)}
+        >
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
 export default function Portfolio() {
+  const [tab, setTab] = useState<PortfolioTab>(initialTab);
+  useEffect(() => {
+    setPath(tab === 'algorithms' ? '/algorithms' : '/');
+  }, [tab]);
+  useEffect(() => () => setPath('/'), []);
+  return (
+    <div className="invest-page">
+      {tab === 'assets' ? (
+        <AssetsTab tabs={<PortfolioTabs tab={tab} onChange={setTab} />} />
+      ) : (
+        <>
+          <div className="invest-heading">
+            <div>
+              <div className="invest-eyebrow">MY PORTFOLIO</div>
+              <h1>내 자산</h1>
+              <p>
+                알고리즘 설정, 과거 시뮬레이션, 긴급 정지를 다룹니다. 소유자 계정 전용이며 주문
+                기능은 없습니다.
+              </p>
+            </div>
+          </div>
+          <PortfolioTabs tab={tab} onChange={setTab} />
+          <div
+            role="tabpanel"
+            id="portfolio-tabpanel"
+            aria-labelledby="portfolio-tab-algorithms"
+            className="invest-tabpanel"
+          >
+            <AlgorithmsScreen />
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+function AssetsTab({ tabs }: { tabs: React.ReactNode }) {
   const [hidden, setHidden] = useState(false);
   const { state, retry } = useApiResource('/api/portfolio', parsePortfolio);
   return (
-    <div className="invest-page">
+    <>
       <div className="invest-heading">
         <div>
           <div className="invest-eyebrow">MY PORTFOLIO</div>
@@ -242,17 +322,25 @@ export default function Portfolio() {
         </div>
         {state.status === 'ready' && <span className="invest-pill">실계좌 · 주식 전용</span>}
       </div>
-      {(state.status === 'loading' || state.status === 'idle') && (
-        <LoadingState label="토스증권 주식 잔고를 조회하는 중…" />
-      )}
-      {state.status === 'issue' && <DataState issue={state.issue} onRetry={retry} />}
-      {state.status === 'ready' && (
-        <PortfolioView live={state.data} hidden={hidden} setHidden={setHidden} />
-      )}
-      <StrategySection
-        hideOwnerOnly={state.status === 'issue' && state.issue.kind === 'owner-only'}
-      />
-    </div>
+      {tabs}
+      <div
+        role="tabpanel"
+        id="portfolio-tabpanel"
+        aria-labelledby="portfolio-tab-assets"
+        className="invest-tabpanel"
+      >
+        {(state.status === 'loading' || state.status === 'idle') && (
+          <LoadingState label="토스증권 주식 잔고를 조회하는 중…" />
+        )}
+        {state.status === 'issue' && <DataState issue={state.issue} onRetry={retry} />}
+        {state.status === 'ready' && (
+          <PortfolioView live={state.data} hidden={hidden} setHidden={setHidden} />
+        )}
+        <StrategySection
+          hideOwnerOnly={state.status === 'issue' && state.issue.kind === 'owner-only'}
+        />
+      </div>
+    </>
   );
 }
 

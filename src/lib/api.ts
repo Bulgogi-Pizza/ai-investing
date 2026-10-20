@@ -23,13 +23,41 @@ export function signalAuthRequired(status: number, code?: unknown) {
     window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
 }
 export async function apiGet(url: string, signal?: AbortSignal): Promise<unknown> {
+  return apiRequest('GET', url, undefined, signal);
+}
+/** Same error handling as apiGet for writes. A 204 answer resolves to an empty object. */
+export async function apiSend(
+  method: 'POST' | 'PUT' | 'DELETE',
+  url: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  return apiRequest(method, url, body, signal);
+}
+async function apiRequest(
+  method: string,
+  url: string,
+  requestBody: unknown,
+  signal?: AbortSignal,
+): Promise<unknown> {
   let response: Response;
   try {
-    response = await fetch(url, { signal });
+    response = await fetch(
+      url,
+      method === 'GET'
+        ? { signal }
+        : {
+            method,
+            signal,
+            headers: requestBody === undefined ? undefined : { 'Content-Type': 'application/json' },
+            body: requestBody === undefined ? undefined : JSON.stringify(requestBody),
+          },
+    );
   } catch (error) {
     if (signal?.aborted) throw error;
     throw new ApiError(0, 'NETWORK_ERROR', '서버에 연결할 수 없습니다. 네트워크를 확인해 주세요.');
   }
+  if (response.status === 204) return {};
   let body: unknown = null;
   try {
     body = await response.json();

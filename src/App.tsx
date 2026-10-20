@@ -118,7 +118,10 @@ export default function App() {
 
 function Workspace({ user, onLoggedOut }: { user: SessionUser; onLoggedOut: () => void }) {
   const searchRef = useRef<HTMLInputElement>(null);
-  const [page, setPage] = useState<Page>('calendar');
+  // Telegram alerts link to /algorithms: open 내 자산 > 알고리즘 for that path.
+  const [page, setPage] = useState<Page>(() =>
+    window.location.pathname === '/algorithms' ? 'portfolio' : 'calendar',
+  );
   const [initialSymbol, setInitialSymbol] = useState('삼성전자');
   const [sessionError, setSessionError] = useState('');
   const [accounts, setAccounts] = useState<
