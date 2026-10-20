@@ -148,7 +148,7 @@ export interface PreTradeStore {
   listOrders(filter: { algorithmId: string; symbol?: string }): Promise<LiveOrderRecord[]>;
 }
 
-export interface TradingStore extends PreTradeStore {
+export interface TradingStore extends PreTradeStore, TradingStatusStore {
   stopAlgorithm(algorithmId: string, reason: string): Promise<void>;
   /**
    * Atomically: re-read the emergency stop and the algorithm state, check the daily counters,
@@ -169,6 +169,53 @@ export interface TradingStore extends PreTradeStore {
   acquireRunLease(algorithmId: string, runId: string, ttlMs: number): Promise<boolean>;
   /** Releases the lease only if `runId` still holds it. */
   releaseRunLease(algorithmId: string, runId: string): Promise<void>;
+}
+
+// ---------------------------------------------------------------------------
+// Status records the screen reads (plan stage 7e/7f). None of them carries an amount, an account
+// identifier or provider text.
+// ---------------------------------------------------------------------------
+export type AlgorithmStop = { reason: string; stoppedAt: string | null };
+export type AccessProbeStatus = { ok: boolean; code?: string; status?: number | null };
+/** Result of the read-only order-API access check job (booleans and sanitized codes only). */
+export type AccessCheckStatus = {
+  checkedAt: string;
+  allOk: boolean;
+  permissionDenied: boolean;
+  probes: {
+    buyingPowerKrw: AccessProbeStatus;
+    buyingPowerUsd: AccessProbeStatus;
+    commissions: AccessProbeStatus;
+    openOrders: AccessProbeStatus;
+  };
+};
+/**
+ * Written by the live job on every scheduled invocation that got past its configuration check
+ * (also when the market was closed). The screen uses it to tell "the live schedule is paused"
+ * from "the live job ran".
+ */
+export type LiveJobHeartbeat = {
+  market: TradeMarket;
+  at: string;
+  /** Session date the run was for, when there was one. */
+  date: string | null;
+  outcome: 'ok' | 'partial' | 'failed' | 'skipped';
+  /** Upper-snake skip code ("MARKET_CLOSED_TODAY", ...). */
+  code?: string;
+};
+export const LIVE_JOB_MARKETS: readonly TradeMarket[] = ['KR', 'US'];
+export interface TradingStatusStore extends PreTradeStore {
+  getAlgorithmStop(algorithmId: string): Promise<AlgorithmStop | null>;
+  /** Removes the stop of one algorithm. Returns whether there was one. */
+  releaseAlgorithmStop(algorithmId: string): Promise<boolean>;
+  /** Newest first. */
+  listRecentBlocked(algorithmId: string, limit: number): Promise<BlockedOrderRecord[]>;
+  /** Orders of one symbol across algorithms (chart markers). Order of the result is not specified. */
+  listOrdersBySymbol(symbol: string, limit: number): Promise<LiveOrderRecord[]>;
+  getAccessCheck(): Promise<AccessCheckStatus | null>;
+  putAccessCheck(status: AccessCheckStatus): Promise<void>;
+  getJobHeartbeat(market: TradeMarket): Promise<LiveJobHeartbeat | null>;
+  putJobHeartbeat(heartbeat: LiveJobHeartbeat): Promise<void>;
 }
 
 /**
@@ -322,6 +369,9 @@ export function summarizeLedger(orders: LiveOrderRecord[]): Ledger {
 export class MemoryTradingStore implements TradingStore {
   private emergencyStop = false;
   private readonly stopped = new Map<string, string>();
+  private readonly stoppedAt = new Map<string, string>();
+  private accessCheck: AccessCheckStatus | null = null;
+  private readonly heartbeats = new Map<TradeMarket, LiveJobHeartbeat>();
   private readonly orders = new Map<string, LiveOrderRecord>();
   private readonly counters = new Map<string, number>();
   private readonly blocked: BlockedOrderRecord[] = [];
@@ -345,7 +395,47 @@ export class MemoryTradingStore implements TradingStore {
   }
   async stopAlgorithm(algorithmId: string, reason: string) {
     if (!ALGORITHM_ID.test(algorithmId)) throw new Error('Invalid algorithm id');
-    if (!this.stopped.has(algorithmId)) this.stopped.set(algorithmId, reason);
+    if (!this.stopped.has(algorithmId)) {
+      this.stopped.set(algorithmId, reason);
+      this.stoppedAt.set(algorithmId, this.clock().toISOString());
+    }
+  }
+  async getAlgorithmStop(algorithmId: string) {
+    return this.stopped.has(algorithmId)
+      ? {
+          reason: this.stopped.get(algorithmId)!,
+          stoppedAt: this.stoppedAt.get(algorithmId) ?? null,
+        }
+      : null;
+  }
+  async releaseAlgorithmStop(algorithmId: string) {
+    this.stoppedAt.delete(algorithmId);
+    return this.stopped.delete(algorithmId);
+  }
+  async listRecentBlocked(algorithmId: string, limit: number) {
+    return this.blocked
+      .filter((b) => b.algorithmId === algorithmId)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .slice(0, limit)
+      .map((b) => structuredClone(b));
+  }
+  async listOrdersBySymbol(symbol: string, limit: number) {
+    return [...this.orders.values()]
+      .filter((o) => o.symbol === symbol)
+      .slice(0, limit)
+      .map((o) => structuredClone(o));
+  }
+  async getAccessCheck() {
+    return structuredClone(this.accessCheck);
+  }
+  async putAccessCheck(status: AccessCheckStatus) {
+    this.accessCheck = structuredClone(status);
+  }
+  async getJobHeartbeat(market: TradeMarket) {
+    return structuredClone(this.heartbeats.get(market) ?? null);
+  }
+  async putJobHeartbeat(heartbeat: LiveJobHeartbeat) {
+    this.heartbeats.set(heartbeat.market, structuredClone(heartbeat));
   }
   async getDailyCounts(dateKey: string, algorithmId: string) {
     return {
