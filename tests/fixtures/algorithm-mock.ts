@@ -48,6 +48,11 @@ export type AlgoMockOptions = {
   /** Body of GET /api/algorithms/:id/paper; default is an algorithm without any paper record. */
   paper?: (algorithm: AlgoRecord) => unknown;
   paperError?: { status: number; code: string; message: string };
+  /** Body of GET /api/algorithms/:id/live; default is `liveBody(algorithm)`. */
+  live?: (algorithm: AlgoRecord) => unknown;
+  liveError?: { status: number; code: string; message: string };
+  /** Notification outcome the live switch / stop release reports. */
+  liveOutcome?: { status: 'sent' | 'failed' | 'disabled' };
 };
 
 const now = '2026-10-20T03:00:00.000Z';
@@ -332,6 +337,64 @@ export function paperBody(algorithm: AlgoRecord, patch: Record<string, unknown> 
   };
 }
 
+/** Synthetic live (실제 주문) state: every number is invented test data. */
+export function liveBody(algorithm: AlgoRecord, patch: Record<string, unknown> = {}) {
+  const blockers: { code: string; message: string }[] = [];
+  if (algorithm.budget === null)
+    blockers.push({
+      code: 'LIVE_BUDGET_REQUIRED',
+      message: '운용 금액 한도(원)를 입력하고 저장해야 합니다.',
+    });
+  return {
+    live: true,
+    generatedAt: now,
+    algorithm: {
+      id: algorithm.id,
+      name: algorithm.name,
+      mode: algorithm.mode,
+      method: algorithm.method,
+      market: algorithm.market,
+      currency: algorithm.currency,
+      budget: algorithm.budget,
+      version: algorithm.version,
+    },
+    enable: { ready: blockers.length === 0, blockers },
+    paperSummary: {
+      since: '2026-10-01',
+      lastRunDate: '2026-10-12',
+      days: 12,
+      roundTrips: 1,
+      netReturn: 0.0048,
+      costsTotal: 13_600,
+      maxDrawdown: 0.0062,
+      fills: 3,
+      status: 'running',
+      budget: 10_000_000,
+    },
+    emergencyStop: false,
+    stop: null,
+    accessCheck: null,
+    job: {
+      market: algorithm.market,
+      lastRun: null,
+      schedulePaused: true,
+      scheduleNotice:
+        '실전 일정이 아직 꺼져 있어 주문이 나가지 않습니다 — 운영자가 일정을 켜야 합니다.',
+    },
+    ai: algorithm.method === 'ai' ? { enabled: false } : null,
+    safeguards: null,
+    ledger: { positions: [], committed: 0 },
+    unconfirmedCount: 0,
+    orders: [],
+    blocked: [],
+    notes: [
+      '실전 기록은 실제 주문과 실제 체결입니다. 모의(가상) 기록과 섞이지 않습니다.',
+      '예상 이익이 왕복 비용보다 크지 않거나 같은 점수 구간의 기록이 부족하면 주문이 나가지 않습니다("기록 부족으로 주문 보류").',
+    ],
+    ...patch,
+  };
+}
+
 const errorBody = (code: string, message: string) => ({ error: { code, message } });
 
 export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}) {
@@ -347,6 +410,15 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
       capitalGainsTax: null,
       updatedAt: null,
     } as Record<string, unknown>,
+    safeguards: {
+      maxOrdersPerDay: 3,
+      maxGlobalOrdersPerDay: 10,
+      minHoldingTradingDays: 5,
+      lossStopFraction: 0.2,
+      liquidityMinAvgValue: { KRW: 1_000_000_000, USD: 5_000_000 },
+      updatedAt: null,
+    } as Record<string, unknown>,
+    released: new Set<string>(),
     failList: options.failListWith,
     counter: 0,
   };
@@ -404,12 +476,34 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
           control: { emergencyStop: state.emergencyStop, updatedAt: state.controlUpdatedAt },
         });
       }
+      if (path === '/api/algorithm-settings/safeguards') {
+        const before = state.safeguards as Record<string, number & Record<string, number>>;
+        const after = body.safeguards as typeof before;
+        const notifications: { change: string; status: string }[] = [];
+        if (
+          after.maxOrdersPerDay > before.maxOrdersPerDay ||
+          after.maxGlobalOrdersPerDay > before.maxGlobalOrdersPerDay
+        )
+          notifications.push({ change: 'max-orders-raised', status: 'sent' });
+        if (after.minHoldingTradingDays < before.minHoldingTradingDays)
+          notifications.push({ change: 'min-holding-lowered', status: 'sent' });
+        if (after.lossStopFraction > before.lossStopFraction)
+          notifications.push({ change: 'loss-stop-loosened', status: 'sent' });
+        state.safeguards = { ...body.safeguards, updatedAt: now };
+        event('safeguards-updated', undefined, [{ field: 'safeguards', from: 'a', to: 'b' }]);
+        return json({ safeguards: state.safeguards, changed: true, notifications });
+      }
       if (path === '/api/algorithm-settings') {
         if (method === 'PUT') {
           state.costs = { ...body.costs, updatedAt: now };
           event('costs-updated', undefined, [{ field: 'costs', from: 'a', to: 'b' }]);
         }
-        return json({ costs: state.costs });
+        return json({
+          costs: state.costs,
+          safeguards: state.safeguards,
+          safeguardsInvalid: false,
+          hardLimits: { maxOrderValueKrw: 100_000_000, maxQuoteAgeSeconds: 60 },
+        });
       }
       if (path === '/api/algorithm-events') return json({ events: state.events, limit: 50 });
       if (state.failList)
@@ -422,7 +516,7 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
           return json({
             algorithms: state.algorithms,
             limits: { maxAlgorithms: 20 },
-            liveAvailable: false,
+            liveAvailable: true,
           });
         if (options.saveError)
           return json(
@@ -439,11 +533,35 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
         event('created', created, [{ field: 'targets', added: created.targets, removed: [] }]);
         return json({ algorithm: created }, 201);
       }
-      const match = path.match(/^\/api\/algorithms\/([^/]+)(\/backtest|\/paper)?$/);
+      const match = path.match(
+        /^\/api\/algorithms\/([^/]+)(\/backtest|\/paper|\/live|\/live\/release-stop)?$/,
+      );
       if (match) {
         const index = state.algorithms.findIndex((a) => a.id === match[1]);
         if (index < 0)
           return json(errorBody('ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.'), 404);
+        if (match[2] === '/live/release-stop') {
+          state.released.add(match[1]);
+          const notification = options.liveOutcome ?? { status: 'sent' };
+          event('live-stop-released', state.algorithms[index], [
+            { field: 'liveStop', from: '정지', to: '해제' },
+          ]);
+          return json({ released: true, notification });
+        }
+        if (match[2] === '/live') {
+          if (options.liveError)
+            return json(
+              errorBody(options.liveError.code, options.liveError.message),
+              options.liveError.status,
+            );
+          const algorithm = state.algorithms[index];
+          const base = (options.live ? options.live(algorithm) : liveBody(algorithm)) as Record<
+            string,
+            unknown
+          >;
+          // A release request clears the stop shown by the next read.
+          return json(state.released.has(algorithm.id) ? { ...base, stop: null } : base);
+        }
         if (match[2] === '/paper') {
           if (options.paperError)
             return json(
@@ -491,6 +609,14 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
           };
           state.algorithms[index] = updated;
           event('updated', updated, [{ field: 'mode', from: before.mode, to: updated.mode }]);
+          if (before.mode !== 'live' && updated.mode === 'live') {
+            const notification = options.liveOutcome ?? { status: 'sent' };
+            return json({
+              algorithm: updated,
+              notification,
+              notifications: [{ change: 'live-enabled', ...notification }],
+            });
+          }
           return json({ algorithm: updated });
         }
         return json({ algorithm: state.algorithms[index] });

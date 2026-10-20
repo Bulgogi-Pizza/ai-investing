@@ -738,7 +738,7 @@
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   gap: 8px;
   border-radius: 7px;
   padding: 8px 10px;
@@ -749,6 +749,9 @@
 }
 .algo-live-status > li.algo-note-ok {
   background: #eef8f0;
+}
+.algo-live-status > li > div {
+  flex: 1 1 220px;
 }
 .algo-live-status svg {
   vertical-align: -2px;
