@@ -203,7 +203,7 @@ test.describe('signed-in member who is not the owner', () => {
       await open(page, name);
       if (name === 'AI 인사이트') await analyze(page);
       const state = page.locator(
-        'main > [data-state="owner-only"], .invest-page > [data-state="owner-only"], .chart-panel [data-state="owner-only"]',
+        'main > [data-state="owner-only"], .invest-page > [data-state="owner-only"], .invest-tabpanel > [data-state="owner-only"], .chart-panel [data-state="owner-only"]',
       );
       await expect(state.first()).toContainText('소유자 계정 전용 기능입니다');
       await expect(page.getByText('계약 테스트 종목')).toHaveCount(0);
