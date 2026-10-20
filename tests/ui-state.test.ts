@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { ApiError, NoDataError, issueOf } from '../src/lib/api';
 import { kstToday } from '../src/lib/kst';
-import { parseCandles } from '../src/features/charts/ChartsPage';
+import { parseCandles } from '../src/features/analysis/candles';
 
 describe('data state classification', () => {
   it('distinguishes not connected, owner only, no data and transient errors', () => {
