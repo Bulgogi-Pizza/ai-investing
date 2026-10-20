@@ -108,7 +108,7 @@ test('내 데이터 분석 shows sourced rules and reloads by horizon without de
     page.getByText('과거 가격 변화는 미래 수익을 보장하지 않습니다.', { exact: true }),
   ).toBeVisible();
   await page.screenshot({
-    path: `/private/tmp/recommendations-live-${info.project.name}.png`,
+    path: info.outputPath('recommendations-live.png'),
     fullPage: true,
   });
   await page.getByRole('button', { name: '합성 예시', exact: true }).click();
