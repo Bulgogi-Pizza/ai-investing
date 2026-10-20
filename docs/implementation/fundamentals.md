@@ -1,6 +1,6 @@
 # 재무·가치 지표 — FUNDAMENTALS (5b)
 
-상태: 서버 어댑터, 순수 계산 라이브러리, 라우터 팩토리, 합성 fixture 테스트까지 구현했다. **앱에는 아직 연결하지 않았다**(`src/server/app.ts`·`index.ts`와 화면은 다른 작업이 다루므로 이 단계에서 건드리지 않았다). DART·SEC 실제 호출은 하지 않았다(키가 아직 없다). 설계 근거는 [next-phase-design.md](../planning/next-phase-design.md) 2절 "분석 탭"과 4절 "검증 흐름"이며, 계산 함수는 7b 시점 기준 백테스트가 그대로 재사용한다.
+상태: 서버 어댑터, 순수 계산 라이브러리, 라우터 팩토리, 합성 fixture 테스트까지 구현했고 **5단계(종목 분석)에서 앱에 연결했다**: `createApp`이 라우터를 소유자 검사 뒤에 마운트하고, `src/server/index.ts`가 환경 변수로 DART·SEC 어댑터를 만들어 넘긴다. 화면은 [종목 분석](charts.md)의 가치·재무 탭과 요약이 쓴다. DART·SEC 실제 호출은 하지 않았다(키가 아직 없다). 설계 근거는 [next-phase-design.md](../planning/next-phase-design.md) 2절 "분석 탭"과 4절 "검증 흐름"이며, 계산 함수는 7b 시점 기준 백테스트가 그대로 재사용한다.
 
 ## 공식 근거와 확인일
 
@@ -28,7 +28,7 @@ DART 상태 코드(세 API 공통): `000` 정상, `010` 등록되지 않은 키,
 - DART 응답의 상태 키 위치. 문서 표는 `result` 아래 `status`·`message`로 적지만 `stockTotqySttus`와 `list`의 응답 필드 표는 최상위 `status`·`message`로 적는다. 최상위 `status`로 구현했다.
 - DART 보고서의 결산일 필드가 없다(아래 "결산일").
 
-## 연결 방법(감독이 마운트한다)
+## 연결 방법(연결 완료)
 
 ```ts
 import {
@@ -234,10 +234,10 @@ EPS·BPS는 부호 있는 값으로 노출하고, 비율(PER·PBR·ROE)만 0 이
 - `tests/valuation.test.ts`: 시점 필터(경계·`inclusive`·잘못된 날짜·미래 값을 바꿔도 결과 동일), TTM·EPS·BPS·ROE 수식, 연간 우선, 분기 누락 시 물러남, 이유 코드 전부, 업종 요약.
 - `tests/fundamentals-router.test.ts`: 401/403/400/503/404/오류 매핑, KR·US 라우팅, 키 비노출, 분당 제한.
 
-## 아직 연결하지 않은 것
+## 연결 현황과 남은 것
 
-- `app.ts`·`index.ts` 마운트와 환경 변수 연결, Terraform의 `investing-dart-api-key` 비밀과 `SEC_USER_AGENT` 배포 변수([계획 2단계](../planning/next-phase-plan.md)).
-- 화면(종목 분석 탭의 가치 지표·재무 표): 토스 현재가와 `priceRatios`, 업종 평균(토스 `/sectors` 구성 종목 × 이 API는 종목마다 호출하므로 일일 한도를 고려한 일괄 계산 필요).
-- 실제 DART·SEC 호출 검증. 첫 호출 전까지 위 "문서에 없어서 확인해야 하는 것"은 가정이다.
+- (완료) `app.ts`·`index.ts` 마운트와 환경 변수 연결. 어댑터가 없으면 해당 시장은 503 `DART_UNAVAILABLE`/`SEC_UNAVAILABLE`이고 화면은 "데이터 제공자가 연결되지 않았습니다"와 서버 문구를 보인다. 토스 연결과 별개의 원인으로 구분한다.
+- (완료) 화면: 요약의 PER·PBR(토스 현재가와 `priceRatios`, "재무 공시일·계산 시각" 표시), 가치·재무 탭의 연간·분기 표와 EPS·BPS·ROE, 같은 업종 비교. 업종 비교는 토스 `/sectors` 구성 종목 상위 20개(대상 종목 제외)를 **종목마다 `/api/fundamentals`로 조회**해 `sectorSummary`로 요약한다. 이 API가 사용자당 분당 30회라 20개로 제한했고 버튼을 눌러 실행한다. 한도(429)에 걸리면 나머지는 "요청 한도로 조회하지 못함"으로 제외하고 부분 결과를 그대로 보여 준다. 국내 첫 조회는 종목당 DART 약 25회라 오래 걸릴 수 있어 진행률을 표시한다(캐시 6시간).
+- 여전히 남은 것: Terraform의 `investing-dart-api-key` 비밀과 `SEC_USER_AGENT` 배포 변수([계획 2단계](../planning/next-phase-plan.md), 이 단계는 infra를 건드리지 않음), 실제 DART·SEC 호출 검증(첫 호출 전까지 위 "문서에 없어서 확인해야 하는 것"은 가정), 일일 한도를 고려한 업종 일괄 계산(서버 쪽 사전 계산·저장은 4단계 이후).
 - 7b 백테스트의 과거 연도 확장: DART는 기본 3년(현재 연도와 앞 2년)만 받는다(`yearsBack` 옵션). 더 긴 과거가 필요하면 호출 수(연도당 8건)와 일일 한도를 계산한 뒤 늘린다. 일일 데이터 적재(4단계)가 재무제표를 저장하는 방식은 정해지지 않았다.
 - 결산월이 12월이 아닌 한국 회사의 정확한 `periodEnd`, 우선주를 제외한 보통주 EPS, SEC 정정 공시(`10-K/A`) 반영, 외국 발행사(20-F/40-F, IFRS)는 지원하지 않는다.
