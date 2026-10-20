@@ -1,0 +1,55 @@
+{
+  "StatisticSearch": {
+    "list_total_count": 4,
+    "row": [
+      {
+        "STAT_CODE": "731Y001",
+        "STAT_NAME": "synthetic",
+        "ITEM_CODE1": "0000001",
+        "ITEM_NAME1": "synthetic",
+        "ITEM_CODE2": null,
+        "ITEM_NAME2": null,
+        "UNIT_NAME": "원",
+        "WGT": null,
+        "TIME": "20261012",
+        "DATA_VALUE": "1400.5"
+      },
+      {
+        "STAT_CODE": "731Y001",
+        "STAT_NAME": "synthetic",
+        "ITEM_CODE1": "0000001",
+        "ITEM_NAME1": "synthetic",
+        "ITEM_CODE2": null,
+        "ITEM_NAME2": null,
+        "UNIT_NAME": "원",
+        "WGT": null,
+        "TIME": "20261013",
+        "DATA_VALUE": "1402.25"
+      },
+      {
+        "STAT_CODE": "731Y001",
+        "STAT_NAME": "synthetic",
+        "ITEM_CODE1": "0000001",
+        "ITEM_NAME1": "synthetic",
+        "ITEM_CODE2": null,
+        "ITEM_NAME2": null,
+        "UNIT_NAME": "원",
+        "WGT": null,
+        "TIME": "20261014",
+        "DATA_VALUE": ""
+      },
+      {
+        "STAT_CODE": "731Y001",
+        "STAT_NAME": "synthetic",
+        "ITEM_CODE1": "0000001",
+        "ITEM_NAME1": "synthetic",
+        "ITEM_CODE2": null,
+        "ITEM_NAME2": null,
+        "UNIT_NAME": "원",
+        "WGT": null,
+        "TIME": "20261015",
+        "DATA_VALUE": "1398"
+      }
+    ]
+  }
+}

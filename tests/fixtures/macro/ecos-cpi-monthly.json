@@ -1,0 +1,21 @@
+{
+  "StatisticSearch": {
+    "list_total_count": 2,
+    "row": [
+      {
+        "STAT_CODE": "901Y009",
+        "ITEM_CODE1": "0",
+        "UNIT_NAME": "2020=100",
+        "TIME": "202608",
+        "DATA_VALUE": "118.4"
+      },
+      {
+        "STAT_CODE": "901Y009",
+        "ITEM_CODE1": "0",
+        "UNIT_NAME": "2020=100",
+        "TIME": "202609",
+        "DATA_VALUE": "118.9"
+      }
+    ]
+  }
+}
