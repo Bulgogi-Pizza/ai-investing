@@ -6,6 +6,8 @@ import {
   applyPatch,
   decideReserve,
   ledgerFacts,
+  newestOrderFirst,
+  planResolution,
   symbolLockState,
   type AccessCheckStatus,
   type AccessProbeStatus,
@@ -15,6 +17,7 @@ import {
   type LiveOrderRecord,
   type LiveOrderStatus,
   type OrderPatch,
+  type OrderResolution,
   type ReserveInput,
   type ReserveResult,
   type TradingStore,
@@ -429,7 +432,24 @@ export class FirestoreTradingStore implements TradingStore {
       throw new Error('Invalid symbol');
     // Equality filter only (single-field index); a symbol has few live orders.
     const result = await this.db.collection('liveOrders').where('symbol', '==', symbol).get();
-    return result.docs.map((d) => parseLiveOrder(d.data())).slice(0, limit);
+    return result.docs
+      .map((d) => parseLiveOrder(d.data()))
+      .sort(newestOrderFirst)
+      .slice(0, limit);
+  }
+  async resolveUnconfirmedOrder(
+    algorithmId: string,
+    clientOrderId: string,
+    resolution: OrderResolution,
+  ) {
+    const current = await this.getOrder(clientOrderId);
+    if (!current || current.algorithmId !== algorithmId) throw new Error('Unknown order');
+    let last = current;
+    // Each patch is its own transaction that re-validates the transition: a concurrent change of the
+    // order (for example a reconciliation that adopted it) makes the later patch throw.
+    for (const patch of planResolution(current, resolution))
+      last = await this.updateOrder(clientOrderId, patch);
+    return last;
   }
   async getAccessCheck(): Promise<AccessCheckStatus | null> {
     const snapshot = await this.statusRef('accessCheck').get();

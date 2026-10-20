@@ -20,7 +20,9 @@ import type { TossClient } from '../toss.js';
  * - a minimum interval between calls keeps a burst of reads from hitting the provider rate limit
  *   (a rate-limit answer is a refusal, never something this adapter retries).
  */
-const ORDER_ID = '[A-Za-z0-9_\\-=.~%]{1,256}';
+// '=' reaches the wire as %3D (encodeURIComponent); no other percent escape is accepted, so an encoded
+// dot or slash can never smuggle a path segment through.
+const ORDER_ID = '(?:[A-Za-z0-9_\\-.~]|%3D){1,256}';
 const SYMBOL = '[A-Za-z0-9.\\-]{1,30}';
 const READ_PATHS: readonly RegExp[] = [
   /^\/api\/v1\/orders$/,
@@ -36,13 +38,13 @@ const READ_PATHS: readonly RegExp[] = [
 const CREATE_ORDER_PATH = /^\/api\/v1\/orders$/;
 
 /** True for exactly the requests this adapter may send. */
-export function transportAllows(request: TransportRequest): boolean {
+export function transportAllows(request: TransportRequest, readOnly = false): boolean {
   if (!request || typeof request.path !== 'string') return false;
   if (request.path.split('/').some((segment) => segment === '.' || segment === '..')) return false;
   if (request.method === 'GET')
     return request.body === undefined && READ_PATHS.some((p) => p.test(request.path));
   if (request.method === 'POST')
-    return CREATE_ORDER_PATH.test(request.path) && request.query === undefined;
+    return !readOnly && CREATE_ORDER_PATH.test(request.path) && request.query === undefined;
   return false;
 }
 
@@ -53,6 +55,8 @@ export type TossTransportOptions = {
   maxBytes?: number;
   /** Minimum delay between two calls. Default 120 ms. */
   minIntervalMs?: number;
+  /** Refuse every non-GET request (the access check job): no write path exists at all. */
+  readOnly?: boolean;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 };
@@ -62,6 +66,7 @@ export class TossOrderTransport implements OrderTransport {
   private readonly timeoutMs: number;
   private readonly maxBytes: number;
   private readonly minIntervalMs: number;
+  private readonly readOnly: boolean;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
   constructor(
@@ -71,6 +76,7 @@ export class TossOrderTransport implements OrderTransport {
     this.timeoutMs = options.timeoutMs ?? 8000;
     this.maxBytes = options.maxBytes ?? 1024 * 1024;
     this.minIntervalMs = options.minIntervalMs ?? 120;
+    this.readOnly = options.readOnly === true;
     this.now = options.now ?? Date.now;
     this.sleep = options.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
   }
@@ -78,7 +84,7 @@ export class TossOrderTransport implements OrderTransport {
   async send(request: TransportRequest) {
     // A request outside the allow-list is a programming error. It is reported like "no response" so
     // the order client treats a write as unconfirmed (it can never be sent anyway).
-    if (!transportAllows(request)) throw new TransportNetworkError();
+    if (!transportAllows(request, this.readOnly)) throw new TransportNetworkError();
     const wait = this.last + this.minIntervalMs - this.now();
     if (wait > 0) await this.sleep(wait);
     this.last = this.now();

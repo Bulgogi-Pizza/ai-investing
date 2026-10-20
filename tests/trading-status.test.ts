@@ -12,6 +12,7 @@ import { FirestoreTradingStore, parseAccessCheck } from '../src/server/trading/f
 import { FALLBACK_COMMISSION_RATE, liveCumulativePnl } from '../src/server/trading/ledger-pnl';
 import {
   MemoryTradingStore,
+  summarizeLedger,
   type AccessCheckStatus,
   type BlockedOrderRecord,
   type LiveJobHeartbeat,
@@ -370,5 +371,140 @@ describe('live cumulative P&L (realized + unrealized, from the algorithm own ord
   });
   it('the fallback commission is deliberately high', () => {
     expect(FALLBACK_COMMISSION_RATE).toBeGreaterThanOrEqual(0.003);
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe.each(implementations)('resolving unconfirmed orders by hand: %s', (_name, make) => {
+  const unknown = (store: TradingStore, over: Partial<LiveOrderRecord> = {}) =>
+    seedOrder(
+      store,
+      { clientOrderId: 'ai-lost', quantity: 20, price: '70000', ...over },
+      'unknown',
+    );
+
+  it('a fill the owner saw in the broker app becomes a held position and frees the symbol lock', async () => {
+    const { store } = make();
+    await unknown(store);
+    const resolved = await store.resolveUnconfirmedOrder('algo-1', 'ai-lost', {
+      outcome: 'filled',
+      quantity: 20,
+      averagePrice: 69_900,
+    });
+    expect(resolved).toMatchObject({
+      status: 'filled',
+      filledQuantity: 20,
+      averageFilledPrice: 69_900,
+      notifiedStatus: 'filled',
+      error: { code: 'manually-resolved' },
+    });
+    const ledger = summarizeLedger(await store.listOrders({ algorithmId: 'algo-1' }));
+    expect(ledger.positions.get('005930')).toMatchObject({ quantity: 20 });
+    expect(ledger.committed).toBeCloseTo(20 * 69_900, 6);
+    // The lock is gone: a new order for the symbol can be reserved.
+    const next = await store.reserveOrder({
+      record: {
+        clientOrderId: 'ai-next',
+        algorithmId: 'algo-1',
+        runId: 'run-2',
+        market: 'KR',
+        symbol: '005930',
+        side: 'sell',
+        quantity: 20,
+        price: '70000',
+        currency: 'KRW',
+        tranche: 0,
+        status: 'reserved',
+        dateKey: '2026-10-21',
+        createdAt: NOW.toISOString(),
+        updatedAt: NOW.toISOString(),
+        filledQuantity: 0,
+      },
+      maxPerAlgorithm: 3,
+      maxGlobal: 10,
+      budget: 1e9,
+    });
+    expect(next).toEqual({ ok: true });
+    expect(await store.listNonTerminalOrders()).toHaveLength(1);
+  });
+  it('fewer shares than ordered keep the filled part and cancel the rest', async () => {
+    const { store } = make();
+    await unknown(store);
+    const resolved = await store.resolveUnconfirmedOrder('algo-1', 'ai-lost', {
+      outcome: 'filled',
+      quantity: 8,
+      averagePrice: 70_000,
+    });
+    expect(resolved).toMatchObject({ status: 'canceled', filledQuantity: 8 });
+    expect(
+      summarizeLedger(await store.listOrders({ algorithmId: 'algo-1' })).positions.get('005930')
+        ?.quantity,
+    ).toBe(8);
+  });
+  it('canceled and not-placed leave no position and no committed budget', async () => {
+    for (const resolution of [
+      { outcome: 'canceled' as const },
+      { outcome: 'not-placed' as const },
+    ]) {
+      const { store } = make();
+      await unknown(store);
+      const resolved = await store.resolveUnconfirmedOrder('algo-1', 'ai-lost', resolution);
+      expect(resolved.status).toBe(resolution.outcome === 'canceled' ? 'canceled' : 'rejected');
+      expect(resolved.filledQuantity).toBe(0);
+      const ledger = summarizeLedger(await store.listOrders({ algorithmId: 'algo-1' }));
+      expect(ledger.committed).toBe(0);
+      expect(await store.listNonTerminalOrders()).toEqual([]);
+    }
+  });
+  it('a crashed reservation (reserved) can be resolved too', async () => {
+    const { store } = make();
+    await seedOrder(store, { clientOrderId: 'ai-res', quantity: 5 }, 'reserved');
+    expect(
+      (await store.resolveUnconfirmedOrder('algo-1', 'ai-res', { outcome: 'not-placed' })).status,
+    ).toBe('rejected');
+  });
+  it('refuses anything that is not an unconfirmed order of that algorithm, and bad numbers', async () => {
+    const { store } = make();
+    await seedOrder(store, { clientOrderId: 'ai-done' }, 'filled');
+    await seedOrder(store, { clientOrderId: 'ai-open', symbol: '000660' }, 'accepted');
+    await unknown(store, { clientOrderId: 'ai-lost', symbol: '035720' });
+    for (const id of ['ai-done', 'ai-open'])
+      await expect(
+        store.resolveUnconfirmedOrder('algo-1', id, { outcome: 'not-placed' }),
+      ).rejects.toThrow('not unconfirmed');
+    await expect(
+      store.resolveUnconfirmedOrder('other', 'ai-lost', { outcome: 'not-placed' }),
+    ).rejects.toThrow('Unknown order');
+    await expect(
+      store.resolveUnconfirmedOrder('algo-1', 'missing', { outcome: 'not-placed' }),
+    ).rejects.toThrow('Unknown order');
+    for (const bad of [
+      { outcome: 'filled' as const, quantity: 0, averagePrice: 1 },
+      { outcome: 'filled' as const, quantity: 21, averagePrice: 1 },
+      { outcome: 'filled' as const, quantity: 2.5, averagePrice: 1 },
+      { outcome: 'filled' as const, quantity: 5, averagePrice: 0 },
+      { outcome: 'filled' as const, quantity: 5, averagePrice: Number.NaN },
+      { outcome: 'canceled' as const, quantity: 5 },
+    ])
+      await expect(store.resolveUnconfirmedOrder('algo-1', 'ai-lost', bad)).rejects.toThrow();
+    // Nothing changed after the refusals.
+    expect((await store.getOrder('ai-lost'))?.status).toBe('unknown');
+  });
+  it('lists orders of a symbol newest first before applying the limit (chart markers)', async () => {
+    const { store } = make();
+    for (const [i, day] of ['10', '11', '12'].entries())
+      await seedOrder(
+        store,
+        {
+          clientOrderId: `ai-${i}`,
+          algorithmId: `algo-${i}`,
+          createdAt: `2026-10-${day}T01:00:00.000Z`,
+        },
+        'reserved',
+      );
+    expect((await store.listOrdersBySymbol('005930', 2)).map((o) => o.clientOrderId)).toEqual([
+      'ai-2',
+      'ai-1',
+    ]);
   });
 });

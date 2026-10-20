@@ -593,3 +593,69 @@ describe('GET /api/notifications', () => {
     expect(JSON.stringify(response.body)).not.toContain('SECRET');
   });
 });
+
+describe('알림: 미확인 주문 정리·전략 변경·자동 정지 안내', () => {
+  const origin = 'https://invest.example.test';
+  it('실전 자동 정지는 보유 종목을 자동으로 팔지 않는다고 알리고, 모의 정지에는 그 문구가 없다', () => {
+    const live = formatNotification(
+      { kind: 'algorithm-auto-stop', mode: 'live', algorithmName: 'A', reason: 'loss-limit' },
+      origin,
+    ).message;
+    expect(live).toContain('보유 종목은 자동으로 팔지 않습니다');
+    expect(live).toContain('직접 관리하세요');
+    const paper = formatNotification(
+      { kind: 'algorithm-auto-stop', mode: 'paper', algorithmName: 'A', reason: 'loss-limit' },
+      origin,
+    ).message;
+    expect(paper).not.toContain('직접 관리');
+    const unconfirmed = formatNotification(
+      {
+        kind: 'algorithm-auto-stop',
+        mode: 'live',
+        algorithmName: 'A',
+        reason: 'unconfirmed-order',
+      },
+      origin,
+    ).message;
+    expect(unconfirmed).toContain('접수 여부를 확인하지 못한 주문이 한 세션 넘게 남음');
+  });
+  it('미확인 주문 정리 알림은 결과를 말하고 금액·수량을 담지 않는다', () => {
+    for (const [outcome, text] of [
+      ['filled', '체결됨'],
+      ['canceled', '취소·미체결'],
+      ['not-placed', '접수되지 않음'],
+    ] as const) {
+      const { message, mode } = formatNotification(
+        {
+          kind: 'live-order-resolved',
+          mode: 'live',
+          symbol: '005930',
+          side: 'buy',
+          algorithmName: '모멘텀 A',
+          outcome,
+        },
+        origin,
+      );
+      expect(mode).toBe('live');
+      expect(message).toContain('[실전 주문·실제 체결] 미확인 주문을 직접 정리했습니다');
+      expect(message).toContain(`정리 결과: ${text}`);
+      expect(message).toContain('종목: 005930');
+      expect(message).toContain('긴급 정지를 누르세요');
+      expect(message).toContain(`화면: ${origin}/algorithms`);
+    }
+    expect(
+      formatNotification(
+        { kind: 'live-order-resolved', mode: 'live', outcome: 'drop@x.com' as never },
+        origin,
+      ).message,
+    ).toContain('정리 결과: 확인 필요');
+  });
+  it('실전 전략 변경은 위험 증가 설정 변경으로 알린다', () => {
+    const { message } = formatNotification(
+      { kind: 'setting-risk-increase', change: 'live-strategy-changed', algorithmName: 'A' },
+      origin,
+    );
+    expect(message).toContain('[위험 증가 설정 변경] 실전 알고리즘 전략 변경');
+    expect(message).toContain('긴급 정지를 누르세요');
+  });
+});

@@ -56,6 +56,8 @@ export const REASONS = {
   SELLABLE_UNAVAILABLE: '판매 가능 수량을 확인하지 못해 주문하지 않습니다.',
   COMMISSIONS_UNAVAILABLE: '매매 수수료율을 확인하지 못해 주문하지 않습니다.',
   RUN_IN_PROGRESS: '같은 알고리즘의 다른 실행이 진행 중이어서 주문하지 않습니다.',
+  ALGORITHM_NOT_LIVE: '알고리즘이 더 이상 실전 모드가 아니어서 주문하지 않습니다.',
+  RUN_WINDOW_CLOSED: '개장 직후 주문 시간대가 끝나 주문하지 않습니다.',
   // Fail-closed fallbacks.
   SETTINGS_INVALID: '안전장치 설정값이 올바르지 않아 주문하지 않습니다.',
   INTERNAL_ERROR: '예상하지 못한 오류가 있어 주문하지 않습니다.',

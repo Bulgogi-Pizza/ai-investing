@@ -16,7 +16,7 @@ export type LiveAlert =
   | { type: 'broker-rejected'; symbol: string; side: TradeSide; algorithmName: string }
   | {
       type: 'algorithm-stopped';
-      why: 'loss-limit' | 'order-permission' | 'first-order-rejected';
+      why: 'loss-limit' | 'order-permission' | 'first-order-rejected' | 'unconfirmed-order';
       algorithmName: string;
     }
   | { type: 'order-unconfirmed'; symbol?: string; side?: TradeSide; algorithmName?: string }

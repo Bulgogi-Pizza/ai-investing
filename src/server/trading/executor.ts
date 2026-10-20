@@ -98,6 +98,11 @@ export type LiveRun = {
   algorithm: PreTradeAlgorithm;
   decisions: Decision[];
   data: RunDataProvider;
+  /**
+   * Called before EVERY order, after the previous one finished: a reason code refuses the order (for
+   * example the algorithm is no longer live or the session window is over). A throw refuses it too.
+   */
+  guard?: () => Promise<ReasonCode | null>;
 };
 
 export type OrderOutcome = {
@@ -120,7 +125,8 @@ export type RunReport = {
   /** Another run of this algorithm holds the lease: nothing was attempted. */
   leaseHeld?: boolean;
 };
-export type StopReason = 'loss-limit' | 'order-permission' | 'first-order-rejected';
+export type StopReason =
+  'loss-limit' | 'order-permission' | 'first-order-rejected' | 'unconfirmed-order';
 
 const RUN_ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** Transient: a rate-limit refusal of the first order says nothing about permissions. */
@@ -134,6 +140,8 @@ const SILENT_CODES: readonly ReasonCode[] = [
   'EMERGENCY_STOP',
   'ALGORITHM_STOPPED',
   'OPEN_ORDER_EXISTS',
+  'ALGORITHM_NOT_LIVE',
+  'RUN_WINDOW_CLOSED',
 ];
 
 const RESERVE_FAILURE_REASON: Record<ReserveFailure, ReasonCode> = {
@@ -363,6 +371,17 @@ export class LiveOrderExecutor {
       await this.blocked(run, intent, codes);
       return out({ status: 'blocked', reasons: codes });
     };
+
+    // 0. The run-level guard (mode and session window are re-read before each order).
+    if (run.guard) {
+      let code: ReasonCode | null;
+      try {
+        code = await run.guard();
+      } catch {
+        code = 'STORE_UNAVAILABLE';
+      }
+      if (code) return refuse([code]);
+    }
 
     // 1. Facts for this order (fresh per order).
     let facts: PreTradeMarketFacts;
@@ -606,6 +625,24 @@ export class LiveOrderExecutor {
     return outcome;
   }
 
+  /** CLOSED orders of one symbol (documented params: status, symbol, limit, cursor); at most 3 pages. */
+  private async closedOrders(symbol: string): Promise<TossOrder[]> {
+    const out: TossOrder[] = [];
+    let cursor: string | undefined;
+    for (let page = 0; page < 3; page++) {
+      const result = await this.deps.client.listOrders({
+        status: 'CLOSED',
+        symbol,
+        limit: 100,
+        ...(cursor ? { cursor } : {}),
+      });
+      out.push(...result.orders);
+      if (!result.hasNext || !result.nextCursor) break;
+      cursor = result.nextCursor;
+    }
+    return out;
+  }
+
   // -------------------------------------------------------------------------
   // Reconciliation: read-only against the provider (GET only). Updates statuses and sends one
   // fill notification per newly filled/partially filled order.
@@ -615,14 +652,23 @@ export class LiveOrderExecutor {
     const orders = algorithmId ? all.filter((o) => o.algorithmId === algorithmId) : all;
     let updated = 0;
     let openList: TossOrder[] | null = null;
+    const closedBySymbol = new Map<string, TossOrder[]>();
     for (const order of orders) {
       try {
         let providerOrder: TossOrder | null = null;
         if (order.orderId) {
           providerOrder = await this.deps.client.getOrder(order.orderId);
         } else {
-          // No orderId (unknown/reserved): adopt only an exact, unique match among OPEN orders.
+          // No orderId (unknown/reserved): adopt only an exact, unique match among the OPEN orders and
+          // the CLOSED orders of the symbol (a lost answer may belong to an order that already
+          // filled, was cancelled or expired). The list API returns no clientOrderId.
           openList ??= (await this.deps.client.listOrders({ status: 'OPEN' })).orders;
+          let closedList = closedBySymbol.get(order.symbol);
+          if (!closedList) {
+            closedList = await this.closedOrders(order.symbol);
+            closedBySymbol.set(order.symbol, closedList);
+          }
+          const candidates = [...openList, ...closedList];
           // Claimed ids come from ALL records (every algorithm). An order is adopted only when
           // exactly one provider order matches this record AND this record is the only record
           // without an id that could own it (no cross-algorithm or look-alike adoption).
@@ -637,7 +683,7 @@ export class LiveOrderExecutor {
             t.orderType === 'LIMIT' &&
             t.timeInForce === 'DAY' &&
             Date.parse(t.orderedAt) >= Date.parse(r.createdAt);
-          const matches = openList.filter((t) => !claimed.has(t.orderId) && fits(t, order));
+          const matches = candidates.filter((t) => !claimed.has(t.orderId) && fits(t, order));
           if (matches.length !== 1) continue;
           if (unowned.filter((r) => fits(matches[0], r)).length !== 1) continue;
           providerOrder = matches[0];

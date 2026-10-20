@@ -360,3 +360,68 @@ describe('TossOrderTransport', () => {
     expect(sleeps).toEqual([100]);
   });
 });
+
+describe('read-only transport and path hardening', () => {
+  it('a read-only transport refuses order creation (and every non-GET) before any network use', async () => {
+    const { client, fetchMock, calls } = setup();
+    const readOnly = new TossOrderTransport(client, { minIntervalMs: 0, readOnly: true });
+    await expect(
+      readOnly.send({ method: 'POST', path: '/api/v1/orders', body: { symbol: '005930' } }),
+    ).rejects.toBeInstanceOf(TransportNetworkError);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(transportAllows({ method: 'POST', path: '/api/v1/orders', body: {} }, true)).toBe(false);
+    expect(transportAllows({ method: 'POST', path: '/api/v1/orders', body: {} }, false)).toBe(true);
+    // Reads still work, and an order client built on it can read but never place.
+    const response = await readOnly.send({
+      method: 'GET',
+      path: '/api/v1/buying-power',
+      query: { currency: 'KRW' },
+    });
+    expect(response.status).toBe(200);
+    const orders = new TossOrderClient(readOnly, { sleep: async () => {}, maxRetries: 0 });
+    const placed = await orders.placeOrder({
+      clientOrderId: 'ai-ro',
+      market: 'KR',
+      symbol: '005930',
+      side: 'buy',
+      quantity: 1,
+      price: '70000',
+    });
+    expect(placed.outcome).toBe('unknown');
+    expect(calls.filter((c) => c.init.method === 'POST')).toHaveLength(0);
+  });
+  it('the access check job builds its transport read-only (static)', async () => {
+    const { readFileSync } = await import('node:fs');
+    const text = readFileSync('src/jobs/order-access-check.ts', 'utf8');
+    expect(text).toMatch(/new TossOrderTransport\(toss, \{ readOnly: true \}\)/);
+  });
+  it('an order id may carry "=" (as %3D) but no other percent escape, dot-only segment or extra slash', () => {
+    const get = (path: string) => transportAllows({ method: 'GET', path });
+    expect(get('/api/v1/orders/abc%3Ddef')).toBe(true);
+    expect(get('/api/v1/orders/abc-123_x.y~z')).toBe(true);
+    for (const bad of [
+      '/api/v1/orders/%2e%2e',
+      '/api/v1/orders/%2E%2E%2Faccounts',
+      '/api/v1/orders/a%2Fb',
+      '/api/v1/orders/a%5Cb',
+      '/api/v1/orders/a%00',
+      '/api/v1/orders/%',
+      '/api/v1/orders/..',
+      '/api/v1/orders/a/b',
+    ])
+      expect(get(bad), bad).toBe(false);
+  });
+  it('TossClient.authorizedRequest rejects encoded dots, slashes and nulls too', async () => {
+    const { client, fetchMock } = setup();
+    for (const path of [
+      '/api/v1/orders/%2e%2e/accounts',
+      '/api/v1/orders/a%2fb',
+      '/api/v1/orders/a%5cb',
+      '/api/v1/orders/a%00',
+    ])
+      await expect(client.authorizedRequest({ method: 'GET', path })).rejects.toBeInstanceOf(
+        ProviderError,
+      );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});

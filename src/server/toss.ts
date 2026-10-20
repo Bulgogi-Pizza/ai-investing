@@ -666,6 +666,7 @@ export class TossClient {
       (request.method !== 'GET' && request.method !== 'POST') ||
       !/^\/api\/v1\/[A-Za-z0-9_\-./=~%]{1,200}$/.test(request.path) ||
       request.path.split('/').some((segment) => segment === '.' || segment === '..') ||
+      /%(?:2e|2f|5c|00)/i.test(request.path) ||
       (request.method === 'GET' && request.body !== undefined)
     )
       throw new ProviderError(
