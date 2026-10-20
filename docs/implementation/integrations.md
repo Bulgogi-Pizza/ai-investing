@@ -18,7 +18,7 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 
 - `GET /api/portfolio`: 인증+소유자 검사. `{source,asOf,scope:'stocks-only',totals:{KRW:{marketValue,purchaseAmount,profitLoss},USD:{동일}},holdings:[{symbol,name,market,currency,quantity,lastPrice,averagePurchasePrice,marketValue,profitLoss,profitLossRate}]}`. 금액/수량/비율은 정밀도 보존용 십진문자열. 통화별 요약은 null이 가능하다. asOf는 서버 조회시각이며 체결시각이 아니다. API는 국내/미국 주식만 포함하므로 현금·채권·해외옵션·전체 순자산으로 표시하지 않는다. KRW와 USD는 환율 없이는 합산하지 않는다. profitLossRate는 비율(0.1=10%)이다.
 - `GET /api/market/candles?symbol=005930&interval=1d&count=100`: 인증 필수, interval1m/1d, count1–200, 심볼 영숫자/점/하이픈 최대30자. 공식 `/api/v1/candles` 수정주가 기준 조회. `{source,asOf,symbol,interval,adjusted:true,candles:[{timestamp,open,high,low,close,volume,currency}]}`. 수치는 십진문자열이며 과거→최신으로 정렬한다. pagination은 아직 웹API에 노출하지 않는다.
-- `GET /api/recommendations`: 인증·소유자·저장 전략 필수. 토스 일봉·주식 잔고·등록 일정 기반 rules-v1 분석을 반환한다. 전략없음409, 제공자미설정503, 소유자외403. 생성형 AI와 자동 뉴스 수집은 미연결이다. 상세는 recommendation-engine.md 참조.
+- `GET /api/recommendations`: 인증·소유자·저장 전략 필수. 토스 일봉·주식 잔고·등록 일정 기반 rules-v1 분석을 반환한다. 전략없음409, 제공자미설정503, 소유자외403. 선택적 Vertex 해설과 관리자 실행 공식 RSS 수집을 연결한다. 예약 뉴스 수집은 구성하지 않았다. 상세는 recommendation-engine.md 참조.
 - `GET /api/strategy`: `{strategy:null}` 또는 계정별 전략. `PUT /api/strategy`는 `{strategy:{name,horizon,benchmark,riskTolerance,targetAllocations,notes}}`. name/horizon/benchmark/notes는 문자열, riskTolerance는 low/medium/high, targetAllocations는 `{asset:string,percentage:number}[]`. 중복 자산 금지, 합계100%, 각 비중0–100, 최대30개. 서버에서 검사하고 허용 필드만 저장한다.
 
 운영 전략은 Firestore strategies/{userId}에 저장한다. 브라우저 데모 전략은 메모리 전용이며 실제 계정 API에 저장하지 않는다. 주문 엔드포인트는 구현 범위에 없다.
@@ -27,4 +27,4 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 
 ## 실제 데이터 기반 추천 갱신
 
-`GET /api/recommendations?period=daily|weekly|monthly&symbol=005930`는 저장된 전략·토스 일봉·주식 잔고·출처 등록 일정으로 rules-v1 분석을 반환한다. 전략없음409, 제공자미설정503, 연결소유자외403. 상세 계약은 recommendation-engine.md 참조. 생성형 LLM과 자동 뉴스 수집은 연결하지 않았다.
+`GET /api/recommendations?period=daily|weekly|monthly&symbol=005930`는 저장된 전략·토스 일봉·주식 잔고·출처 등록 일정으로 rules-v1 분석을 반환한다. 전략없음409, 제공자미설정503, 연결소유자외403. 상세 계약은 recommendation-engine.md 참조. 선택적 Vertex 해설 및 관리자 실행 한국은행·연준 RSS 수집의 계약은 ai-provider.md/news-provider.md를 따른다. 실제 연결 상태는 status.md가 원본이다.

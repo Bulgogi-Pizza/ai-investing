@@ -11,3 +11,7 @@ engine=rules-v1, dataMode=live는 공급자 데이터로 계산하는 결정적 
 응답은 asOf, period, symbol, horizon, strategy, decision, metrics, evidence.market의 실제 정규화 일봉과 제공자 시각, evidence.calendar의 출처/관측시각/조회기간/커버리지 경고, scenarios, risks, stockExposureByCurrency를 포함한다. 비중은 동일 통화의 주식끼리만 계산하며 현금·채권·옵션과 환율이 없으므로 전체 자산 배분을 의미하지 않는다. 지표 산술은 표시·설명용 부동소수점이다. 수익 확률·숫자 신뢰도를 만들지 않는다.
 
 사용자별 인스턴스당 분당3요청을 전용 제한하고 전체 API 제한도 적용한다. 공급자 조회는30초 캐시/singleflight를 재사용한다. 두 인스턴스에서는 제한이 합산될 수 있으며 엄격한 계정 전체 예산이 필요하면 분산 제한 저장소가 필요하다. 실키와 고정IP 등록 전 실서비스 데이터 연결 검증은 미완료다.
+
+## 뉴스·모델 해설 확장
+
+`evidence.news`는 최근1/7/30일 공개 보도자료를 예정 일정과 분리한다. 게시시각은 KST, 시장 관련성·출처·잘림·범위 한계를 함께 반환한다. 제목에서 추정한 중요도로 규칙 action을 변경하지 않는다. 세부 수집 계약은 news-provider.md를 따른다. `ai`는 선택적 Vertex 해설이며 규칙 action·metrics를 바꾸지 않는다. 모델 실패에도 원본 규칙은 유지하며 disabled/unavailable 상태를 표시한다. 정보 최소화·할당량·출력 스키마는 ai-provider.md, 실제 연결 상태는 status.md를 따른다.
