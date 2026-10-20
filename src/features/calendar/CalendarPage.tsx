@@ -26,8 +26,9 @@ import {
   adjacentCalendarDate,
 } from '../../lib/market';
 import { DataState, LoadingState } from '../../components/DataState';
+import { SourceLink } from '../../components/SourceLink';
 import { formatKst, kstToday } from '../../lib/kst';
-import { ApiError, issueOf, type DataIssue } from '../../lib/api';
+import { ApiError, issueOf, signalAuthRequired, type DataIssue } from '../../lib/api';
 const flag = (country: string) => (country === '한국' ? '🇰🇷' : country === '미국' ? '🇺🇸' : '🌐');
 export default function CalendarPage({ search, isAdmin }: { search: string; isAdmin: boolean }) {
   const [view, setView] = useState('월간');
@@ -49,12 +50,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     fetch('/api/news/sources', { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
-        if (!response.ok)
+        if (!response.ok) {
+          signalAuthRequired(response.status, body.error?.code);
           throw new ApiError(
             response.status,
             body.error?.code ?? 'REQUEST_FAILED',
             body.error?.message ?? '공식 뉴스 출처를 불러오지 못했습니다.',
           );
+        }
         if (!Array.isArray(body.sources)) throw new Error('뉴스 출처 응답을 확인하지 못했습니다.');
         if (!controller.signal.aborted) {
           setNewsSources(body.sources);
@@ -145,12 +148,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
     fetch(`/api/calendar/events?from=${from}&to=${to}`, { signal: controller.signal })
       .then(async (response) => {
         const body = await response.json();
-        if (!response.ok)
+        if (!response.ok) {
+          signalAuthRequired(response.status, body?.error?.code);
           throw new ApiError(
             response.status,
             body?.error?.code ?? 'REQUEST_FAILED',
             body?.error?.message ?? '등록 일정을 불러오지 못했습니다.',
           );
+        }
         if (!Array.isArray(body.events)) throw new Error('일정 응답을 확인하지 못했습니다.');
         const mapped = body.events.map(
           (event: MarketEvent & { date: string; assets: string[] }) => {
@@ -389,16 +394,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
           {newsSources.length > 0 && (
             <div className="tag-row">
               {newsSources.map((source) => (
-                <a
+                <SourceLink
                   key={source.id}
-                  href={source.feedUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
+                  url={source.feedUrl}
                   title={source.coverage}
                   style={{ fontSize: 9, color: '#806aab' }}
                 >
                   {source.name} ↗
-                </a>
+                </SourceLink>
               ))}
             </div>
           )}
@@ -770,10 +773,10 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               </div>
               {selectedEvent.sourceUrl && (
                 <div className="event-provenance">
-                  <a href={selectedEvent.sourceUrl} target="_blank" rel="noopener noreferrer">
+                  <SourceLink url={selectedEvent.sourceUrl}>
                     {selectedEvent.sourceName}
                     <ExternalLink size={11} />
-                  </a>
+                  </SourceLink>
                   <span>
                     확인:{' '}
                     {selectedEvent.factualObservedAt

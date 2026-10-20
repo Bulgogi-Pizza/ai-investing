@@ -24,7 +24,7 @@ import ChartsPage from './features/charts/ChartsPage';
 import LoginScreen, { type SessionUser } from './features/LoginScreen';
 import MarketStrip from './features/MarketStrip';
 import { DataState, LoadingState } from './components/DataState';
-import { ApiError, useApiResource } from './lib/api';
+import { ApiError, AUTH_REQUIRED_EVENT, useApiResource } from './lib/api';
 
 type Page = 'calendar' | 'charts' | 'portfolio' | 'ai';
 const nav = [
@@ -83,6 +83,15 @@ export default function App() {
       });
     return () => controller.abort();
   }, [attempt]);
+  useEffect(() => {
+    // A 401 on any private request means the session ended: show the login screen again.
+    const expired = () =>
+      setSession((current) =>
+        current.status === 'authenticated' ? { status: 'anonymous' } : current,
+      );
+    window.addEventListener(AUTH_REQUIRED_EVENT, expired);
+    return () => window.removeEventListener(AUTH_REQUIRED_EVENT, expired);
+  }, []);
   if (session.status === 'checking')
     return (
       <main className="login-screen">

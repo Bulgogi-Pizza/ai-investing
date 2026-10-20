@@ -16,6 +16,12 @@ export class NoDataError extends Error {}
 export type DataIssueKind = 'not-connected' | 'owner-only' | 'no-data' | 'error';
 export type DataIssue = { kind: DataIssueKind; message: string; retryable: boolean };
 
+export const AUTH_REQUIRED_EVENT = 'folio:auth-required';
+/** A private request got 401 mid-session: tell the app shell to return to the login screen. */
+export function signalAuthRequired(status: number, code?: unknown) {
+  if (status === 401 && code === 'AUTH_REQUIRED' && typeof window !== 'undefined')
+    window.dispatchEvent(new Event(AUTH_REQUIRED_EVENT));
+}
 export async function apiGet(url: string, signal?: AbortSignal): Promise<unknown> {
   let response: Response;
   try {
@@ -36,10 +42,16 @@ export async function apiGet(url: string, signal?: AbortSignal): Promise<unknown
       response.status === 429
         ? '요청이 많습니다. 잠시 후 다시 시도해 주세요.'
         : '요청을 처리하지 못했습니다. 잠시 후 다시 시도해 주세요.';
+    signalAuthRequired(response.status, error?.code);
+    const wait = Number(response.headers.get('retry-after'));
+    const waitNote =
+      Number.isInteger(wait) && wait > 0 && wait <= 3600
+        ? ` 약 ${wait}초 후 다시 시도할 수 있습니다.`
+        : '';
     throw new ApiError(
       response.status,
       typeof error?.code === 'string' ? error.code.slice(0, 80) : 'REQUEST_FAILED',
-      typeof error?.message === 'string' ? error.message.slice(0, 300) : fallback,
+      (typeof error?.message === 'string' ? error.message.slice(0, 300) : fallback) + waitNote,
     );
   }
   if (body === null)
@@ -54,6 +66,12 @@ export function issueOf(error: unknown): DataIssue {
   if (error instanceof ApiError) {
     if (error.code === 'TOSS_INTEGRATION_UNAVAILABLE')
       return { kind: 'not-connected', message: error.message, retryable: true };
+    if (error.code === 'AUTH_REQUIRED')
+      return {
+        kind: 'error',
+        message: '로그인 세션이 만료되었습니다. 다시 로그인해 주세요.',
+        retryable: false,
+      };
     if (error.code === 'OWNER_REQUIRED')
       return { kind: 'owner-only', message: error.message, retryable: false };
     if (error.code === 'PROVIDER_NOT_FOUND')

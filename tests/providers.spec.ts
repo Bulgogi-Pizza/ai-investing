@@ -178,6 +178,7 @@ test('Vertex narrative is separate from deterministic rules and cites sources', 
   );
   await page.goto('/');
   await page.getByRole('button', { name: /AI 인사이트/ }).click();
+  await page.getByRole('button', { name: '분석 실행', exact: true }).click();
   await expect(page.getByRole('heading', { name: '규칙 판단 유지' })).toBeVisible();
   const newsCard = page.getByRole('region', { name: '공식 발표 뉴스 근거' });
   await expect(newsCard).toContainText('수집된 공식 발표 테스트');
@@ -219,6 +220,7 @@ test('unavailable Vertex keeps rules and explicitly shows pending AI', async ({ 
   );
   await page.goto('/');
   await page.getByRole('button', { name: /AI 인사이트/ }).click();
+  await page.getByRole('button', { name: '분석 실행', exact: true }).click();
   await expect(page.getByRole('heading', { name: '규칙 판단 유지' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'LLM 연결 대기' })).toBeVisible();
   await expect(page.getByRole('region', { name: 'Gemini AI 해석' })).toHaveCount(0);

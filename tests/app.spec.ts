@@ -26,6 +26,8 @@ async function start(page: Page, options: MockOptions = {}) {
   await page.goto('/');
   return api;
 }
+const analyze = (page: Page) =>
+  page.getByRole('button', { name: '분석 실행', exact: true }).click();
 const fits = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1);
 
@@ -162,8 +164,10 @@ test.describe('owner with live data', () => {
   });
   test('AI insight loads for the selected horizon with sources', async ({ page }) => {
     await open(page, 'AI 인사이트');
+    await analyze(page);
     await expect(page.getByRole('heading', { name: '저장된 투자 원칙 점검' })).toBeVisible();
     await page.getByRole('button', { name: '주간', exact: true }).click();
+    await analyze(page);
     await expect(page.getByText('5거래일 관찰', { exact: true })).toBeVisible();
     await expect(page.getByRole('button', { name: '합성 예시' })).toHaveCount(0);
   });
@@ -197,6 +201,7 @@ test.describe('signed-in member who is not the owner', () => {
     await expect(page.locator('.event-chip')).toHaveCount(0);
     for (const name of ['차트 분석', '내 자산', 'AI 인사이트']) {
       await open(page, name);
+      if (name === 'AI 인사이트') await analyze(page);
       const state = page.locator(
         'main > [data-state="owner-only"], .invest-page > [data-state="owner-only"], .chart-panel [data-state="owner-only"]',
       );
@@ -217,6 +222,7 @@ test.describe('Toss not connected (503)', () => {
     await expect(page.locator('.market-strip-state [data-state="not-connected"]')).toBeVisible();
     for (const name of ['차트 분석', '내 자산', 'AI 인사이트']) {
       await open(page, name);
+      if (name === 'AI 인사이트') await analyze(page);
       await expect(page.locator('main [data-state="not-connected"]').last()).toContainText(
         '토스 계좌가 연결되지 않았습니다',
       );
@@ -243,6 +249,7 @@ test.describe('empty provider data', () => {
     await open(page, '내 자산');
     await expect(page.locator('[data-state="no-data"]')).toContainText('보유 중인 주식이 없습니다');
     await open(page, 'AI 인사이트');
+    await analyze(page);
     await expect(page.locator('main [data-state="no-data"]').last()).toBeVisible();
   });
   test('watchlist shows dashes when no price is returned', async ({ page }) => {
@@ -273,6 +280,7 @@ test.describe('transient provider error', () => {
   test('insight failure never substitutes a synthetic analysis', async ({ page }) => {
     const api = await start(page, { market: 'transient' });
     await open(page, 'AI 인사이트');
+    await analyze(page);
     const alert = page.locator('.invest-page').getByRole('alert');
     await expect(alert).toContainText('일시적인 오류');
     await expect(page.locator('.invest-insight-hero')).toHaveCount(0);

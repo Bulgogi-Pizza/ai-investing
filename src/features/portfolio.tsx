@@ -1,7 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useState } from 'react';
 import { Eye, EyeOff, ShieldCheck, SlidersHorizontal, Info } from 'lucide-react';
 import { DataState, LoadingState } from '../components/DataState';
-import { ApiError, NoDataError, useApiResource } from '../lib/api';
+import { ApiError, signalAuthRequired, useApiResource } from '../lib/api';
 import { formatKst } from '../lib/kst';
 import {
   assetKeys,
@@ -46,29 +46,37 @@ export function parsePortfolio(body: unknown): LivePortfolio {
   return data;
 }
 const colors = ['#7c66e5', '#a698ef', '#e6c47a', '#cdd4df'];
-export default function Portfolio() {
-  const [hidden, setHidden] = useState(false);
-  const [strategy, setStrategy] = useState<Strategy>(structuredClone(initialStrategy));
+type LoadedStrategy = { strategy: Strategy; isNew: boolean };
+export function parseStrategyResponse(body: unknown): LoadedStrategy {
+  if (!body || typeof body !== 'object' || !('strategy' in body))
+    throw new ApiError(502, 'INVALID_RESPONSE', '전략 응답 형식을 확인하지 못했습니다.');
+  const stored = (body as { strategy: unknown }).strategy;
+  if (stored === null) return { strategy: structuredClone(initialStrategy), isNew: true };
+  const parsed = parseStoredStrategy(stored);
+  // Never fall back to defaults for an unreadable stored strategy: saving would overwrite it.
+  if (!parsed)
+    throw new ApiError(
+      502,
+      'INVALID_RESPONSE',
+      '저장된 전략을 읽지 못해 편집을 막았습니다. 저장하면 기존 전략을 덮어쓰므로 다시 시도해 주세요.',
+    );
+  return { strategy: parsed, isNew: false };
+}
+function StrategySection({ hideOwnerOnly }: { hideOwnerOnly: boolean }) {
+  const { state, retry } = useApiResource('/api/strategy', parseStrategyResponse);
+  if (state.status === 'loading' || state.status === 'idle')
+    return <LoadingState label="저장된 전략을 불러오는 중…" />;
+  if (state.status === 'issue')
+    return state.issue.kind === 'owner-only' && hideOwnerOnly ? null : (
+      <DataState issue={state.issue} onRetry={retry} title="내 전략을 불러오지 못했습니다" />
+    );
+  return <StrategyEditor initial={state.data.strategy} isNew={state.data.isNew} />;
+}
+/** Mounted only after the saved strategy (or an explicit null) arrived, so defaults never overwrite it. */
+function StrategyEditor({ initial, isNew }: { initial: Strategy; isNew: boolean }) {
+  const [strategy, setStrategy] = useState<Strategy>(() => structuredClone(initial));
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState(false);
-  const [strategyOwnerOnly, setStrategyOwnerOnly] = useState(false);
-  const { state, retry } = useApiResource('/api/portfolio', parsePortfolio);
-  useEffect(() => {
-    const controller = new AbortController();
-    fetch('/api/strategy', { signal: controller.signal })
-      .then(async (saved) => {
-        if (!saved.ok) {
-          const body = await saved.json().catch(() => null);
-          if (body?.error?.code === 'OWNER_REQUIRED' && !controller.signal.aborted)
-            setStrategyOwnerOnly(true);
-          return;
-        }
-        const parsed = parseStoredStrategy((await saved.json()).strategy);
-        if (parsed && !controller.signal.aborted) setStrategy(parsed);
-      })
-      .catch(() => {});
-    return () => controller.abort();
-  }, []);
   const error = validateTargets(strategy.targets);
   async function saveStrategy() {
     if (error) return;
@@ -96,6 +104,7 @@ export default function Portfolio() {
           },
         }),
       });
+      if (response.status === 401) signalAuthRequired(401, 'AUTH_REQUIRED');
       setNotice(
         response.ok
           ? '내 계정에 전략을 저장했습니다. 실제 자산이나 주문은 변경되지 않습니다.'
@@ -107,7 +116,7 @@ export default function Portfolio() {
       setSaving(false);
     }
   }
-  const strategyEditor = (
+  return (
     <section className="invest-card">
       <div className="invest-section-title">
         <div>
@@ -116,7 +125,7 @@ export default function Portfolio() {
           </h2>
           <p>비중과 원칙을 정하면 리밸런싱 기준이 됩니다.</p>
         </div>
-        <span className="invest-pill">내 계정 전략</span>
+        <span className="invest-pill">{isNew ? '새 전략 · 기본값' : '내 계정 전략'}</span>
       </div>
       <div className="invest-strategy-fields">
         <label>
@@ -203,7 +212,11 @@ export default function Portfolio() {
       </div>
       <div className="invest-save">
         <span role="status" className={error ? 'invest-negative' : 'invest-muted'}>
-          {error || notice || '저장 버튼을 누르면 내 계정에 전략을 저장합니다.'}
+          {error ||
+            notice ||
+            (isNew
+              ? '저장된 전략이 없어 기본값으로 시작했습니다. 저장하면 새 전략이 만들어집니다.'
+              : '저장 버튼을 누르면 내 계정에 전략을 저장합니다.')}
         </span>
         <button
           className="invest-primary"
@@ -215,10 +228,10 @@ export default function Portfolio() {
       </div>
     </section>
   );
-  const holdingsView =
-    state.status === 'ready' ? (
-      <PortfolioView live={state.data} hidden={hidden} setHidden={setHidden} />
-    ) : null;
+}
+export default function Portfolio() {
+  const [hidden, setHidden] = useState(false);
+  const { state, retry } = useApiResource('/api/portfolio', parsePortfolio);
   return (
     <div className="invest-page">
       <div className="invest-heading">
@@ -233,13 +246,12 @@ export default function Portfolio() {
         <LoadingState label="토스증권 주식 잔고를 조회하는 중…" />
       )}
       {state.status === 'issue' && <DataState issue={state.issue} onRetry={retry} />}
-      {holdingsView}
-      {strategyOwnerOnly && state.status !== 'issue' && (
-        <DataState issue={{ kind: 'owner-only', message: '', retryable: false }} />
+      {state.status === 'ready' && (
+        <PortfolioView live={state.data} hidden={hidden} setHidden={setHidden} />
       )}
-      {!strategyOwnerOnly &&
-        !(state.status === 'issue' && state.issue.kind === 'owner-only') &&
-        strategyEditor}
+      <StrategySection
+        hideOwnerOnly={state.status === 'issue' && state.issue.kind === 'owner-only'}
+      />
     </div>
   );
 }

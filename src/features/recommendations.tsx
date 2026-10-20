@@ -2,6 +2,7 @@ import { useState } from 'react';
 import { Sparkles, ShieldCheck, Newspaper, ChartNoAxesCombined, Target, Info } from 'lucide-react';
 import { assetLabels } from '../lib/strategy';
 import { DataState, LoadingState } from '../components/DataState';
+import { SourceLink, isHttpsUrl } from '../components/SourceLink';
 import { ApiError, useApiResource } from '../lib/api';
 import { formatKst } from '../lib/kst';
 import './investing.css';
@@ -153,7 +154,7 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
                   <strong>{source.title}</strong>
                   <small>근거 {source.id}</small>
                 </span>
-                {source.url?.startsWith('https://') && (
+                {isHttpsUrl(source.url) && (
                   <a href={source.url} target="_blank" rel="noopener noreferrer">
                     원문 확인 ↗
                   </a>
@@ -273,9 +274,7 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
                     </small>
                   </span>
                   <span>
-                    <a href={news.sourceUrl} target="_blank" rel="noopener noreferrer">
-                      {news.sourceName} ↗
-                    </a>
+                    <SourceLink url={news.sourceUrl}>{news.sourceName} ↗</SourceLink>
                     <small>확인 {kst(news.factualObservedAt)} KST</small>
                   </span>
                 </div>
@@ -328,9 +327,7 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
                   </small>
                 </span>
                 <span>
-                  <a href={event.sourceUrl} target="_blank" rel="noopener noreferrer">
-                    {event.sourceName} ↗
-                  </a>
+                  <SourceLink url={event.sourceUrl}>{event.sourceName} ↗</SourceLink>
                   <small>확인 {kst(event.factualObservedAt)} KST</small>
                 </span>
               </div>
@@ -438,10 +435,25 @@ export function parseInsight(body: unknown, period: string): LiveInsight {
 export default function Recommendations() {
   const [period, setPeriod] = useState<keyof typeof periods>('daily');
   const [symbol, setSymbol] = useState('005930');
+  // Analysis only runs on explicit request: each run costs Toss + Vertex quota and the
+  // per-user limit is 3 per minute, so changing the inputs never fires a request by itself.
+  const [requested, setRequested] = useState<{
+    period: keyof typeof periods;
+    symbol: string;
+  } | null>(null);
   const { state, retry } = useApiResource(
-    `/api/recommendations?period=${period}&symbol=${encodeURIComponent(symbol)}`,
-    (body) => parseInsight(body, period),
+    requested
+      ? `/api/recommendations?period=${requested.period}&symbol=${encodeURIComponent(requested.symbol)}`
+      : null,
+    (body) => parseInsight(body, requested?.period ?? period),
   );
+  const running = state.status === 'loading';
+  const stale = requested !== null && (requested.period !== period || requested.symbol !== symbol);
+  function run() {
+    if (running) return;
+    if (requested && !stale) retry();
+    else setRequested({ period, symbol });
+  }
   return (
     <div className="invest-page">
       <div className="invest-heading">
@@ -487,12 +499,33 @@ export default function Recommendations() {
             </button>
           ))}
         </div>
-        <span>분석 기간과 종목을 바꾸면 다시 조회합니다.</span>
+        <button className="invest-primary" disabled={running} onClick={run}>
+          {running ? '분석 중…' : '분석 실행'}
+        </button>
+        <span>
+          기간·종목을 고른 뒤 실행하세요. 분석은 토스·AI 호출 한도(분당 3회)를 사용합니다.
+        </span>
       </div>
-      {(state.status === 'loading' || state.status === 'idle') && (
+      {state.status === 'idle' && (
+        <section className="invest-card invest-live-state" role="status">
+          <Sparkles size={24} />
+          <h2>아직 분석하지 않았습니다</h2>
+          <p>기간과 종목을 고르고 분석 실행을 누르면 내 데이터로 분석합니다.</p>
+        </section>
+      )}
+      {running && (
         <LoadingState label="내 데이터를 분석하는 중입니다. 저장 전략, 가격 및 일정 근거를 확인합니다." />
       )}
       {state.status === 'issue' && <DataState issue={state.issue} onRetry={retry} />}
+      {stale && state.status !== 'idle' && !running && (
+        <div className="invest-connection" role="status">
+          <Info size={17} />
+          <span>
+            선택이 바뀌었습니다. 아래 결과는 이전 선택({periods[requested!.period].label} ·{' '}
+            {requested?.symbol}) 기준이며 분석 실행을 눌러야 갱신됩니다.
+          </span>
+        </div>
+      )}
       {state.status === 'ready' && <LiveAnalysis insight={state.data} />}
     </div>
   );

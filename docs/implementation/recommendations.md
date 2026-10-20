@@ -29,3 +29,7 @@
 Vertex 어댑터가 활성화되고 서버에서 검증된 결과일 때만 규칙 분석과 분리된 생성형 설명 카드를 표시한다. 모델·분석시계·요약·점검 행동·반대 시나리오·정보 공백·불확실성 및 입력에 포함된 출처 인용을 보여 준다. ready가 아니거나 disabled/unavailable이면 생성형 연결 대기를 표시하고 규칙 결과를 그대로 유지한다. 실패를 성공한 LLM 분석으로 포장하지 않으며, 주문·비중 변경·수익 보장을 수행하지 않는다. 실제 모델/IAM 설정·정보 최소화·응답 스키마 검증은`src/server/ai.ts`와 해당 서버 문서를 따른다.
 
 추가 검증: 뉴스·추천·캘린더 API24개 테스트 통과. `tests/providers.spec.ts`는 RSS 수집과 선택적 Vertex ready/disabled/unavailable 및 최근 뉴스 분리 UI를 합성 응답으로 검사한다. 실제 Gemini/Vertex 호출 성공이나 실계좌 연결 성공을 이 mock 검증에서 주장하지 않는다.
+
+## 실행은 명시적 요청으로만
+
+화면은 열거나 기간·종목을 바꿔도 요청을 보내지 않는다. "분석 실행" 버튼을 눌러야 `GET /api/recommendations`가 한 번 나간다(요청마다 토스 조회와 선택적 Vertex 호출을 쓰고 사용자당 분당 3회 제한). 실행 중에는 버튼이 비활성화되고, 결과가 있는 상태에서 선택을 바꾸면 "이전 선택 기준" 안내만 표시한다. 429는 `Retry-After` 초를 "약 N초 후 다시 시도할 수 있습니다"로 보여 준다. 출처 링크는 `https://`로 시작할 때만 만든다. 검증: `tests/session-and-strategy.spec.ts`, `tests/recommendations-live.spec.ts`.

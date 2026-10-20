@@ -7,6 +7,8 @@ test.beforeEach(async ({ page }) => {
 });
 const openInsights = (page: import('@playwright/test').Page) =>
   page.getByRole('button', { name: 'AI 인사이트', exact: false }).click();
+const analyze = (page: import('@playwright/test').Page) =>
+  page.getByRole('button', { name: '분석 실행', exact: true }).click();
 test('AI 인사이트 shows sourced rules and reloads by horizon without demo evidence', async ({
   page,
 }, info) => {
@@ -25,6 +27,7 @@ test('AI 인사이트 shows sourced rules and reloads by horizon without demo ev
     });
   });
   await openInsights(page);
+  await analyze(page);
   await expect(page.getByRole('heading', { name: '저장된 투자 원칙 점검' })).toBeVisible();
   await expect(page.getByText('Toss Securities OpenAPI', { exact: true })).toBeVisible();
   await expect(page.getByText('검증용 등록 경제 일정', { exact: true })).toBeVisible();
@@ -39,6 +42,7 @@ test('AI 인사이트 shows sourced rules and reloads by horizon without demo ev
   await expect(page.getByRole('heading', { name: '판단의 전제와 위험' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '배분 시나리오 적용' })).toHaveCount(0);
   await page.getByRole('button', { name: '주간', exact: true }).click();
+  await analyze(page);
   await expect(page.getByText('5거래일 관찰', { exact: true })).toBeVisible();
   await expect(
     page.getByText('과거 가격 변화는 미래 수익을 보장하지 않습니다.', { exact: true }),
@@ -62,6 +66,7 @@ test('AI 인사이트 errors stay explicit and never substitute synthetic analys
     }),
   );
   await openInsights(page);
+  await analyze(page);
   await expect(page.locator('.invest-page').getByRole('alert')).toContainText(
     '검증된 실제 시장 데이터가 필요합니다.',
   );

@@ -20,3 +20,7 @@
 - `tests/app.spec.ts`(가짜 API): 실잔고 표시·통화 분리·수익률 퍼센트 변환·숨김, 전략 검증과 저장, 소유자 전용·미연결·빈 보유·일시 오류 상태, 예시 문구 부재.
 - `tests/market-api.test.ts`/`tests/server.test.ts`/`tests/toss.test.ts`: 소유자 격리, 계약.
 - `npm test`, `npm run build`, `npm run test:e2e`. 합성 fixture는 실계좌 검증이 아니다.
+
+## 전략 편집기 로딩 규칙
+
+편집기는 `GET /api/strategy`가 끝난 뒤에만 그린다. 로딩 중에는 불러오는 중 표시만 있고 편집기와 저장 버튼이 없다. 서버가 `strategy: null`을 주면(처음 사용) 기본값을 "새 전략 · 기본값"으로 표시하며 시작한다. 그 밖의 실패나 읽을 수 없는 저장 전략은 오류와 다시 시도만 보여 주고 편집기·저장 버튼을 숨긴다. 기본값이 저장된 전략처럼 보여 실제 전략을 덮어쓰는 일을 막기 위해서다. 저장 중 401은 로그인 화면으로 돌아간다. 검증: `tests/session-and-strategy.spec.ts`.

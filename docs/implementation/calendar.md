@@ -27,3 +27,7 @@ SOT: docs/planning/requirements.md. 구현: src/features/calendar/CalendarPage.t
 - `tests/market.test.ts`: AND 필터(합성 이벤트 fixture), 날짜 산술, 연도 경계 정렬, 중요도 표시, `tests/ui-state.test.ts`: KST 날짜 경계.
 - `tests/calendar-api.test.ts`: 등록 일정 권한·검증.
 - E2E(가짜 API, 시계 고정 2026-10-20 KST): `tests/app.spec.ts`(필터·뷰·월 이동·출처 링크), `tests/ui-regressions.spec.ts`(낮은 중요도·잘림 안내·연도 경계·빈 상태·조회 실패 재시도), `tests/providers.spec.ts`(공식 출처 조회·수집 성공/실패). fixture는 합성이며 실제 보도자료 본문을 저장소에 넣지 않는다.
+
+## 링크와 세션
+
+출처 링크(상세의 `sourceUrl`, 공식 출처 `feedUrl`)는 `https://`로 시작하는 URL일 때만 링크로 그리고 아니면 글자로만 표시한다(`src/components/SourceLink.tsx`). 일정 조회가 401(`AUTH_REQUIRED`)이면 앱이 로그인 화면으로 돌아간다.

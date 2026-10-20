@@ -55,7 +55,7 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 
 ### `GET /api/market/prices?symbols=005930,AAPL`
 
-토스 `GET /api/v1/prices?symbols=`(Market Data, `MARKET_DATA` 한도 그룹)를 호출한다. 입력: `symbols`는 단일 문자열, 쉼표 구분, 항목은 `^[A-Za-z0-9.\-]{1,30}$`, 최대 50개(명세 상한 200보다 작게 제한), 중복은 제거하고 빈 항목·반복 파라미터·객체형은 400 `INVALID_MARKET_QUERY`. 응답: `{source:'Toss Securities OpenAPI', asOf, prices:[{symbol, lastPrice, currency:'KRW'|'USD', timestamp:string|null}]}`. 명세 필수 필드 `symbol`, `lastPrice`(십진 문자열), `currency`, 선택 `timestamp`(date-time 또는 null)만 사용한다. 응답이 배열이 아니거나, 요청하지 않은·중복 심볼, 십진수가 아닌 값, 알 수 없는 통화, 잘못된 시각, 요청 수보다 많은 행이면 502 `PROVIDER_SCHEMA_INVALID`. 제공자 404(`stock-not-found`)는 404 `PROVIDER_NOT_FOUND`(화면의 "해당 종목 데이터 없음")이며 제공자 오류 본문은 전달하지 않는다. 기존 30초 캐시·동시 요청 합치기(키는 검증된 심볼 목록)를 쓴다.
+토스 `GET /api/v1/prices?symbols=`(Market Data, `MARKET_DATA` 한도 그룹)를 호출한다. 입력: `symbols`는 단일 문자열, 쉼표 구분, 항목은 `^[A-Za-z0-9.\-]{1,30}$`, 최대 50개(명세 상한 200보다 작게 제한), 중복은 대소문자 구분 없이 제거하며(첫 표기를 유지) 빈 항목·반복 파라미터·객체형은 400 `INVALID_MARKET_QUERY`. 응답: `{source:'Toss Securities OpenAPI', asOf, prices:[{symbol, lastPrice, currency:'KRW'|'USD', timestamp:string|null}]}`. 명세 필수 필드 `symbol`, `lastPrice`(십진 문자열), `currency`, 선택 `timestamp`(date-time 또는 null)만 사용한다. v1.2.24는 `lastPrice`를 필수 문자열로 정의하고 `timestamp`만 null을 허용하므로, `lastPrice`가 null이거나 없는 행은 배치 전체를 `PROVIDER_SCHEMA_INVALID`로 실패시킨다(임의 값을 만들지 않는다). 응답이 배열이 아니거나, 요청하지 않은·중복 심볼, 십진수가 아닌 값, 알 수 없는 통화, 잘못된 시각, 요청 수보다 많은 행이면 502 `PROVIDER_SCHEMA_INVALID`. 제공자 404(`stock-not-found`)는 404 `PROVIDER_NOT_FOUND`(화면의 "해당 종목 데이터 없음")이며 제공자 오류 본문은 전달하지 않는다. 기존 30초 캐시·동시 요청 합치기(키는 검증된 심볼 목록)를 쓴다.
 
 ### `GET /api/market/indicators`
 
