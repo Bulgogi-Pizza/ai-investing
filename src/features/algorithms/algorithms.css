@@ -725,3 +725,12 @@
     flex: 1;
   }
 }
+
+/* Section headers with a control on the right wrap instead of squeezing the title. */
+.algo-screen .invest-section-title {
+  flex-wrap: wrap;
+}
+.algo-screen .invest-section-title > div:first-child {
+  flex: 1 1 220px;
+  min-width: 0;
+}

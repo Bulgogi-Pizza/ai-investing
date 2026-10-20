@@ -137,3 +137,58 @@ SOT: [next-phase-design.md](../planning/next-phase-design.md) 4절, 계획: [nex
 - 세율·세금 규칙(손실 이월, 공제)은 설정과 단순 규칙이다. 신고용 계산이 아니다.
 - 수급·뉴스·시장 지표 신호는 과거 시뮬레이션에서 쓸 수 없다. 앞으로 저장한 기간만큼 전체 신호 시뮬레이션이 가능해진다(설계 4절).
 - 이 문서의 결과는 과거 시뮬레이션이며 미래 수익을 보장하지 않는다.
+
+## 7a: 모델·화면·API (구현 2026-10-21)
+
+계획: [next-phase-plan.md](../planning/next-phase-plan.md) 7a. 서버: `src/server/algorithms.ts`, 공유 타입·검증: `src/lib/algorithmRecords.ts`, 화면: `src/features/algorithms/`(내 자산 > 알고리즘). 테스트: `tests/algorithm-records.test.ts`, `tests/algorithm-repository.test.ts`, `tests/algorithms-api.test.ts`, `tests/algorithms.spec.ts`. 이 단계에는 주문 코드와 예약 작업이 없다.
+
+### 저장 구조 (Firestore, 서버 전용)
+
+| 컬렉션/문서               | 내용                                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `algorithms/{uuid}`       | `name`, `method`(`formula`·`ai`), `template`, `market`(KR·US), `currency`(KRW·USD, 미국은 USD만), `targets[]`, `signals[{id,weight}]`, `buyThreshold`, `sellThreshold`, `dualMomentum?`, `mode`(`simulation`·`paper`·`live`), `budget`(시장 통화, 없으면 null), `params`(만들 때의 신호 파라미터 기본값 스냅샷, 이 단계에서는 화면·API로 바꿀 수 없다), `targetsChangedAt`, `createdAt`, `updatedAt`, `version` |
+| `algorithmEvents/{uuid}`  | 추가만 하는 변경 이력: `at`, `kind`(`created`·`updated`·`deleted`·`emergency-stop`·`emergency-release`·`costs-updated`), `algorithmId?`, `algorithmName?`, `changes[]`(대상 종목 추가·제거, 신호, 기준값, 모드, 운용 금액, 긴급 정지, 비용 설정). 알고리즘과 같은 트랜잭션에서 쓴다. 이메일·세션 값은 저장하지 않는다                                                                                           |
+| `algorithmControl/global` | `{emergencyStop, updatedAt}` 전체 긴급 정지 플래그                                                                                                                                                                                                                                                                                                                                                              |
+| `algorithmSettings/costs` | `commissionRate`, `sellTaxRate`(국내 매도 거래세), `capitalGainsTax{rate, annualDeduction}`(미국, 공제액은 USD로 환산해 입력), `updatedAt`. 비어 있으면 null이고 코드에 법정 세율이 없다                                                                                                                                                                                                                        |
+
+TTL: `algorithmEvents`는 **보존**한다(TTL 정책을 걸지 않는다. 변경 이력은 지우지 않는 기록이다). 다른 세 컬렉션도 TTL이 없다. 복합 색인은 필요 없다(이력은 `at` 내림차순 단일 필드 정렬, 알고리즘은 컬렉션 전체 20개 이하 읽기). 규칙 검사(개수, 이름 중복, 실전 종목 겹침)는 `algorithms` 전체를 읽는 같은 트랜잭션 안에서 한다.
+
+규칙: 알고리즘 최대 20개, 대상 종목 최대 30개(`[A-Za-z0-9][A-Za-z0-9.-]{0,11}`, 대문자로 정규화, 중복 불가), 이름 1~60자(제어 문자 불가, 대소문자 무시 중복 불가), 신호 가중치 0~1, 기준값 -1~1이며 매도 < 매수, 운용 금액은 통화별 상한(KRW 1조, USD 10억) 이하, 시장은 만든 뒤 바꿀 수 없다. 모든 값을 허용 목록으로 읽고 모르는 키는 저장하지 않는다. 최종 구조 검사는 7b의 `validateAlgorithm`이 한다. AI형은 시뮬레이션 모드를 가질 수 없고(모의부터) 과거 시뮬레이션을 지원하지 않는다. 수정은 `version`을 보내야 하며 어긋나면 409 `VERSION_CONFLICT`.
+
+### API (모두 로그인 + 동일 출처 확인 + `ownerGate`; 소유자가 아니면 403 `OWNER_REQUIRED`, 소유자 미설정이면 503)
+
+| 요청                                 | 설명                                                                                                                          |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------- |
+| `GET /api/algorithms`                | `{algorithms, limits:{maxAlgorithms}, liveAvailable:false}`                                                                   |
+| `POST /api/algorithms`               | 본문 `{algorithm: 입력}` → 201 `{algorithm}`. 409 `ALGORITHM_LIMIT`·`ALGORITHM_NAME_EXISTS`·`LIVE_TARGET_OVERLAP`             |
+| `GET/PUT/DELETE /api/algorithms/:id` | PUT은 `{version, algorithm}`. 운용 금액을 올리면 응답에 `notification` 결과가 붙는다. DELETE는 204(이력에 삭제 기록이 남는다) |
+| `GET /api/algorithm-events?limit=`   | 최근 변경 이력(기본 30, 최대 100)                                                                                             |
+| `GET/PUT /api/algorithm-control`     | `{emergencyStop: boolean}`. 켜기는 즉시·항상 허용, 같은 값이면 아무것도 기록하지 않는다(`changed:false`)                      |
+| `GET/PUT /api/algorithm-settings`    | `{costs:{commissionRate, sellTaxRate, capitalGainsTax}}`(비율은 0~0.5, 비우면 null)                                           |
+| `POST /api/algorithms/:id/backtest`  | 본문 `{slippageBps?}`(0~500). 아래 참고                                                                                       |
+| `GET /api/notifications?limit=`      | 6a의 목록 라우터(소유자 전용)                                                                                                 |
+
+**실전은 막혀 있다.** `mode: 'live'`는 생성·수정 어디서든 서버가 가장 먼저 403 `LIVE_NOT_AVAILABLE`("실전 운용은 주문 기능 단계(7d–7f) 이후에 켤 수 있습니다.")로 거부하고 아무것도 저장하지 않는다. 7f가 `createAlgorithmsRouter`의 `liveEnabled`(생성자 옵션, 환경변수 아님, 운영 코드는 설정하지 않는다)를 켠다. 그때를 위해 "실전 알고리즘끼리 대상 종목 겹침 금지"(409 `LIVE_TARGET_OVERLAP`, 충돌한 알고리즘 이름과 종목을 메시지에 담음)는 이미 구현·테스트되어 있고 테스트만 이 옵션을 켠다. 화면의 실전 모드 선택은 비활성이며 이유를 적는다. 모의(`paper`)는 저장되지만 판단 작업(7c)이 없으므로 아직 가상 기록은 쌓이지 않는다. 이 라우터에는 토스 주문 호출이 없고 테스트의 가짜 토스 전송은 주문 경로가 호출되면 실패한다.
+
+**긴급 정지·알림.** 정지 켜기는 확인 대화상자 한 번 뒤 바로 적용되고 알림이 없다(위험을 줄이는 동작). 해제는 추가 인증 없이 되지만 `setting-risk-increase`(`emergency-stop-released`)를 `NotificationService`로 보낸다. 운용 금액을 기존 값보다 올리면 `budget-raised`를 보낸다(없던 값을 처음 넣거나 낮추는 것은 알리지 않는다). 알림 서비스는 던지지 않으므로 텔레그램 실패·미설정이 변경을 막지 않고, 응답의 `notification: {status: sent|failed|disabled, failureCode?}`로 화면이 정확히 말한다. 플래그는 이 단계에서 아무 작업도 읽지 않는다(작업은 7c 이후). 읽는 쪽은 주문 직전마다 `algorithmControl/global`을 다시 읽어야 한다(7e).
+
+### 시뮬레이션 실행
+
+서버가 저장된 정의로 7b `runBacktest`를 돌린다(요청 본문으로 정의를 받지 않는다).
+
+- 데이터: 기존 토스 캔들 어댑터(`interval=1d`, `adjusted=true`)로 종목마다 **최대 200봉 한 번**. 어댑터에 `before`/`nextBefore` 페이지 조회가 아직 없어(구현 전 확인 목록의 "캔들 과거 범위" 미확인) 약 9~10개월만 반영하며 결과 경고와 화면에 그대로 적는다. 그래서 252일 기본 듀얼 모멘텀은 422 `INSUFFICIENT_HISTORY`로 설명하고 기간을 줄이라고(예: 126) 안내한다. 일봉 날짜는 제공자 타임스탬프의 날짜 부분이며 거래소 현지 날짜라는 가정은 실호출로 확인하지 않았다. 해당 시장의 오늘 날짜 봉은 진행 중일 수 있어 제외하고 경고한다. 캔들 통화가 알고리즘 통화와 다르면 422 `CURRENCY_MISMATCH`.
+- 비용: 수수료율은 토스 `/commissions` 어댑터가 아직 없어 `algorithmSettings/costs`의 직접 입력을 쓴다. 입력이 없으면 7b가 0으로 계산하며 결과에 "설정 필요" 경고와 `costSettings.needsSetup`을 낸다.
+- 가치 신호: 재무 연결 전이라 정의에서 빼고 나머지 신호로 계산하며 `disabledSignals: ['value']`와 경고를 낸다. 남는 신호가 없으면 422 `NO_HISTORICAL_SIGNAL`. 수급·뉴스는 7b대로 항상 제외(`excludedSignals`).
+- 운용 금액이 비어 있으면 기본 금액(KRW 1천만, USD 1만)을 가정하고 `budgetAssumed: true`로 표시한다.
+- 한도: 사용자별 분당 6회(429 `BACKTEST_RATE_LIMITED`), 동시 실행 2개(429 `BACKTEST_BUSY`), 대상 종목 10개까지(초과는 잘라서 돌리지 않고 400 `BACKTEST_TOO_MANY_SYMBOLS`), 봉 200개, 시세 조회 25초 제한(504 `BACKTEST_TIMEOUT`), 계산 후 30초를 넘기면 결과를 버린다(계산 자체는 입력 상한으로 제한되며 중간에 끊지 못한다).
+- 응답: `metrics`, `costs`(수수료·거래세·양도세·합계 따로), `costSettings`, `heldBack`, `excludedSignals`, `disabledSignals`, 자산 곡선(최대 120점으로 줄임), 가상 매매(최근 100건, `tradeCount`·`tradesTruncated`), `openPositions`, `warnings`, `data`(출처, 종목별 봉 수, 기간). `samples`·`decisions`는 보내지 않는다. 항상 `simulation: true`.
+
+### 화면
+
+내 자산 > "알고리즘" 탭(`/algorithms` 경로로 바로 열린다. 텔레그램 링크용). 맨 위에 항상 보이는(sticky) 긴급 정지 바: 상태 표시, 켜기/해제 모두 확인 대화상자(해제 대화상자에 텔레그램 알림이 간다고 적는다). 목록을 불러오지 못해도 정지 버튼은 쓸 수 있다. 목록 카드에 모드 배지(시뮬레이션 파랑·모의 노랑·실전 빨강, 색과 글자를 함께), 템플릿 선택(설명 포함), 신호 체크박스·가중치 슬라이더, 기준값, 대상 종목 편집기(검증·중복·30개), 시장/통화, 모드(실전 비활성+이유), 운용 금액, 변경 이력, 시뮬레이션 패널(실행 버튼을 눌러야 계산, 저장하지 않은 변경이 있으면 막음), 수수료·세금 설정("세율은 바뀔 수 있으니 직접 확인하세요"), 최근 알림 목록(발송됨·실패·미설정·전송 중, 모의·가상/실전·실제 라벨, 실패 이유). 시뮬레이션 숫자는 모두 "(시뮬레이션)" 라벨을 달고 데이터 출처·기간·가정을 보여 준다.
+
+### 한계와 남은 일
+
+- Firestore 저장소는 가짜 클라이언트로 계약만 검증했다(`tests/algorithm-repository.test.ts`). 실제 Firestore와 에뮬레이터 검증은 하지 않았다.
+- 토스 `/commissions`, 캔들 `before` 페이지, 재무(가치) 신호 연결은 각 어댑터가 생기면 `candles` 읽기 함수와 `costs` 입력만 바꾸면 된다.
+- 변경 이력에는 "누가"를 저장하지 않는다(소유자 한 명 전용).
