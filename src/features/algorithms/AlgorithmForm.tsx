@@ -34,6 +34,11 @@ const templateOrder: AlgorithmTemplateId[] = [
   'custom',
 ];
 const modeOrder: AlgorithmMode[] = ['simulation', 'paper', 'live'];
+const changeLabel: Record<string, string> = {
+  'budget-raised': '운용 금액 한도 상향',
+  'live-enabled': '실전 켜기',
+  'live-strategy-changed': '실전 알고리즘 전략 변경',
+};
 
 export const inputOfRecord = (record: AlgorithmRecord): AlgorithmInput => ({
   name: record.name,
@@ -230,10 +235,7 @@ export function AlgorithmForm({
       if (!body.algorithm?.id)
         throw new ApiError(502, 'INVALID_RESPONSE', '저장 응답 형식을 확인하지 못했습니다.');
       const extra = (body.notifications ?? [])
-        .map(
-          (n) =>
-            ` ${n.change === 'budget-raised' ? '운용 금액 한도 상향' : '실전 켜기'} 알림: ${outcomeText(n)}`,
-        )
+        .map((n) => ` ${changeLabel[n.change] ?? '위험 증가 변경'} 알림: ${outcomeText(n)}`)
         .join('');
       const message = `저장했습니다.${extra}`;
       setNotice({ kind: 'ok', text: message });

@@ -419,6 +419,7 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
       updatedAt: null,
     } as Record<string, unknown>,
     released: new Set<string>(),
+    resolved: new Set<string>(),
     failList: options.failListWith,
     counter: 0,
   };
@@ -534,12 +535,20 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
         return json({ algorithm: created }, 201);
       }
       const match = path.match(
-        /^\/api\/algorithms\/([^/]+)(\/backtest|\/paper|\/live|\/live\/release-stop)?$/,
+        /^\/api\/algorithms\/([^/]+)(\/backtest|\/paper|\/live|\/live\/release-stop|\/live\/orders\/[^/]+\/resolve)?$/,
       );
       if (match) {
         const index = state.algorithms.findIndex((a) => a.id === match[1]);
         if (index < 0)
           return json(errorBody('ALGORITHM_NOT_FOUND', '알고리즘을 찾을 수 없습니다.'), 404);
+        if (match[2]?.startsWith('/live/orders/')) {
+          state.resolved.add(match[2].split('/')[3]);
+          return json({
+            resolved: true,
+            status: 'filled',
+            notification: options.liveOutcome ?? { status: 'sent' },
+          });
+        }
         if (match[2] === '/live/release-stop') {
           state.released.add(match[1]);
           const notification = options.liveOutcome ?? { status: 'sent' };
@@ -560,7 +569,14 @@ export async function mockAlgorithmApi(page: Page, options: AlgoMockOptions = {}
             unknown
           >;
           // A release request clears the stop shown by the next read.
-          return json(state.released.has(algorithm.id) ? { ...base, stop: null } : base);
+          const orders = ((base.orders ?? []) as { id: string }[]).map((o) =>
+            state.resolved.has(o.id) ? { ...o, status: 'filled', resolvable: false } : o,
+          );
+          return json({
+            ...base,
+            orders,
+            ...(state.released.has(algorithm.id) ? { stop: null } : {}),
+          });
         }
         if (match[2] === '/paper') {
           if (options.paperError)

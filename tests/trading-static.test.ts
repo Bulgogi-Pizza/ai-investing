@@ -211,7 +211,10 @@ describe('where the trading module is wired (stage 7e/7f)', () => {
     const withFlag = steps.filter((step) => step.includes('LIVE_TRADING_ENABLED'));
     expect(withFlag).toHaveLength(1);
     expect(withFlag[0]).toMatch(/^Deploy live algorithm job/);
-    expect(withFlag[0]).toContain('LIVE_TRADING_ENABLED=true');
+    // The value comes from the repository variable; an absent variable deploys the switch OFF.
+    expect(withFlag[0]).toContain("vars.LIVE_TRADING_ENABLED == 'true' && 'true' || 'false'");
+    expect(withFlag[0]).toContain('LIVE_TRADING_ENABLED=$LIVE_FLAG');
+    expect(withFlag[0]).not.toMatch(/LIVE_TRADING_ENABLED=true/);
     expect(withFlag[0]).toContain('ALGO_AI_ENABLED=false');
     expect(withFlag[0]).toContain('src/jobs/algo-live.ts');
     expect(withFlag[0]).toContain('--max-retries=0');

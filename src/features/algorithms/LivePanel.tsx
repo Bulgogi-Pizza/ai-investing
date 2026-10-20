@@ -110,6 +110,14 @@ function Summary({ data }: { data: LiveResponse }) {
   return (
     <div className="algo-live-block" data-testid="live-paper-summary">
       <h3 className="algo-subtitle">모의 운용 요약 (가상 기록)</h3>
+      {s?.strategyChangedAfterStart && (
+        <p className="algo-note algo-note-error" data-testid="live-paper-stale">
+          <span className="algo-badge algo-badge-warn">변경 전 기록</span> 대상
+          종목·기준값·가중치·포지션 크기가 모의 운용을 시작한 뒤에 바뀌었습니다(변경{' '}
+          {s.strategyChangedAt.slice(0, 10)}). 아래 숫자는 지금 설정이 아니라 변경 전 설정의
+          기록입니다.
+        </p>
+      )}
       {s === null ? (
         <p className="invest-muted">
           모의 운용 기록이 없습니다. 기록 없이도 켤 수 있지만, 예상 이익 기록이 없으면 매수 주문이
@@ -187,7 +195,14 @@ export function LivePanel({
     parseLive,
     refreshKey + reload,
   );
-  const [dialog, setDialog] = useState<'enable' | 'disable' | 'release' | null>(null);
+  const [dialog, setDialog] = useState<'enable' | 'disable' | 'release' | 'resolve' | null>(null);
+  const [resolveForm, setResolveForm] = useState<{
+    order: LiveResponse['orders'][number];
+    outcome: 'filled' | 'canceled' | 'not-placed';
+    quantity: string;
+    price: string;
+  } | null>(null);
+  const [resolveError, setResolveError] = useState('');
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState<{ kind: 'ok' | 'error'; text: string } | null>(null);
 
@@ -252,6 +267,45 @@ export function LivePanel({
     }
   }
 
+  async function resolveOrder() {
+    if (!resolveForm) return;
+    const { order, outcome } = resolveForm;
+    const quantity = Number(resolveForm.quantity);
+    const price = Number(resolveForm.price);
+    if (
+      outcome === 'filled' &&
+      !(Number.isInteger(quantity) && quantity >= 1 && quantity <= order.quantity)
+    )
+      return setResolveError(`체결 수량은 1 이상 ${order.quantity} 이하의 정수로 입력하세요.`);
+    if (outcome !== 'not-placed' && quantity > 0 && !(price > 0))
+      return setResolveError('체결 수량이 있으면 평균 체결가를 입력하세요.');
+    setBusy(true);
+    setMessage(null);
+    try {
+      const body = (await apiSend(
+        'POST',
+        `/api/algorithms/${record.id}/live/orders/${order.id}/resolve`,
+        outcome === 'not-placed'
+          ? { outcome }
+          : {
+              outcome,
+              quantity: Number.isFinite(quantity) ? quantity : 0,
+              ...(quantity > 0 ? { averagePrice: price } : {}),
+            },
+      )) as { notification?: { status: 'sent' | 'failed' | 'disabled' } };
+      setMessage({
+        kind: 'ok',
+        text: `미확인 주문을 정리했습니다. ${outcomeText(body.notification)}`,
+      });
+      setDialog(null);
+      setReload((v) => v + 1);
+    } catch (error) {
+      setResolveError(error instanceof ApiError ? error.message : '정리하지 못했습니다.');
+    } finally {
+      setBusy(false);
+    }
+  }
+
   const isLive = record.mode === 'live';
   return (
     <section className="invest-card algo-live" aria-labelledby="algo-live-title">
@@ -290,6 +344,16 @@ export function LivePanel({
           onEnable={() => setDialog('enable')}
           onDisable={() => setDialog('disable')}
           onRelease={() => setDialog('release')}
+          onResolve={(order) => {
+            setResolveForm({
+              order,
+              outcome: 'filled',
+              quantity: String(order.quantity),
+              price: '',
+            });
+            setResolveError('');
+            setDialog('resolve');
+          }}
         />
       )}
       {message && (
@@ -338,6 +402,83 @@ export function LivePanel({
           </p>
         </ConfirmDialog>
       )}
+      {dialog === 'resolve' && resolveForm && (
+        <ConfirmDialog
+          title="미확인 주문을 정리할까요?"
+          confirmLabel="정리하기"
+          tone="danger"
+          busy={busy}
+          onConfirm={() => void resolveOrder()}
+          onCancel={() => setDialog(null)}
+        >
+          <p>
+            {resolveForm.order.symbol}{' '}
+            {resolveForm.order.side === 'buy' ? '실제 매수' : '실제 매도'}{' '}
+            {resolveForm.order.quantity}주 주문의 결과를{' '}
+            <strong>토스증권 앱에서 확인한 대로</strong> 고르세요. 이 앱은 증권사에 아무것도 보내지
+            않고 기록만 바꿉니다. 아직 증권사에 미체결로 남아 있으면 앱에서 먼저 취소하세요.
+          </p>
+          <fieldset className="algo-field">
+            <legend>확인한 결과</legend>
+            {(
+              [
+                ['filled', '체결됨'],
+                ['canceled', '취소됨·체결되지 않음'],
+                ['not-placed', '증권사에 접수되지 않음'],
+              ] as const
+            ).map(([value, label]) => (
+              <label key={value}>
+                <input
+                  type="radio"
+                  name="resolve-outcome"
+                  checked={resolveForm.outcome === value}
+                  onChange={() => {
+                    setResolveForm({
+                      ...resolveForm,
+                      outcome: value,
+                      quantity: value === 'filled' ? String(resolveForm.order.quantity) : '0',
+                    });
+                    setResolveError('');
+                  }}
+                />{' '}
+                {label}
+              </label>
+            ))}
+          </fieldset>
+          {resolveForm.outcome !== 'not-placed' && (
+            <div className="algo-form-grid">
+              <label className="algo-field">
+                {resolveForm.outcome === 'filled' ? '체결 수량' : '일부 체결 수량(없으면 0)'}
+                <input
+                  type="number"
+                  min="0"
+                  value={resolveForm.quantity}
+                  onChange={(e) => setResolveForm({ ...resolveForm, quantity: e.target.value })}
+                />
+              </label>
+              <label className="algo-field">
+                평균 체결가
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  value={resolveForm.price}
+                  onChange={(e) => setResolveForm({ ...resolveForm, price: e.target.value })}
+                />
+              </label>
+            </div>
+          )}
+          <p>
+            <strong>정리하면 텔레그램으로 알림이 갑니다.</strong> 체결 수량이 주문 수량보다 적으면
+            나머지는 취소된 것으로 기록합니다.
+          </p>
+          {resolveError && (
+            <p role="alert" className="algo-note algo-note-error">
+              {resolveError}
+            </p>
+          )}
+        </ConfirmDialog>
+      )}
       {dialog === 'release' && (
         <ConfirmDialog
           title="자동 정지를 해제할까요?"
@@ -366,6 +507,7 @@ function LiveBody({
   onEnable,
   onDisable,
   onRelease,
+  onResolve,
 }: {
   data: LiveResponse;
   record: AlgorithmRecord;
@@ -374,6 +516,7 @@ function LiveBody({
   onEnable: () => void;
   onDisable: () => void;
   onRelease: () => void;
+  onResolve: (order: LiveResponse['orders'][number]) => void;
 }) {
   const currency = data.algorithm.currency as Currency;
   const isLive = record.mode === 'live';
@@ -415,9 +558,17 @@ function LiveBody({
           </li>
         )}
         {last && !data.job.schedulePaused && (
-          <li className="algo-note algo-note-ok" data-testid="live-last-run">
-            <CircleCheck size={15} aria-hidden="true" /> 실전 작업 마지막 실행 {formatKst(last.at)}{' '}
-            KST — {outcomeLabels[last.outcome] ?? last.outcome}
+          <li
+            className={`algo-note ${last.outcome === 'failed' || last.outcome === 'partial' ? 'algo-note-error' : 'algo-note-ok'}`}
+            data-testid="live-last-run"
+          >
+            {last.outcome === 'failed' || last.outcome === 'partial' ? (
+              <TriangleAlert size={15} aria-hidden="true" />
+            ) : (
+              <CircleCheck size={15} aria-hidden="true" />
+            )}{' '}
+            실전 작업 마지막 실행 {formatKst(last.at)} KST —{' '}
+            {outcomeLabels[last.outcome] ?? last.outcome}
             {last.code ? ` (${last.code})` : ''}
           </li>
         )}
@@ -562,6 +713,15 @@ function LiveBody({
                     <td>
                       {orderStatusLabel[o.status] ?? o.status}
                       {o.error && <small className="invest-muted"> · {o.error.message}</small>}
+                      {o.resolvable && (
+                        <button
+                          className="button small"
+                          disabled={busy}
+                          onClick={() => onResolve(o)}
+                        >
+                          미확인 주문 정리…
+                        </button>
+                      )}
                     </td>
                   </tr>
                 ))}

@@ -1045,3 +1045,157 @@ test.describe('algorithm screen: 실전 안전장치 설정', () => {
     expect(await fits(page)).toBe(true);
   });
 });
+
+test.describe('algorithm screen: 실전 운용 review fixes', () => {
+  const livePanel = (page: Page) => page.getByRole('region', { name: '실전 운용' });
+  const lostOrder = {
+    id: 'ai-lost',
+    date: '2026-10-20',
+    createdAt: '2026-10-20T00:05:00.000Z',
+    updatedAt: '2026-10-20T00:05:00.000Z',
+    symbol: '005930',
+    side: 'buy',
+    quantity: 20,
+    price: 70_000,
+    currency: 'KRW',
+    status: 'unknown',
+    filledQuantity: 0,
+    averageFilledPrice: null,
+    tickCorrected: false,
+    resolvable: true,
+    error: { code: 'network-error', message: '증권사에 연결하지 못했습니다.' },
+  };
+
+  test('an unconfirmed order is cleared by hand after confirmation, with validation, and the alert is reported', async ({
+    page,
+  }) => {
+    const api = await openAlgorithms(page, {
+      algorithms: [record({ mode: 'live' })],
+      live: (algorithm) => liveBody(algorithm, { unconfirmedCount: 1, orders: [lostOrder] }),
+    });
+    const panel = livePanel(page);
+    await panel.getByRole('button', { name: '미확인 주문 정리…' }).click();
+    const dialog = page.getByRole('dialog');
+    await expect(dialog).toContainText('토스증권 앱에서 확인한 대로');
+    await expect(dialog).toContainText('증권사에 아무것도 보내지 않고 기록만 바꿉니다');
+    await expect(dialog).toContainText('텔레그램으로 알림이 갑니다');
+    // Validation: a fill needs a price.
+    await dialog.getByRole('button', { name: '정리하기' }).click();
+    await expect(dialog.getByRole('alert')).toContainText('평균 체결가');
+    expect(api.requests.some((r) => r.path.includes('/resolve'))).toBe(false);
+    await dialog.getByLabel('평균 체결가').fill('69900');
+    await dialog.getByRole('button', { name: '정리하기' }).click();
+    const post = api.requests.find((r) => r.path.endsWith('/resolve'))!;
+    expect(post.method).toBe('POST');
+    expect(post.path).toBe(`/api/algorithms/${record().id}/live/orders/ai-lost/resolve`);
+    expect(post.body).toEqual({ outcome: 'filled', quantity: 20, averagePrice: 69_900 });
+    await expect(panel).toContainText('미확인 주문을 정리했습니다. 텔레그램 알림을 보냈습니다.');
+    await expect(panel.getByRole('button', { name: '미확인 주문 정리…' })).toHaveCount(0);
+    await expect(panel.getByTestId('live-orders')).toContainText('체결');
+    await expect(page.getByRole('region', { name: '변경 이력' })).toBeVisible();
+  });
+  test('not-placed needs no numbers', async ({ page }) => {
+    const api = await openAlgorithms(page, {
+      algorithms: [record({ mode: 'live' })],
+      live: (algorithm) => liveBody(algorithm, { unconfirmedCount: 1, orders: [lostOrder] }),
+    });
+    await livePanel(page).getByRole('button', { name: '미확인 주문 정리…' }).click();
+    const dialog = page.getByRole('dialog');
+    await dialog.getByLabel('증권사에 접수되지 않음').check();
+    await expect(dialog.getByLabel('평균 체결가')).toHaveCount(0);
+    await dialog.getByRole('button', { name: '정리하기' }).click();
+    await expect(livePanel(page)).toContainText('미확인 주문을 정리했습니다');
+    expect(api.requests.find((r) => r.path.endsWith('/resolve'))!.body).toEqual({
+      outcome: 'not-placed',
+    });
+  });
+
+  test('paper evidence is marked 변경 전 기록 when the strategy changed after the paper start', async ({
+    page,
+  }) => {
+    await openAlgorithms(page, {
+      algorithms: [record({ mode: 'paper' })],
+      live: (algorithm) =>
+        liveBody(algorithm, {
+          paperSummary: {
+            since: '2026-10-01',
+            lastRunDate: '2026-10-12',
+            days: 12,
+            roundTrips: 1,
+            netReturn: 0.0048,
+            costsTotal: 13_600,
+            maxDrawdown: 0.0062,
+            fills: 3,
+            status: 'running',
+            budget: 10_000_000,
+            strategyChangedAfterStart: true,
+            strategyChangedAt: '2026-10-15T03:00:00.000Z',
+          },
+        }),
+    });
+    const stale = livePanel(page).getByTestId('live-paper-stale');
+    await expect(stale).toContainText('변경 전 기록');
+    await expect(stale).toContainText('2026-10-15');
+    await expect(livePanel(page).getByTestId('live-paper-summary')).toContainText('가상 왕복 횟수');
+  });
+
+  test('a failed or partial last live run is styled and worded as an error', async ({ page }) => {
+    await openAlgorithms(page, {
+      algorithms: [record({ mode: 'live' })],
+      live: (algorithm) =>
+        liveBody(algorithm, {
+          job: {
+            market: 'KR',
+            lastRun: {
+              market: 'KR',
+              at: '2026-10-21T00:05:00.000Z',
+              date: '2026-10-21',
+              outcome: 'failed',
+            },
+            schedulePaused: false,
+            scheduleNotice: null,
+          },
+        }),
+    });
+    const last = livePanel(page).getByTestId('live-last-run');
+    await expect(last).toContainText('실패');
+    await expect(last).toHaveClass(/algo-note-error/);
+    await expect(last).not.toHaveClass(/algo-note-ok/);
+  });
+
+  test('the stop notice tells the owner to manage remaining positions by hand', async ({
+    page,
+  }) => {
+    await openAlgorithms(page, {
+      algorithms: [record({ mode: 'live' })],
+      live: (algorithm) =>
+        liveBody(algorithm, {
+          stop: {
+            reason: 'loss-limit',
+            message:
+              '누적 손실이 한도에 닿아 자동 정지되었습니다. 정지해도 보유 종목은 자동으로 팔지 않으니 남은 보유분은 직접 관리하세요.',
+            stoppedAt: '2026-10-21T00:06:00.000Z',
+          },
+        }),
+    });
+    await expect(livePanel(page).getByTestId('live-stopped-notice')).toContainText(
+      '보유 종목은 자동으로 팔지 않으니',
+    );
+  });
+
+  test('a refusal because Telegram is not configured is shown in the panel', async ({ page }) => {
+    await openAlgorithms(page, {
+      algorithms: [record({ mode: 'paper' })],
+      saveError: {
+        status: 409,
+        code: 'ALERTS_NOT_CONFIGURED',
+        message: '텔레그램 알림이 설정되어 있지 않아 실전 켜기와 운용 금액 상향을 할 수 없습니다.',
+      },
+    });
+    await livePanel(page).getByRole('button', { name: '실전 켜기…' }).click();
+    await page.getByRole('dialog').getByRole('button', { name: '실전 켜기', exact: true }).click();
+    await expect(livePanel(page).getByRole('alert')).toContainText(
+      '텔레그램 알림이 설정되어 있지 않아',
+    );
+  });
+});

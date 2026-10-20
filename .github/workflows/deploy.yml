@@ -208,12 +208,17 @@ jobs:
             --role=roles/run.invoker --quiet >/dev/null
       # Live (REAL ORDER) algorithm run, stage 7f (docs/operations/jobs.md). Same image digest, identity,
       # VPC and Toss secret versions as the paper job, plus the Telegram secrets (the job refuses to
-      # run without working alerts). LIVE_TRADING_ENABLED=true is set on THIS job only: it is the
-      # deployment kill switch the job checks before doing anything. AI stays off (cost approval
+      # run without working alerts). LIVE_TRADING_ENABLED is set on THIS job only, from the repository
+      # variable of the same name (absent or not "true" => "false"): it is the deployment kill switch
+      # the job checks before doing anything. Changing the variable takes effect with the next deploy. AI stays off (cost approval
       # pending): ALGO_AI_ENABLED=false. The Cloud Scheduler triggers (infra/gcp/jobs-live.tf) are
       # created paused; deploying this job does not start anything.
       - name: Deploy live algorithm job
         if: steps.deploy.outputs.deployed == 'true'
+        env:
+          # Repository variable LIVE_TRADING_ENABLED (Settings > Variables). Anything but the exact
+          # string "true", including an absent variable, deploys the job with the switch OFF.
+          LIVE_FLAG: ${{ vars.LIVE_TRADING_ENABLED == 'true' && 'true' || 'false' }}
         run: |
           set -euo pipefail
           JOB=investing-algo-live
@@ -245,7 +250,7 @@ jobs:
             --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
             --service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com" \
             --command=node --args=--import,tsx,src/jobs/algo-live.ts \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,ALGO_AI_ENABLED=false,LIVE_TRADING_ENABLED=true" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,ALGO_AI_ENABLED=false,LIVE_TRADING_ENABLED=$LIVE_FLAG" \
             --set-secrets="$SECRETS" \
             --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
             --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=900s \
