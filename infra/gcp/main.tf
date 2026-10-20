@@ -52,7 +52,7 @@ variable "budget_currency" {
 }
 
 locals {
-  services = toset(["aiplatform.googleapis.com", "cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com"])
+  services = toset(["aiplatform.googleapis.com", "cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com", "cloudscheduler.googleapis.com"])
 }
 resource "google_project_service" "api" {
   for_each           = local.services

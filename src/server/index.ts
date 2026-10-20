@@ -1,6 +1,7 @@
 import { aiFromEnvironment } from './ai.js';
 import { FirestoreLoginThrottle, MemoryLoginThrottle } from './login-throttle.js';
 import { FirestoreCalendarRepository, MemoryCalendarRepository } from './calendar.js';
+import { FirestoreSnapshotRepository, MemorySnapshotRepository } from './snapshots.js';
 import { tossFromEnvironment } from './toss.js';
 import { createApp } from './app.js';
 import { FirestoreStore, MemoryStore } from './store.js';
@@ -34,6 +35,9 @@ const app = createApp({
   calendarRepository: production
     ? new FirestoreCalendarRepository()
     : new MemoryCalendarRepository(),
+  snapshotRepository: production
+    ? new FirestoreSnapshotRepository()
+    : new MemorySnapshotRepository(),
 });
 const port = Number(process.env.PORT ?? 8080);
 app.listen(port, '0.0.0.0', () => console.info(`Application listening on port ${port}`));

@@ -5,3 +5,5 @@ github_repository_id = "123456789"
 # billing_account = "XXXXXX-XXXXXX-XXXXXX"
 monthly_budget_amount = 10
 budget_currency = "USD" # Must match the billing account (e.g. KRW with amount15000)
+# Set true only after the first deploy created the investing-daily-snapshot Cloud Run Job (docs/operations/jobs.md)
+snapshot_schedules_enabled = false

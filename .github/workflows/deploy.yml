@@ -78,3 +78,38 @@ jobs:
         run: |
           SERVICE_URL=$(gcloud run services describe ai-investing --region="$REGION" --project="$PROJECT" --format='value(status.url)')
           curl --fail --retry 5 --retry-delay 5 "$SERVICE_URL/api/health"
+      # Scheduled jobs run the same verified image digest as the service. Terraform creates the
+      # identities and the Cloud Scheduler triggers (docs/operations/jobs.md); this step creates or
+      # updates the Cloud Run Job itself.
+      - name: Deploy daily snapshot job
+        if: steps.deploy.outputs.deployed == 'true'
+        run: |
+          set -euo pipefail
+          JOB=investing-daily-snapshot
+          # Reuse the exact numeric secret versions the service is connected to. Nothing is read from
+          # Secret Manager here and no secret value ever reaches this workflow.
+          SECRETS=$(gcloud run services describe ai-investing --region="$REGION" --project="$PROJECT" --format=json | jq -r '
+            [.spec.template.spec.containers[0].env[]?
+              | select(.name | IN("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TOSS_ACCOUNT_SEQ", "TOSS_OWNER_USER_ID"))
+              | select(.valueFrom.secretKeyRef != null)
+              | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"
+            ] | sort | join(",")')
+          VALID=$(printf '%s' "$SECRETS" | tr ',' '\n' | grep -cE '^TOSS_(CLIENT_ID|CLIENT_SECRET|ACCOUNT_SEQ|OWNER_USER_ID)=investing-toss-[a-z-]+:[0-9]+$' || true)
+          if [ "$VALID" != "4" ]; then
+            echo "::warning::Toss secrets are not connected to the service with numeric versions yet; skipping job deployment."
+            exit 0
+          fi
+          gcloud run jobs deploy "$JOB" \
+            --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
+            --service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com" \
+            --command=node --args=--import,tsx,src/jobs/daily-snapshot.ts \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT" \
+            --set-secrets="$SECRETS" \
+            --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
+            --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=900s \
+            --cpu=1 --memory=512Mi --quiet
+          # Least privilege: the scheduler account may start only this job.
+          gcloud run jobs add-iam-policy-binding "$JOB" \
+            --project="$PROJECT" --region="$REGION" \
+            --member="serviceAccount:investing-scheduler@$PROJECT.iam.gserviceaccount.com" \
+            --role=roles/run.invoker --quiet >/dev/null
