@@ -1,4 +1,4 @@
-import type { CalendarRepository } from './calendar.js';
+import { cleanEvent, type CalendarRepository } from './calendar.js';
 import type { Strategy } from './store.js';
 import { ProviderError, type TossClient } from './toss.js';
 
@@ -84,8 +84,19 @@ export async function createRecommendation({
   const loss = changes.reduce((sum, change) => sum + Math.max(-change, 0), 0);
   const rsi14 = loss === 0 ? (gain === 0 ? 50 : 100) : 100 - 100 / (1 + gain / loss);
   const thresholdPercent = { low: 2, medium: 4, high: 6 }[strategy.riskTolerance];
-  const events = records
+  const relevantMarket = /^\d{6}$/.test(symbol) ? '한국' : '미국';
+  const validatedEvents = records
     .slice(0, 2000)
+    .map(cleanEvent)
+    .filter((event) => event !== null);
+  const relevantEvents = validatedEvents.filter(
+    (event) =>
+      event.country === relevantMarket ||
+      event.country === '글로벌' ||
+      event.assets.some((asset) => asset.toUpperCase() === symbol.toUpperCase()),
+  );
+  const excludedCount = records.slice(0, 2000).length - relevantEvents.length;
+  const events = relevantEvents
     .filter((event) => {
       const stamp = Date.parse(`${event.date}T${event.time}:00+09:00`);
       try {
@@ -153,6 +164,9 @@ export async function createRecommendation({
         from,
         to,
         source: 'admin-curated' as const,
+        relevanceRule:
+          '6자리 숫자 종목은 한국, 그 외는 미국 시장으로 분류하고 같은 시장·글로벌·assets에 종목이 명시된 일정만 포함합니다. 거시 일정의 직접적인 영향은 보장하지 않습니다.',
+        excludedCount,
         events: events.slice(0, 50).map((event) => ({
           id: event.id,
           date: event.date,

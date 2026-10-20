@@ -1,3 +1,4 @@
+import { FirestoreLoginThrottle, MemoryLoginThrottle } from './login-throttle.js';
 import { FirestoreCalendarRepository, MemoryCalendarRepository } from './calendar.js';
 import { tossFromEnvironment } from './toss.js';
 import { createApp } from './app.js';
@@ -23,6 +24,7 @@ if (!production && process.env.ADMIN_EMAIL && process.env.ADMIN_PASSWORD) {
 const app = createApp({
   store,
   production,
+  loginThrottle: production ? new FirestoreLoginThrottle() : new MemoryLoginThrottle(),
   staticDirectory: 'dist',
   toss: tossFromEnvironment(production),
   calendarRepository: production

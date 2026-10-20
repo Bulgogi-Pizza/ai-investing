@@ -166,6 +166,32 @@ describe('actual-input rule recommendations', () => {
     expect(empty.evidence.calendar.events).toEqual([]);
     expect(empty.evidence.calendar.coverageWarning).toContain('위험이 없다는 뜻이 아닙니다');
   });
+  it('excludes unrelated market events and malformed stored records before changing decisions', async () => {
+    const calendar = new MemoryCalendarRepository();
+    await calendar.upsert(
+      [
+        { ...event, country: '미국' },
+        { ...event, id: 2, date: '2026-99-99' },
+        { ...event, id: 3, sourceUrl: 'javascript:bad' },
+      ],
+      'admin',
+    );
+    const result = await run(provider(), 'daily', strategy, calendar);
+    expect(result.decision.action).toBe('hold-plan');
+    expect(result.evidence.calendar.events).toEqual([]);
+    expect(result.evidence.calendar.excludedCount).toBe(2);
+    expect(result.evidence.calendar.relevanceRule).toContain('같은 시장');
+    await calendar.upsert(
+      [
+        { ...event, id: 4, country: '미국', assets: ['005930'] },
+        { ...event, id: 5, country: '글로벌' },
+      ],
+      'admin',
+    );
+    const relevant = await run(provider(), 'daily', strategy, calendar);
+    expect(relevant.evidence.calendar.events.map((item) => item.id)).toEqual([4, 5]);
+    expect(relevant.decision.action).toBe('review-risk');
+  });
   it('keeps KRW and USD stock weights separate and never claims total allocation', async () => {
     const result = await run();
     expect(

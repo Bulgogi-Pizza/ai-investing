@@ -5,8 +5,10 @@ terraform {
   }
 }
 provider "google" {
-  project = var.project_id
-  region  = var.region
+  project               = var.project_id
+  region                = var.region
+  billing_project       = var.project_id
+  user_project_override = true
 }
 variable "project_id" { type = string }
 variable "region" {
@@ -33,12 +35,22 @@ variable "billing_account" {
   type    = string
   default = ""
 }
-variable "monthly_budget_usd" {
+variable "monthly_budget_amount" {
   type    = number
   default = 10
 }
+
+variable "budget_currency" {
+  type    = string
+  default = "USD"
+  validation {
+    condition     = can(regex("^[A-Z]{3}$", var.budget_currency))
+    error_message = "Use the billing account currency code."
+  }
+}
+
 locals {
-  services = toset(["run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com"])
+  services = toset(["cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com"])
 }
 resource "google_project_service" "api" {
   for_each           = local.services
@@ -86,7 +98,7 @@ resource "google_service_account" "deploy" {
   depends_on   = [google_project_service.api]
 }
 resource "google_project_iam_member" "deployer" {
-  for_each = toset(["roles/run.admin", "roles/artifactregistry.writer"])
+  for_each = toset(["roles/run.admin"])
   project  = var.project_id
   role     = each.value
   member   = "serviceAccount:${google_service_account.deploy.email}"
@@ -109,7 +121,7 @@ resource "google_iam_workload_identity_pool_provider" "github" {
     "attribute.repository_id" = "assertion.repository_id"
     "attribute.repository"    = "assertion.repository"
   }
-  attribute_condition = "assertion.repository == '${var.github_repository}' && assertion.repository_id == '${var.github_repository_id}' && assertion.ref == 'refs/heads/main'"
+  attribute_condition = "assertion.repository == '${var.github_repository}' && assertion.repository_id == '${var.github_repository_id}' && assertion.ref == 'refs/heads/main' && assertion.workflow_ref == '${var.github_repository}/.github/workflows/deploy.yml@refs/heads/main' && assertion.environment == 'production' && assertion.event_name == 'workflow_run'"
   oidc { issuer_uri = "https://token.actions.githubusercontent.com" }
 }
 resource "google_service_account_iam_member" "github_deploy" {
@@ -126,8 +138,8 @@ resource "google_billing_budget" "app" {
   }
   amount {
     specified_amount {
-      currency_code = "USD"
-      units         = tostring(var.monthly_budget_usd)
+      currency_code = var.budget_currency
+      units         = tostring(var.monthly_budget_amount)
     }
   }
   threshold_rules { threshold_percent = 0.5 }
@@ -147,4 +159,20 @@ resource "google_firestore_field" "sessions_ttl" {
   field      = "ttlAt"
   ttl_config {}
   index_config {}
+}
+resource "google_firestore_field" "login_attempts_ttl" {
+  project    = var.project_id
+  database   = google_firestore_database.app.name
+  collection = "loginAttempts"
+  field      = "ttlAt"
+  ttl_config {}
+  index_config {}
+}
+
+resource "google_artifact_registry_repository_iam_member" "deployer_registry" {
+  project    = var.project_id
+  location   = google_artifact_registry_repository.app.location
+  repository = google_artifact_registry_repository.app.repository_id
+  role       = "roles/artifactregistry.writer"
+  member     = "serviceAccount:${google_service_account.deploy.email}"
 }

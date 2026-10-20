@@ -82,6 +82,8 @@ interface LiveInsight {
       }[];
       truncated: boolean;
       coverageWarning: string;
+      relevanceRule?: string;
+      excludedCount?: number;
     };
   };
   scenarios: string[];
@@ -184,6 +186,14 @@ function LiveAnalysis({ insight }: { insight: LiveInsight }) {
             <Info size={16} />
             <span>{evidence.calendar.coverageWarning}</span>
           </div>
+        )}
+        {evidence.calendar.relevanceRule && (
+          <p className="invest-live-empty">일정 관련성 기준: {evidence.calendar.relevanceRule}</p>
+        )}
+        {typeof evidence.calendar.excludedCount === 'number' && (
+          <p className="invest-live-empty">
+            관련성 기준에 따라 제외한 일정: {evidence.calendar.excludedCount}건
+          </p>
         )}
         {evidence.calendar.truncated && (
           <p role="status">일정 조회 한도를 초과하여 일부 일정만 분석했습니다.</p>

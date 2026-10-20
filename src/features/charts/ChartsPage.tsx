@@ -12,6 +12,7 @@ import {
 } from 'recharts';
 import {
   bollinger,
+  chartWindowLength,
   formatChartPrice,
   normalizeComparison,
   demoPrices,
@@ -104,7 +105,7 @@ export default function ChartsPage({ initialSymbol }: { initialSymbol: string })
         rsi: r[i],
         macd: m[i].macd,
       }))
-      .slice(period === '1개월' ? -30 : period === '1주' ? -7 : 0);
+      .slice(-chartWindowLength(period));
     return compare ? normalizeComparison(visible) : visible;
   }, [symbol, compare, period, live, liveRows]);
   return (
@@ -188,6 +189,10 @@ export default function ChartsPage({ initialSymbol }: { initialSymbol: string })
             {liveError} 합성 데모 탭에서 기능을 확인할 수 있습니다.
           </div>
         )}
+        <p className="subtle">
+          기간은 약 5/21/63거래일 기준입니다. 휴장일과 수신 데이터 수에 따라 실제 날짜 범위가 달라질
+          수 있습니다.
+        </p>
         <div className="chart-controls">
           <div className="view-toggle">
             {['1주', '1개월', '3개월'].map((p) => (

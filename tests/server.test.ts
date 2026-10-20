@@ -1,3 +1,4 @@
+import { MemoryLoginThrottle } from '../src/server/login-throttle';
 import request from 'supertest';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { createApp } from '../src/server/app';
@@ -183,7 +184,7 @@ describe('server authorization', () => {
           await request(app)
             .post('/api/auth/login')
             .set('Origin', origin)
-            .send({ email: 'missing@example.test', password })
+            .send({ email: `missing${i}@example.test`, password })
         ).status,
       ).toBe(401);
     expect(
@@ -255,7 +256,12 @@ describe('server authorization', () => {
   it('requires durable configuration and secure production cookies', async () => {
     expect(() => createApp({ production: true, origin: 'https://invest.example.test' })).toThrow();
     expect(() => createApp({ production: true, store, origin })).toThrow();
-    app = createApp({ production: true, store, origin: 'https://invest.example.test' });
+    app = createApp({
+      production: true,
+      store,
+      origin: 'https://invest.example.test',
+      loginThrottle: new MemoryLoginThrottle(),
+    });
     const response = await request(app)
       .post('/api/auth/login')
       .set('Origin', 'https://invest.example.test')

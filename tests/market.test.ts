@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   bollinger,
+  chartWindowLength,
   compareEventTime,
   importancePresentation,
   formatChartPrice,
@@ -116,5 +117,27 @@ describe('UI domain regressions', () => {
     expect(visible[1].compare).toBeCloseTo(110);
     expect(normalizeComparison([])).toEqual([]);
     expect(normalizeComparison(history.slice(0, 1))[0].sma).toBeNull();
+  });
+});
+
+describe('daily chart trading-day windows', () => {
+  it('shows five, twenty-one and sixty-three daily candles for the labelled periods', () => {
+    expect(chartWindowLength('1주')).toBe(5);
+    expect(chartWindowLength('1개월')).toBe(21);
+    expect(chartWindowLength('3개월')).toBe(63);
+    const fullHistory = Array.from({ length: 100 }, (_, i) => ({ close: i + 1, compare: 200 + i }));
+    for (const period of ['1주', '1개월', '3개월']) {
+      const visible = fullHistory.slice(-chartWindowLength(period));
+      expect(visible).toHaveLength(chartWindowLength(period));
+      expect(normalizeComparison(visible)[0]).toMatchObject({ close: 100, compare: 100 });
+    }
+  });
+  it('retains pre-window indicator warmup while displaying only selected trading days', () => {
+    const history = Array.from({ length: 100 }, (_, i) => i + 1);
+    const indicator = sma(history, 20);
+    const visibleIndicator = indicator.slice(-chartWindowLength('1주'));
+    expect(visibleIndicator).toHaveLength(5);
+    expect(visibleIndicator[0]).toBe(86.5);
+    expect(visibleIndicator.every((value) => value !== null)).toBe(true);
   });
 });
