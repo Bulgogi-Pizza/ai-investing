@@ -19,6 +19,7 @@ SERVICE = "ai-investing"
 REGION = "asia-northeast3"
 
 API_KEY = re.compile(r"[A-Za-z0-9_-]{16,128}")
+DART_KEY = re.compile(r"[0-9A-Za-z]{40}")  # OpenDART crtfc_key is documented as 40 characters.
 TELEGRAM_TOKEN = re.compile(r"[0-9]{3,20}:[A-Za-z0-9_-]{20,128}")
 TELEGRAM_CHAT = re.compile(r"-?[0-9]{1,19}")
 CONTACT_EMAIL = re.compile(r"[^\s@<>()]+@[^\s@<>()]+\.[^\s@<>()]+")
@@ -26,6 +27,10 @@ CONTACT_EMAIL = re.compile(r"[^\s@<>()]+@[^\s@<>()]+\.[^\s@<>()]+")
 
 def _api_key(value):
     return API_KEY.fullmatch(value) is not None
+
+
+def _dart_key(value):
+    return DART_KEY.fullmatch(value) is not None
 
 
 def _telegram_token(value):
@@ -46,7 +51,7 @@ def _sec_user_agent(value):
 
 # Secret Manager name -> (environment variable, validator, operator hint). Order is the prompt order.
 SECRETS = {
-    "investing-dart-api-key": ("DART_API_KEY", _api_key, "영문·숫자·-·_ 16~128자"),
+    "investing-dart-api-key": ("DART_API_KEY", _dart_key, "영문·숫자 40자"),
     "investing-fred-api-key": ("FRED_API_KEY", _api_key, "영문·숫자·-·_ 16~128자"),
     "investing-ecos-api-key": ("ECOS_API_KEY", _api_key, "영문·숫자·-·_ 16~128자"),
     "investing-telegram-bot-token": ("TELEGRAM_BOT_TOKEN", _telegram_token, "<숫자>:<영문·숫자·-·_ 20~128자>"),

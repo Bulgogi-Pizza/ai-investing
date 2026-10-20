@@ -14,7 +14,7 @@ SPEC.loader.exec_module(module)
 CONFIG = {"personalOnly": True, "account": "operator@example.test", "project": "personal-test-123"}
 ALL_NAMES = tuple(module.SECRETS)
 SAMPLES = {
-    "investing-dart-api-key": "dart0123456789abcdef0123456789abcdef012345",
+    "investing-dart-api-key": "0123456789abcdef0123456789abcdef01234567",
     "investing-fred-api-key": "fred0123456789abcdef0123456789ab",
     "investing-ecos-api-key": "ECOS0123456789ABCDEF",
     "investing-telegram-bot-token": "123456789:EXAMPLE-token_0123456789abcdefghij",
@@ -60,7 +60,7 @@ class ValidationTests(unittest.TestCase):
 
     def test_each_secret_rejects_malformed_values_without_echoing(self):
         bad = {
-            "investing-dart-api-key": ["", "short", "has space in key 0123456789", "a" * 129, "key\nwith-newline0123456789", "키" * 20],
+            "investing-dart-api-key": ["", "short", "has space in key 0123456789", "a" * 39, "a" * 41, "a" * 39 + "-", "key\nwith-newline0123456789", "키" * 20],
             "investing-fred-api-key": ["", "x" * 15, "semi;colon0123456789abcd"],
             "investing-ecos-api-key": ["", "y" * 15, "slash/0123456789abcdef"],
             "investing-telegram-bot-token": ["", "no-colon-token", "12:" + "a" * 20, "123456789:" + "a" * 19, "123456789:" + "a" * 129,

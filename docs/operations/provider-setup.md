@@ -64,7 +64,8 @@ python scripts/provider-secrets.py telegram sec --attach-only
 ## 안전 동작
 
 - 모든 입력을 형식 검사한 뒤에만 클라우드를 변경한다. 오류 메시지에 입력값을 싣지 않는다.
-  - DART·FRED·ECOS: 영문·숫자·`-`·`_` 16~128자(공급자의 정확한 형식은 추측하지 않고 느슨하게만 검사한다).
+  - DART: 영문·숫자 40자(OpenDART 개발 가이드의 `crtfc_key` 설명). 서버 어댑터도 같은 형식이 아니면 DART 연결을 끈다.
+  - FRED·ECOS: 영문·숫자·`-`·`_` 16~128자(공급자의 정확한 형식은 추측하지 않고 느슨하게만 검사한다).
   - 텔레그램 봇 토큰: `^\d{3,20}:[A-Za-z0-9_-]{20,128}$`. chat ID: `^-?\d{1,19}$`.
   - SEC User-Agent: 출력 가능한 ASCII 한 줄, 200자 이하, 이메일 형태의 연락처 포함.
 - 이미 ENABLED 버전이 있으면 `--rotate` 없이는 저장하지 않는다. `--rotate`는 새 버전을 추가할 뿐 이전 버전을 끄지 않는다. 서비스에 새 버전을 연결한 뒤 이전 버전은 운영 담당자가 `gcloud secrets versions disable`로 끈다.
