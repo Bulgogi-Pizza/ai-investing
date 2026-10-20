@@ -80,7 +80,7 @@ function text(value: unknown, max: number, allowEmpty = false): value is string 
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/.test(value)
   );
 }
-function cleanEvent(input: unknown): EconomicEvent | null {
+export function cleanEvent(input: unknown): EconomicEvent | null {
   if (!input || typeof input !== 'object' || Array.isArray(input)) return null;
   const item = input as Record<string, unknown>;
   if (

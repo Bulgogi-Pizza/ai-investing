@@ -1,7 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
-import { rateLimit } from 'express-rate-limit';
+import { ipKeyGenerator, rateLimit } from 'express-rate-limit';
 import { resolve } from 'node:path';
 import {
   createSessionToken,
@@ -16,6 +16,7 @@ import {
   MemoryCalendarRepository,
   type CalendarRepository,
 } from './calendar.js';
+import { MemoryLoginThrottle, type LoginThrottle } from './login-throttle.js';
 import { createRecommendation, validRecommendationQuery } from './recommendations.js';
 import { ProviderError, type TossClient } from './toss.js';
 import { MemoryStore, type Store, type Strategy, type User } from './store.js';
@@ -27,6 +28,7 @@ export type AppOptions = {
   staticDirectory?: string;
   toss?: TossClient;
   calendarRepository?: CalendarRepository;
+  loginThrottle?: LoginThrottle;
 };
 const publicUser = (user: User) => ({ id: user.id, email: user.email, role: user.role });
 const failure = (res: Response, status: number, code: string, message: string) =>
@@ -70,6 +72,9 @@ export function createApp(options: AppOptions = {}) {
   )
     throw new Error('Valid APP_ORIGIN required');
   if (production && !options.store) throw new Error('Durable production store required');
+  if (production && !options.loginThrottle)
+    throw new Error('Shared production login throttle required');
+  const loginThrottle = options.loginThrottle ?? new MemoryLoginThrottle();
   const store = options.store ?? new MemoryStore();
   const calendarRepository = options.calendarRepository ?? new MemoryCalendarRepository();
   const app = express();
@@ -117,7 +122,32 @@ export function createApp(options: AppOptions = {}) {
         failure(res, 401, 'INVALID_CREDENTIALS', '이메일 또는 비밀번호를 확인하세요.');
         return;
       }
-      const user = await store.findUser(normalizeEmail(email));
+      const normalizedEmail = normalizeEmail(email);
+      try {
+        const attempt = await loginThrottle.consume(
+          ipKeyGenerator(req.ip ?? req.socket.remoteAddress ?? 'unknown'),
+          normalizedEmail,
+        );
+        if (!attempt.allowed) {
+          res.setHeader('Retry-After', String(attempt.retryAfter));
+          failure(
+            res,
+            429,
+            'LOGIN_RATE_LIMITED',
+            '로그인 시도 한도에 도달했습니다. 잠시 후 다시 시도하세요.',
+          );
+          return;
+        }
+      } catch {
+        failure(
+          res,
+          503,
+          'LOGIN_PROTECTION_UNAVAILABLE',
+          '로그인 보호 상태를 확인할 수 없습니다. 잠시 후 다시 시도하세요.',
+        );
+        return;
+      }
+      const user = await store.findUser(normalizedEmail);
       // Equal-cost verification prevents the account-existence timing distinction.
       const encoded = user?.passwordHash ?? 'scrypt:' + '0'.repeat(64) + ':' + '0'.repeat(128);
       const valid = await verifyPassword(password, encoded);

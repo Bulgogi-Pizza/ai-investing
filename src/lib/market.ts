@@ -350,3 +350,8 @@ export function normalizeComparison<
     lower: indicator(point.lower),
   }));
 }
+
+/** Approximate trading-day windows for daily candle views; holidays can shorten coverage. */
+export function chartWindowLength(period: string): number {
+  return period === '1주' ? 5 : period === '1개월' ? 21 : 63;
+}

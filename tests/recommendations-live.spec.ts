@@ -56,6 +56,8 @@ const liveInsight = {
       ],
       truncated: false,
       coverageWarning: '관리자가 등록한 일정만 포함하며 전체 뉴스가 아닙니다.',
+      relevanceRule: '한국 시장 또는 글로벌 일정과 해당 종목 직접 태그',
+      excludedCount: 2,
     },
   },
   scenarios: ['목표 비중 유지 후 다음 기간 재점검'],
@@ -100,6 +102,10 @@ test('내 데이터 분석 shows sourced rules and reloads by horizon without de
     'href',
     'https://example.com/release',
   );
+  await expect(
+    page.getByText('일정 관련성 기준: 한국 시장 또는 글로벌 일정과 해당 종목 직접 태그'),
+  ).toBeVisible();
+  await expect(page.getByText('관련성 기준에 따라 제외한 일정: 2건')).toBeVisible();
   await expect(page.getByRole('heading', { name: '판단의 전제와 위험' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: '배분 시나리오 적용' })).toHaveCount(0);
   await page.getByRole('button', { name: '주간', exact: true }).click();

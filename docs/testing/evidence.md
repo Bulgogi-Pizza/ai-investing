@@ -33,3 +33,5 @@ IAB에서 경제 캘린더·차트·자산 화면을 렌더링해 확인했고 P
 추가 회귀: 연도 경계 일정 정렬, 낮은 중요도,USD 소수점, 기간별 기준100,일정잘림 안내,실제 규칙 추천 성공/오류.
 
 GitHub 최초 CI에서 앱/인프라/운영 컨테이너 검증은 성공했으나 추천 화면 캡처의 macOS 전용 `/private/tmp` 경로가 Linux에서 없어 E2E2건이 실패했다. 경로를 Playwright `testInfo.outputPath`로 변경하여 플랫폼 공통 테스트 아티팩트 디렉터리를 사용한다. 기능 단정22건은 해당 원격 실행에서도 통과했다. 후속 CI 결과 확인 전 전체 원격 성공이라고 기록하지 않는다.
+
+수정 PR12의 [원격 CI](https://github.com/Bulgogi-Pizza/ai-investing/actions/runs/39393206111)가 앱 검증(52단위·통합+24브라우저), 인프라, 운영 컨테이너 세 job 모두 성공했고 main에 병합했다. 추가 Claude Sonnet 검토 후 보안 보완은 별도 PR에서 재검증한다.

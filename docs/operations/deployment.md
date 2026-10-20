@@ -38,7 +38,7 @@ GitHub 저장소의 Actions Variables에 다음 비밀이 아닌 값을 설정�
 - GCP_DEPLOY_SERVICE_ACCOUNT (`terraform output -raw deploy_service_account`)
 - APP_ORIGIN (`https://` 서비스 최종 URL, 뒤 슬래시 없이)
 
-장기 JSON 서비스 계정 키는 만들지 않는다. WIF는 repo 이름/불변 숫자 ID/main 브랜치를 함께 제한한다. 배포 계정 run.admin 권한은 서비스 IAM 초기 설정 때문에 필요하며 전용 프로젝트에 한정한다. 런타임은 datastore.user만 가진다.
+장기 JSON 서비스 계정 키는 만들지 않는다. WIF는 repo 이름/불변 숫자 ID/main 브랜치/배포 workflow_ref/production 환경/workflow_run 이벤트를 함께 제한한다. 일반 workflow에서는 reusable workflow 전용 job_workflow_ref를 쓰지 않는다. 근거: https://docs.github.com/en/actions/reference/security/oidc . 레지스트리 writer는 해당 Artifact Registry 저장소에만 부여한다. 배포 계정 run.admin 권한은 서비스 IAM 초기 설정 때문에 필요하며 전용 프로젝트에 한정한다. 런타임은 datastore.user만 가진다.
 
 ## 최초 서비스 URL 확정
 
@@ -83,3 +83,5 @@ node scripts/gcp.mjs apply
 ```
 
 이 도구는 gcloud의 기본 계정을 사용하지 않고 모든 호출에 지정 계정을 전달한다. OAuth 토큰은 메모리의 자식 프로세스 환경변수로만 전달한다. plan은 개인 프로젝트를 CLI 변수로 고정한다. apply는 실제 활성 결제 상태와 저장된 plan의 프로젝트 일치 여부를 검사한다. `.local/gcp.plan`을 검토한 뒤 apply하며 이 명령은 실제 리소스를 만든다. 먼저 `infra/gcp`에서 `terraform init`과 비밀 없는 `terraform.tfvars` 설정이 필요하다. 기본 ADC에 의존한 수동 apply는 피한다.
+
+개인 계정 ADC 혼용을 피하는 최초 소유자 생성 도구도 제공한다: `node --import tsx scripts/provision-owner.ts`. 비공개 deployment.json의 지정 계정으로만 gcloud 임시 토큰을 메모리에서 얻고, 공식 Firestore REST commit으로 이메일 예약·관리자 문서를 원자적으로 생성한다. 기존 계정은 덮어쓰지 않는다. 무작위 초기 비밀번호는 해시로 서버에 저장하고 원문은 gitignore된 `.local/owner-access.json`(0600)에만 기록한다. 채팅·로그·공개 저장소에 출력하지 않는다. 최초 소유자 이메일은 지정한 개인 배포 계정과 같다. 이 파일을 안전한 비밀번호 관리자로 옮긴 뒤 로컬 원문을 정리한다. 출처: https://firebase.google.com/docs/firestore/reference/rest/v1/projects.databases.documents/commit .
