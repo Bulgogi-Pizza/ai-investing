@@ -210,7 +210,7 @@ export function validateAiNarrative(value: unknown, sources: AiSource[]): AiNarr
     throw new Error('Numeric confidence is forbidden');
   // Reject allocation commands, while allowing descriptions/comparisons of observed risk percentages.
   const allocationInstruction =
-    /(?:비중|배분|자산|포트폴리오)[^.!?]{0,45}\d+(?:\.\d+)?\s*%[^.!?]{0,35}(?:늘리|줄이|변경|조정|설정|편입|맞추|맞춰|재배분|할당|확대|축소|추천|권장)|(?:설정|편입|맞추|맞춰|재배분|할당|배분)[^.!?]{0,40}\d+(?:\.\d+)?\s*%|\b(?:allocate|rebalance|invest|assign|set|adjust|increase|decrease)\b[^.!?]{0,65}\d+(?:\.\d+)?\s*%|\btarget\s+(?:weights?|allocations?)\b[^.!?]{0,45}\d+(?:\.\d+)?\s*%/i;
+    /\d+(?:\.\d+)?\s*%[^.!?]{0,35}(?:설정|편입|맞추|맞춰|재배분|할당|늘리|줄이|변경|조정|확대|축소)|(?:비중|배분|자산|포트폴리오)[^.!?]{0,45}\d+(?:\.\d+)?\s*%[^.!?]{0,35}(?:늘리|줄이|변경|조정|설정|편입|맞추|맞춰|재배분|할당|확대|축소|추천|권장)|(?:설정|편입|맞추|맞춰|재배분|할당|배분)[^.!?]{0,40}\d+(?:\.\d+)?\s*%|\b(?:allocate|rebalance|invest|assign|set|adjust|increase|decrease)\b[^.!?]{0,65}\d+(?:\.\d+)?\s*%|\btarget\s+(?:weights?|allocations?)\b[^.!?]{0,45}\d+(?:\.\d+)?\s*%/i;
   if (
     allocationInstruction.test(normalizedStrings) ||
     /(?:목표\s*주가|매수\s*가격|매도\s*가격|price\s*target|buy\s*at|sell\s*at|즉시\s*(?:매수|매도)|(?:매수|매도)\s*하세요)/i.test(
