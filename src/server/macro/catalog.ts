@@ -279,6 +279,70 @@ export interface ReleaseEntry {
   indicatorIds: string[];
   sourceUrl: string;
 }
+/**
+ * FRED release 101 ("FOMC Press Release") carries the daily target-range series, so FRED lists a
+ * release date on almost every business day. Its events come from the Fed's own meeting calendar
+ * instead: the statement day (second day, New York date) of each scheduled meeting, released at
+ * 14:00 New York time. Checked against the source on 2026-10-21; the Fed marks them tentative
+ * until the preceding meeting, and the list must be extended when the next year is published.
+ */
+export const fomcCalendarUrl = 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm';
+export const officialReleaseSchedules: Record<
+  number,
+  { dates: readonly string[]; nyTime: string }
+> = {
+  101: {
+    nyTime: '14:00',
+    dates: [
+      '2026-01-28',
+      '2026-03-18',
+      '2026-04-29',
+      '2026-06-17',
+      '2026-07-29',
+      '2026-09-16',
+      '2026-10-28',
+      '2026-12-09',
+      '2027-01-27',
+      '2027-03-17',
+      '2027-04-28',
+      '2027-06-09',
+      '2027-07-28',
+      '2027-09-15',
+      '2027-10-27',
+      '2027-12-08',
+    ],
+  },
+};
+
+const seoulClock = new Intl.DateTimeFormat('en-CA', {
+  timeZone: 'Asia/Seoul',
+  year: 'numeric',
+  month: '2-digit',
+  day: '2-digit',
+  hour: '2-digit',
+  minute: '2-digit',
+  hourCycle: 'h23',
+});
+const newYorkHour = new Intl.DateTimeFormat('en-US', {
+  timeZone: 'America/New_York',
+  hour: '2-digit',
+  hourCycle: 'h23',
+});
+/** New York wall-clock date/time -> KST date and HH:MM (handles EDT/EST). */
+export function newYorkToKst(date: string, time: string): { date: string; time: string } {
+  const [year, month, day] = date.split('-').map(Number);
+  const [hour, minute] = time.split(':').map(Number);
+  // EDT is UTC-4, EST is UTC-5: take the offset whose New York hour matches.
+  let instant = new Date(Date.UTC(year, month - 1, day, hour + 4, minute));
+  if (Number(newYorkHour.format(instant)) !== hour)
+    instant = new Date(Date.UTC(year, month - 1, day, hour + 5, minute));
+  const parts = Object.fromEntries(seoulClock.formatToParts(instant).map((p) => [p.type, p.value]));
+  return {
+    date: `${parts.year}-${parts.month}-${parts.day}`,
+    time: `${parts.hour}:${parts.minute}`,
+  };
+}
+
 /** One entry per catalog FRED release: importance is the highest of its indicators. */
 export function releaseCatalog(): ReleaseEntry[] {
   const titles: Record<number, string> = {
