@@ -228,6 +228,25 @@ describe('AI 결과 검증(부분별로 버리고 고치지 않는다)', () => {
     expect(
       run({ titleKo: 'Federal Reserve approves rule' }, [english]).items[0].titleKo,
     ).toBeUndefined();
+    // Month names and number words count as the title's own numbers.
+    const minutes = input({
+      titleIsKorean: false,
+      title: 'Minutes of the Federal Open Market Committee, September 15-16, 2026',
+    });
+    expect(
+      run({ titleKo: '연방공개시장위원회 의사록(2026년 9월 15~16일)' }, [minutes]).items[0].titleKo,
+    ).toBe('연방공개시장위원회 의사록(2026년 9월 15~16일)');
+    expect(
+      run({ titleKo: '연방공개시장위원회 의사록(2026년 10월 15~16일)' }, [minutes]).items[0]
+        .titleKo,
+    ).toBeUndefined();
+    const party = input({
+      titleIsKorean: false,
+      title: 'Agencies seek comment on third-party risk',
+    });
+    expect(run({ titleKo: '감독기관, 제3자 위험 관리 의견 수렴' }, [party]).items[0].titleKo).toBe(
+      '감독기관, 제3자 위험 관리 의견 수렴',
+    );
     // A Korean source keeps its title: whatever the model returns there is ignored.
     expect(run({ titleKo: '다른 제목' }).items[0].titleKo).toBeUndefined();
   });
@@ -703,6 +722,30 @@ describe('enrichCalendar', () => {
     expect(create.mock.calls[0][0].messages[0].content).not.toContain('2026-10-20');
     expect((await read(memory, 1)).enrichment).toBeUndefined();
     expect((await read(memory, 2)).enrichment).toBeDefined();
+  });
+  it('보강은 됐지만 제목이 아직 원문(영어)인 일정은 다시 대상이 된다', async () => {
+    const enrichment = {
+      model: 'm',
+      generatedAt: '2026-10-21T00:00:00.000Z',
+      version: 1,
+      aiFields: ['outcome'],
+    };
+    const { repo } = makeRepo([
+      bok({
+        id: 1,
+        title: 'Minutes of the Federal Open Market Committee',
+        country: '미국',
+        enrichment,
+      } as never),
+      bok({ id: 2, title: '한국은행 발표', enrichment } as never),
+    ]);
+    const { client, create } = claude((sent) => sent.map((entry) => item(entry.ref)));
+    await enrichCalendar(deps(repo, { ai: enrichAi(client) }), options);
+    expect(create).toHaveBeenCalledTimes(1);
+    const sent = JSON.parse(create.mock.calls[0][0].messages[0].content).items;
+    expect(sent.map((entry: { title: string }) => entry.title)).toEqual([
+      'Minutes of the Federal Open Market Committee',
+    ]);
   });
   it('저장된 값을 널이나 더 적은 값으로 덮지 않는다(보존 저장)', async () => {
     const stored = bok({

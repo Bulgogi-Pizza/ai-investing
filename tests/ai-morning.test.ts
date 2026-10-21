@@ -14,6 +14,7 @@ import {
   morningAiConfigFromEnvironment,
   unsafeMorningText,
   validateSummaries,
+  titleNumbers,
   validateTranslations,
   type MorningSummaryInput,
 } from '../src/server/ai-morning';
@@ -253,6 +254,22 @@ describe('아침 AI 계약: 응답 검증(엄격, 항목별)', () => {
     );
     expect(result.items).toEqual([{ refId: 't1', titleKo: '연준, 2차례 회의 발표' }]);
     expect(result.rejected).toBe(3);
+  });
+  it('번역: 영어 월 이름·숫자 단어는 원문의 숫자로 본다(September -> 9월, third -> 제3자)', () => {
+    const result = validateTranslations(
+      {
+        translations: [
+          { refId: 'm1', titleKo: '연준, 11월 4일까지 의견 수렴 연장' },
+          { refId: 'm2', titleKo: '연준, 12월 4일까지 의견 수렴 연장' },
+        ],
+      },
+      [
+        { refId: 'm1', title: 'Fed will extend, until November 4, the comment period' },
+        { refId: 'm2', title: 'Fed will extend, until November 4, the comment period' },
+      ],
+    );
+    expect(result.items.map((entry) => entry.refId)).toEqual(['m1']);
+    expect([...titleNumbers('third-party guidance, Sept. 9')].sort()).toEqual(['3', '9']);
   });
   it('공용 안전 검사는 정상 한국어 문장은 통과시킨다', () => {
     expect(unsafeMorningText(goodSummary)).toBe(false);

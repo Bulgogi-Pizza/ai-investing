@@ -5,6 +5,7 @@ import {
   clip,
   numberTokens,
   sentenceCount,
+  titleNumbers,
   unsafeMorningText,
   type MorningAiErrorCode,
 } from './ai-morning.js';
@@ -233,7 +234,7 @@ export function validateEnrichment(
     const item: EnrichItem = { ref: entry.ref };
     // title: Korean sources keep their own title; a translation may only reuse the title's numbers.
     if (!input.titleIsKorean) {
-      const titleNumbers = new Set(numberTokens(input.title).map(canonical));
+      const original = titleNumbers(input.title);
       if (
         typeof entry.titleKo === 'string' &&
         entry.titleKo.trim() === entry.titleKo &&
@@ -242,7 +243,7 @@ export function validateEnrichment(
         HANGUL.test(entry.titleKo) &&
         !/[\r\n]/.test(entry.titleKo) &&
         !unsafeMorningText(entry.titleKo) &&
-        numbersAllowed(entry.titleKo, titleNumbers)
+        numbersAllowed(entry.titleKo, original)
       )
         item.titleKo = entry.titleKo;
       else rejected++;
@@ -580,7 +581,11 @@ export async function enrichCalendar(
     .filter(
       (event) =>
         event.date <= todayKst &&
-        (options.force || !event.enrichment || event.enrichment.version < ENRICH_VERSION),
+        (options.force ||
+          !event.enrichment ||
+          event.enrichment.version < ENRICH_VERSION ||
+          // A rejected translation is retried: the title is still in the source language.
+          !/[가-힣]/.test(event.title)),
     )
     .sort((a, b) => b.importance - a.importance || b.date.localeCompare(a.date) || a.id - b.id);
   if (!deps.ai) {
