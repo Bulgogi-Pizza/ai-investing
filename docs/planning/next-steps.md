@@ -4,8 +4,10 @@
 
 ## 현재 상태
 
-- 다음 단계(실데이터 전환·종목 분석·알고리즘 자동 매매)의 코드는 모두 main에 병합·배포됐다(#17–#33).
-- 월 예산 자동 중지(Pub/Sub 푸시 → `/api/internal/budget-alert`, 예산 100%에 예약 작업·AI·실전 주문 중지와 긴급 정지, 소유자 화면 배너·해제)의 **코드와 Terraform은 완료, 적용 전**이다. 순서와 한계는 [budget.md](../operations/budget.md).
+- 다음 단계(실데이터 전환·종목 분석·알고리즘 자동 매매)의 코드는 모두 main에 병합·배포됐다(#17–#37).
+- 월 예산 자동 중지는 **적용·실제 시험 완료(2026-10-21)**: 비인증·가짜 토큰 401, Pub/Sub 합성 알림(1,000원) 수신·기록, 정지 없음. 순서와 한계는 [budget.md](../operations/budget.md).
+- 외부 키 실호출 확인(2026-10-21): **ECOS 정상**(기준금리 3%, 원/달러). **FRED 키 정상**(발표 일정 61건)이나 최신값 조회가 미국 날짜보다 앞선 real-time 날짜로 400을 받던 버그를 수정했다(이 PR). **텔레그램 봇 토큰 정상, chat ID가 틀림**(`chat not found`) — 사용자 재입력 필요. DART·SEC는 소유자 화면(종목 분석 → 가치·재무)에서 확인할 것.
+- AI: Vertex의 Claude 할당량 증가가 자동 거절되어 **Anthropic API 직접 호출로 전환 중**(사용자 결정). 연결 전까지 저장소 변수상 AI는 기존 Gemini(`gemini-3.1-flash-lite`)로 돈다.
 - 운영 작업:
 
 | 작업                           | 스케줄                                 | 마지막 확인                                                                                                                                                                     |
@@ -22,6 +24,8 @@
 ### 사용자 (먼저 필요)
 
 1. 소유자 계정으로 로그인해 실제 지수·보유·종목 분석 탭이 보이는지 확인한다. 이상하면 화면을 알려 준다.
+   - **텔레그램 chat ID 다시 넣기**: 만든 봇에게 `/start`를 보낸 뒤 chat ID를 다시 확인하고 `python scripts/provider-secrets.py telegram-chat --rotate --attach`로 넣는다.
+   - **Anthropic API 키**: console.anthropic.com에서 월 사용 한도를 걸고 키를 발급한다. 연결 PR이 병합되면 `python scripts/provider-secrets.py anthropic --attach`.
 2. 키 입력: 아래 명령에 값이 생긴 항목만 넣는다(숨김 입력, 채팅에 붙이지 않는다). 발급 방법은 [provider-setup.md](../operations/provider-setup.md).
    - `python scripts/provider-secrets.py dart fred ecos telegram sec --attach`
 3. **완료(2026-10-21)**: AI 기본 모델을 Claude Sonnet 5.5(Vertex AI, `global`)로 정하고 월 약 1만 8천 원을 승인했다([설계 5절](next-phase-design.md#5-ai-모델-사용자-결정)). 예산은 월 3만 원으로 하고, 2만 원에 경고, 3만 원에 앱 기능 자동 중지(예약 작업·AI·실전 주문 중지, 사이트·데이터 유지)를 둔다. **Vertex의 `anthropic-claude-sonnet` `global` 할당량이 0이라 2026-10-21 증가를 요청했다**(분당 요청 10, 입력 10만, 출력 2만 토큰; Cloud Quotas `quotaPreferences/claude-sonnet-*`). 승인 전까지 AI 호출은 `AI_QUOTA_PROVIDER`로 기록되고 실행은 깨지지 않는다.

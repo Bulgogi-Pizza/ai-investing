@@ -125,8 +125,23 @@ export class FredAdapter {
       throw error;
     }
   }
+  /**
+   * FRED's "today" for real-time parameters. FRED rejects realtime_start/realtime_end after its own
+   * current date (observed 2026-10-21: "can not be after today's date (2026-10-20)" while it was
+   * already 10-21 in Korea and UTC), which follows US Central time.
+   */
   private today() {
-    return this.now().toISOString().slice(0, 10);
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Chicago',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(this.now());
+  }
+  /** A requested vintage date, never later than FRED's today. */
+  private realtimeDate(date: string) {
+    const today = this.today();
+    return date > today ? today : date;
   }
 
   private async fetchObservations(
@@ -179,9 +194,11 @@ export class FredAdapter {
     range: { from?: string } = {},
   ): Promise<VintageObservation[]> {
     const entry = this.requireEntry(id);
+    // Vintage as of the requested date, but never later than FRED's own today.
+    const vintage = this.realtimeDate(checkDate(date));
     const params: Record<string, string> = {
-      realtime_start: checkDate(date),
-      realtime_end: date,
+      realtime_start: vintage,
+      realtime_end: vintage,
       observation_end: date,
       sort_order: 'asc',
       limit: String(fredLimits.documentedObservationLimit),
@@ -189,7 +206,7 @@ export class FredAdapter {
     if (range.from !== undefined) params.observation_start = checkDate(range.from);
     const rows = await this.fetchObservations(entry, params);
     return rows.filter(
-      (row) => row.realtimeStart <= date && row.realtimeEnd >= date && row.date <= date,
+      (row) => row.realtimeStart <= vintage && row.realtimeEnd >= vintage && row.date <= date,
     );
   }
 
@@ -200,15 +217,18 @@ export class FredAdapter {
     const result: LatestObservation[] = [];
     for (const id of ids) {
       const entry = this.requireEntry(id);
+      const vintage = this.realtimeDate(asOf);
       const rows = await this.fetchObservations(entry, {
-        realtime_start: asOf,
-        realtime_end: asOf,
+        realtime_start: vintage,
+        realtime_end: vintage,
         observation_end: asOf,
         sort_order: 'desc',
         limit: '24',
       });
       const known = rows
-        .filter((row) => row.realtimeStart <= asOf && row.realtimeEnd >= asOf && row.date <= asOf)
+        .filter(
+          (row) => row.realtimeStart <= vintage && row.realtimeEnd >= vintage && row.date <= asOf,
+        )
         .filter((row) => row.value !== null)
         // Do not rely on the API's order; newest observation first, newest vintage on ties.
         .sort(

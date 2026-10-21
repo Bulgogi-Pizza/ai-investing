@@ -7,7 +7,8 @@ import { ProviderError } from '../src/server/toss';
 const KEY = 'abcdefghijklmnopqrstuvwxyz012345';
 const fixture = (name: string) =>
   JSON.parse(readFileSync(new URL(`./fixtures/macro/${name}`, import.meta.url), 'utf8'));
-const NOW = new Date('2026-10-21T03:00:00Z');
+// 10:00 in Chicago, so FRED's own date (US Central) is also 2026-10-21.
+const NOW = new Date('2026-10-21T15:00:00Z');
 
 function reply(body: unknown, status = 200, headers: Record<string, string> = {}) {
   return new Response(typeof body === 'string' ? body : JSON.stringify(body), {
@@ -365,5 +366,47 @@ describe('FRED 오류와 키 보호', () => {
     expect(fredFromEnvironment({})).toBeUndefined();
     expect(fredFromEnvironment({ FRED_API_KEY: 'bad key' })).toBeUndefined();
     expect(fredFromEnvironment({ FRED_API_KEY: KEY })).toBeInstanceOf(FredAdapter);
+  });
+});
+
+describe('FRED real-time date follows FRED today (US Central)', () => {
+  it('clamps a Korean "today" that is already ahead of FRED and keeps the rows', async () => {
+    // 2026-10-21 04:30Z is 10-21 in Korea and UTC but still 10-20 23:30 in Chicago.
+    const now = new Date('2026-10-21T04:30:00Z');
+    const urls: string[] = [];
+    const transport = vi.fn(async (url: string) => {
+      urls.push(String(url));
+      return reply({
+        observations: [
+          {
+            realtime_start: '2026-10-20',
+            realtime_end: '2026-10-20',
+            date: '2026-09-01',
+            value: '336.298',
+          },
+          {
+            realtime_start: '2026-10-20',
+            realtime_end: '2026-10-20',
+            date: '2026-08-01',
+            value: '335.000',
+          },
+        ],
+      });
+    });
+    const fred = new FredAdapter({
+      apiKey: KEY,
+      transport: transport as unknown as typeof fetch,
+      now: () => now,
+      limiter: new RateLimiter(0),
+    });
+    const [cpi] = await fred.latestObservations(['us-cpi'], '2026-10-21');
+    const query = new URL(urls[0]).searchParams;
+    expect(query.get('realtime_start')).toBe('2026-10-20');
+    expect(query.get('realtime_end')).toBe('2026-10-20');
+    expect(cpi.latest).toEqual({ date: '2026-09-01', value: '336.298' });
+    expect(cpi.previous).toEqual({ date: '2026-08-01', value: '335.000' });
+    const vintage = await fred.observationsKnownAt('us-cpi', '2026-10-21');
+    expect(new URL(urls[1]).searchParams.get('realtime_start')).toBe('2026-10-20');
+    expect(vintage.map((row) => row.date)).toEqual(['2026-09-01', '2026-08-01']);
   });
 });
