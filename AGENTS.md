@@ -10,6 +10,7 @@ Read this file, docs/planning/requirements.md, and the feature's documentation b
 - Changes require feature tests, applicable full checks, rendered browser inspection for UI and documentation updates. Record evidence honestly; blocked deployment is not complete deployment.
 - Delegate bounded work when possible; supervisor continues independent work and critically reviews outputs. Prefer GPT Terra and Claude Sonnet where available; record unavailable models, never claim their use.
 - Do not edit another agent's assigned files without coordination. No unreviewed security shortcuts, invented provider API schemas, implicit demo production access or personal-data browser persistence.
+- Every finished task ends with a handoff in the same change: update docs/planning/next-steps.md with what was done, the next tasks (owner user/agent, priority, blocker) and the checks another agent must run before continuing (environment, pending verifications, known traps). Read it first when you start. A task without an updated handoff is not complete.
 - Add future global instructions here, feature instructions under docs/agents/, and update the index. CLAUDE.md and GEMINI.md point here; do not duplicate policy.
 
 ## Deployment identity boundary
