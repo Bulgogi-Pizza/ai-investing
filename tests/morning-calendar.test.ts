@@ -179,6 +179,24 @@ describe('아침 캘린더 작업 (AI 꺼짐, 기본값)', () => {
     });
   });
 
+  it('공식 일정이 있는 발표(FOMC)는 한국 시각과 연준 캘린더 출처로 만든다', async () => {
+    const fomc = {
+      ...release('2026-10-28', 101, ['us-fed-funds-upper', 'us-fed-funds-lower']),
+      kst: { date: '2026-10-29', time: '03:00' },
+    };
+    const h = harness({ fred: fakeFred({ upcomingReleases: vi.fn(async () => [fomc]) }) });
+    expect(await h.run()).toBe('ok');
+    const event = (await all(h.calendar)).find(
+      (item) => item.id === macroEventId('fred-release:101:2026-10-28'),
+    )!;
+    expect(event).toMatchObject({
+      date: '2026-10-29',
+      time: '03:00',
+      category: '금리 결정',
+      sourceUrl: 'https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm',
+    });
+    expect(event.description).toContain('한국 03:00');
+  });
   it('같은 날 다시 실행하면 건너뛰고, 강제 재실행도 중복·재기록 없이 같은 결과를 만든다', async () => {
     const h = harness();
     await h.run();

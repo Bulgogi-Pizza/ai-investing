@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { cleanEvent, type EconomicEvent } from '../calendar.js';
-import { releaseCatalog } from './catalog.js';
+import { fomcCalendarUrl, releaseCatalog } from './catalog.js';
 import type { ReleaseDate } from './fred.js';
 
 /**
@@ -38,8 +38,10 @@ export function releaseEventDraft(release: ReleaseDate, observedAt: Date): Macro
     // The morning job attaches the released values of these catalog indicators after the date.
     indicatorIds: release.indicatorIds,
     importance: entry.importance,
-    description: `FRED 발표 일정(${entry.releaseName}). 발표 시각은 제공되지 않는다. 대상 지표: ${release.indicatorIds.join(', ')}.`,
-    sourceUrl: entry.sourceUrl,
+    description: release.kst
+      ? `연준 공식 FOMC 일정의 성명 발표일(미 동부 14:00 = 한국 ${release.kst.time}). 결과 값은 FRED 정책금리 계열: ${release.indicatorIds.join(', ')}.`
+      : `FRED 발표 일정(${entry.releaseName}). 발표 시각은 제공되지 않는다. 대상 지표: ${release.indicatorIds.join(', ')}.`,
+    sourceUrl: release.kst ? fomcCalendarUrl : entry.sourceUrl,
     sourceName: 'FRED',
     impactDirection: 'unknown',
     impactHorizon: '발표 직후~수 거래일',

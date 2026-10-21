@@ -53,6 +53,7 @@
 
 - 요청한 목록 가운데 **버린 항목은 없다**. 다만 "GDP"는 실질(`GDPC1`)로 골랐고 명목 GDP 시리즈는 넣지 않았다. "PCE"는 헤드라인(`PCEPI`)과 근원(`PCEPILFE`)을 모두 넣었다. `PCEPILFE` 페이지는 발표 링크를 BEA 주소로 보여 주었지만 같은 페이지의 발표 이름·`rid`는 Personal Income and Outlays(54)였다. 첫 실호출 때 `FredAdapter.verifyCatalog()`로 모든 발표 ID를 다시 확인한다.
 - 같은 발표를 공유하는 지표는 발표일 한 번으로 묶인다(`releaseCatalog()`가 발표 ID별 한 건을 만들고 중요도는 가장 높은 값을 쓴다).
+- FOMC Press Release(101)는 일별 계열이라 FRED가 거의 매 영업일을 발표일로 준다. 그래서 101은 FRED 날짜를 쓰지 않고 [연준 공식 회의 일정](https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm)의 성명일(14:00 미 동부, 한국 시각으로 변환)만 일정으로 만든다(`officialReleaseSchedules`, 2026–2027). 연준이 다음 해 일정을 내면 목록을 늘린다.
 
 ### 한국(ECOS, 2026-10-21 통계코드검색 화면으로 확인)
 

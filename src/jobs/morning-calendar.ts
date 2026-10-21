@@ -353,8 +353,11 @@ export async function runMorningCalendar(deps: MorningDependencies): Promise<Job
     const events: EconomicEvent[] = [];
     for (const release of releases) {
       const draft = releaseEventDraft(release, now());
-      // FRED gives dates only: the event is all-day and labeled "발표 시각 미확인" in the UI.
-      const event = draft ? toEconomicEvent(draft, { date: release.date, time: '' }) : null;
+      // FRED gives dates only: the event is all-day and labeled "발표 시각 미확인" in the UI,
+      // unless the release follows an official schedule with a known time (FOMC).
+      const event = draft
+        ? toEconomicEvent(draft, release.kst ?? { date: release.date, time: '' })
+        : null;
       if (event) events.push(event);
       else steps.failed('upcoming', 'EVENT_INVALID');
     }

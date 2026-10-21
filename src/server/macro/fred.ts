@@ -1,5 +1,11 @@
 import { ProviderError } from '../toss.js';
-import { fredIndicator, indicatorsByRelease, type FredIndicator } from './catalog.js';
+import {
+  fredIndicator,
+  indicatorsByRelease,
+  newYorkToKst,
+  officialReleaseSchedules,
+  type FredIndicator,
+} from './catalog.js';
 import {
   RateLimiter,
   SingleFlightCache,
@@ -52,6 +58,8 @@ export interface ReleaseDate {
   releaseId: number;
   date: string;
   indicatorIds: string[];
+  /** Known KST date/time (official schedules only); FRED dates have no time of day. */
+  kst?: { date: string; time: string };
 }
 export interface CatalogMismatch {
   indicatorId: string;
@@ -257,6 +265,19 @@ export class FredAdapter {
       throw new RangeError('window');
     const releases: ReleaseDate[] = [];
     for (const [releaseId, entries] of indicatorsByRelease()) {
+      const official = officialReleaseSchedules[releaseId];
+      if (official) {
+        // FRED's own dates for this release are not event dates (see officialReleaseSchedules).
+        for (const date of official.dates)
+          if (date >= from && date <= to)
+            releases.push({
+              releaseId,
+              date,
+              indicatorIds: entries.map((entry) => entry.id),
+              kst: newYorkToKst(date, official.nyTime),
+            });
+        continue;
+      }
       const key = `${releaseId}:${from}:${to}`;
       const dates = await this.releasesCache.get(key, async () => {
         const body = await this.call('release/dates', {

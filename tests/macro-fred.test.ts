@@ -237,7 +237,9 @@ describe('FRED 발표 일정', () => {
       if (id === 50) return reply(dates(50, ['2026-11-06', '2026-12-04']));
       return reply(dates(id, []));
     });
-    const releases = await adapter(transport).upcomingReleases('2026-10-22', '2026-12-05');
+    const releases = (await adapter(transport).upcomingReleases('2026-10-22', '2026-12-05')).filter(
+      (release) => release.releaseId !== 101,
+    );
     expect(releases).toEqual([
       {
         releaseId: 50,
@@ -251,7 +253,8 @@ describe('FRED 발표 일정', () => {
         indicatorIds: ['us-unemployment', 'us-nonfarm-payrolls'],
       },
     ]);
-    expect(transport).toHaveBeenCalledTimes(5);
+    // Release 101 (FOMC) follows the Fed's calendar, so FRED is not asked for its dates.
+    expect(transport).toHaveBeenCalledTimes(4);
     const url = calledUrl(transport);
     expect(url.pathname).toBe('/fred/release/dates');
     expect(url.searchParams.get('include_release_dates_with_no_data')).toBe('true');
@@ -260,7 +263,30 @@ describe('FRED 발표 일정', () => {
     const ids = calls(transport).map((call) =>
       new URL(String(call[0])).searchParams.get('release_id'),
     );
-    expect([...ids].sort()).toEqual(['10', '101', '50', '53', '54']);
+    expect([...ids].sort()).toEqual(['10', '50', '53', '54']);
+  });
+
+  it('FOMC는 FRED 일별 날짜 대신 연준 공식 회의 일정(성명일 14:00 미 동부)을 쓴다', async () => {
+    const transport = vi.fn(async (input: string) =>
+      reply(dates(Number(new URL(input).searchParams.get('release_id')), ['2026-10-23'])),
+    );
+    const releases = (await adapter(transport).upcomingReleases('2026-10-22', '2026-12-10')).filter(
+      (release) => release.releaseId === 101,
+    );
+    expect(releases).toEqual([
+      {
+        releaseId: 101,
+        date: '2026-10-28',
+        indicatorIds: ['us-fed-funds-upper', 'us-fed-funds-lower'],
+        kst: { date: '2026-10-29', time: '03:00' }, // EDT
+      },
+      {
+        releaseId: 101,
+        date: '2026-12-09',
+        indicatorIds: ['us-fed-funds-upper', 'us-fed-funds-lower'],
+        kst: { date: '2026-12-10', time: '04:00' }, // EST
+      },
+    ]);
   });
 
   it('120일 초과·역순·형식 오류 구간은 거부한다', async () => {
