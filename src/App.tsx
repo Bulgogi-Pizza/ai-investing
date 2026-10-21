@@ -23,6 +23,7 @@ import CalendarPage from './features/calendar/CalendarPage';
 import AnalysisPage from './features/analysis/AnalysisPage';
 import LoginScreen, { type SessionUser } from './features/LoginScreen';
 import MarketStrip from './features/MarketStrip';
+import BudgetBanner from './features/BudgetBanner';
 import { DataState, LoadingState } from './components/DataState';
 import { ApiError, AUTH_REQUIRED_EVENT, useApiResource } from './lib/api';
 
@@ -338,6 +339,7 @@ function Workspace({ user, onLoggedOut }: { user: SessionUser; onLoggedOut: () =
           </div>
         </header>
         <main>
+          <BudgetBanner />
           <MarketStrip />
           {sessionError && (
             <div role="alert" className="form-error">

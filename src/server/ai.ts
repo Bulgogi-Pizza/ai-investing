@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { Firestore, Timestamp } from '@google-cloud/firestore';
 import { GoogleAuth } from 'google-auth-library';
+import { aiBlockedByBudget } from './budget-guard.js';
 import type { createRecommendation } from './recommendations.js';
 
 type FullRules = Awaited<ReturnType<typeof createRecommendation>>;
@@ -32,6 +33,8 @@ export type AiResult =
       type: 'llm';
       provider: 'vertex';
       model?: string;
+      /** Set when the monthly budget stop (not a provider problem) is why there is no AI text. */
+      code?: 'BUDGET_STOPPED';
       message: string;
     };
 export interface AiQuota {
@@ -89,11 +92,12 @@ export class FirestoreAiQuota implements AiQuota {
   }
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');
-const unavailable = (model?: string): AiResult => ({
+const unavailable = (model?: string, code?: 'BUDGET_STOPPED'): AiResult => ({
   status: 'unavailable',
   type: 'llm',
   provider: 'vertex',
   ...(model ? { model } : {}),
+  ...(code ? { code } : {}),
   message: 'AI 해설을 현재 생성할 수 없습니다. 아래 규칙 분석과 원본 근거를 확인하세요.',
 });
 function minimizedText(value: string, limit: number) {
@@ -287,6 +291,9 @@ export class VertexAiEnricher {
   }
   async enrich<T extends AiRules>(rules: T, userId: string): Promise<T & { ai: AiResult }> {
     let ai: AiResult;
+    // Monthly budget stop: before the cache, the quota and any call (fails closed).
+    if (await aiBlockedByBudget())
+      return { ...rules, ai: unavailable(this.config.model, 'BUDGET_STOPPED') };
     try {
       const input = minimizeAiEvidence(rules);
       const key = hash(

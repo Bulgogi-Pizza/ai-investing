@@ -34,6 +34,16 @@ import {
   validAppOrigin,
   type NotificationRepository,
 } from './notify.js';
+import {
+  BudgetGuard,
+  BudgetService,
+  MemoryBudgetRepository,
+  createBudgetRouter,
+  createBudgetWebhookRouter,
+  type BudgetPushConfig,
+  type BudgetRepository,
+  type PushVerifier,
+} from './budget-guard.js';
 import { createPaperRouter, MemoryPaperRepository, type PaperRepository } from './paper.js';
 import { createLiveRouter } from './live.js';
 import { MemoryTradingStore, type TradingStatusStore } from './trading/stores.js';
@@ -97,6 +107,11 @@ export type AppOptions = {
   algorithmAiEnabled?: boolean;
   notificationRepository?: NotificationRepository;
   notifications?: NotificationService;
+  /** Monthly budget stop state (opsControl/budget) and its Pub/Sub push identity; no config = webhook off (404). */
+  budgetRepository?: BudgetRepository;
+  budgetGuard?: BudgetGuard;
+  budgetPush?: BudgetPushConfig;
+  budgetVerifier?: PushVerifier;
   ai?: ReturnType<typeof aiFromEnvironment>;
 };
 const publicUser = (user: User) => ({ id: user.id, email: user.email, role: user.role });
@@ -175,6 +190,23 @@ export function createApp(options: AppOptions = {}) {
   // Cloud Run has one trusted ingress proxy; never trust arbitrary forwarded chains.
   if (production) app.set('trust proxy', 1);
   app.use(helmet());
+  // Budget alert webhook: authenticated by its Google OIDC token, not by session, so it sits before the
+  // origin and session middlewares. It has its own rate limit and body limit (docs/operations/budget.md).
+  const budgetRepository = options.budgetRepository ?? new MemoryBudgetRepository();
+  const budget = new BudgetService({
+    repository: budgetRepository,
+    algorithms: algorithmRepository,
+    notify: notifications ? (event) => notifications.notify(event) : undefined,
+    guard: options.budgetGuard,
+    warningRatio: options.budgetPush?.warningRatio,
+  });
+  app.use(
+    createBudgetWebhookRouter({
+      config: options.budgetPush,
+      verifier: options.budgetVerifier,
+      service: budget,
+    }),
+  );
   app.use(express.json({ limit: '32kb' }));
   app.use(cookieParser());
   app.use('/api', (_req, res, next) => {
@@ -571,6 +603,14 @@ export function createApp(options: AppOptions = {}) {
       notify: notifications ? (event) => notifications.notify(event) : undefined,
       liveEnabled: options.algorithmLiveEnabled,
       aiEnabled: options.algorithmAiEnabled,
+    }),
+  );
+  app.use(
+    createBudgetRouter({
+      service: budget,
+      algorithms: algorithmRepository,
+      ownerUserId: options.ownerUserId,
+      enabled: options.budgetPush !== undefined,
     }),
   );
   app.use('/api', (_req, res) => failure(res, 404, 'NOT_FOUND', '요청한 API를 찾을 수 없습니다.'));

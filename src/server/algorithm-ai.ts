@@ -1,5 +1,6 @@
 import { Firestore, Timestamp } from '@google-cloud/firestore';
 import { GoogleAuth } from 'google-auth-library';
+import { aiBlockedByBudget } from './budget-guard.js';
 import type { Market, SignalId } from '../lib/algo';
 
 /**
@@ -50,6 +51,7 @@ export type AiDecision = {
 export type AlgorithmAiFailure =
   | 'INPUT_INVALID'
   | 'QUOTA_EXCEEDED'
+  | 'BUDGET_STOPPED'
   | 'QUOTA_UNAVAILABLE'
   | 'AUTH_UNAVAILABLE'
   | 'PROVIDER_ERROR'
@@ -274,6 +276,8 @@ export class VertexAlgorithmDecider implements AlgorithmDecider {
     const signal = AbortSignal.timeout(TIMEOUT_MS);
     const operation = (async (): Promise<AlgorithmAiResult> => {
       const day = new Date(this.clock() + 9 * 3_600_000).toISOString().slice(0, 10);
+      // Monthly budget stop: before the quota is charged and before any call.
+      if (await aiBlockedByBudget()) return { status: 'unavailable', code: 'BUDGET_STOPPED' };
       let allowed: boolean;
       try {
         allowed = await this.quota.consume(ALGO_AI_FEATURE, day, ALGO_AI_DAILY_LIMIT);

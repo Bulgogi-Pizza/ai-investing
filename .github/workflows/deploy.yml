@@ -70,7 +70,7 @@ jobs:
             --port=8080 --cpu=1 --memory=512Mi --min-instances=0 --max-instances=2 \
             --concurrency=40 --timeout=30 --allow-unauthenticated \
             --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
-            --update-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION" \
+            --update-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION,BUDGET_PUSH_AUDIENCE=$APP_ORIGIN,BUDGET_PUSH_SERVICE_ACCOUNT=investing-budget-push@$PROJECT.iam.gserviceaccount.com" \
             --quiet
           echo "deployed=true" >> "$GITHUB_OUTPUT"
       - name: Verify deployment health

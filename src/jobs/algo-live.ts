@@ -83,6 +83,7 @@ import {
   type JobLogger,
   type JobOutcome,
 } from './runner.js';
+import { budgetJobGate } from './budget-gate.js';
 
 /**
  * Live (real-money) algorithm run, one invocation per scheduler slot (stage 7f).
@@ -813,6 +814,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const config = jobConfiguration(env);
     const db = new Firestore({ projectId: config.project });
     try {
+      const skipped = await budgetJobGate(db, log, { failClosed: true });
+      if (skipped) return skipped;
       const toss = new TossClient(config.toss, new FirestoreTokenCache(config.toss.clientId, db));
       const transport = new TossOrderTransport(toss);
       const origin = env.APP_ORIGIN ?? '';

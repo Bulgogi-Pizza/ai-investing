@@ -62,7 +62,7 @@ variable "budget_currency" {
 }
 
 locals {
-  services = toset(["aiplatform.googleapis.com", "cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com", "cloudscheduler.googleapis.com"])
+  services = toset(["aiplatform.googleapis.com", "cloudbilling.googleapis.com", "cloudresourcemanager.googleapis.com", "run.googleapis.com", "artifactregistry.googleapis.com", "firestore.googleapis.com", "iam.googleapis.com", "iamcredentials.googleapis.com", "sts.googleapis.com", "secretmanager.googleapis.com", "billingbudgets.googleapis.com", "cloudscheduler.googleapis.com", "pubsub.googleapis.com"])
 }
 resource "google_project_service" "api" {
   for_each           = local.services
@@ -160,6 +160,14 @@ resource "google_billing_budget" "app" {
   }
   threshold_rules { threshold_percent = 0.9 }
   threshold_rules { threshold_percent = 1.0 }
+  # App-level stop (budget.tf): every update goes to Pub/Sub; the default e-mail recipients stay on.
+  dynamic "all_updates_rule" {
+    for_each = local.budget_push_enabled ? [1] : []
+    content {
+      pubsub_topic   = google_pubsub_topic.budget_alerts.id
+      schema_version = "1.0"
+    }
+  }
   depends_on = [google_project_service.api]
 }
 data "google_project" "current" {}

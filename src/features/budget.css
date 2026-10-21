@@ -1,0 +1,45 @@
+/* Monthly budget banner: sits above the page content for the owner. */
+.budget-banner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+  margin: 0 0 14px;
+  padding: 14px 18px;
+  border: 1px solid #e7b4bb;
+  border-radius: 10px;
+  background: #fdeff1;
+  color: #9a2b3d;
+}
+.budget-banner-warn {
+  border-color: #ecd9a6;
+  background: #fff8e6;
+  color: #7a5a10;
+}
+.budget-banner-text {
+  display: flex;
+  flex: 1 1 260px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.budget-banner-text strong {
+  font-size: 14px;
+}
+.budget-banner-text small {
+  font-size: 12px;
+  line-height: 1.6;
+}
+.budget-banner .button {
+  min-height: 40px;
+  font-size: 13px;
+  padding: 9px 16px;
+}
+.budget-release {
+  border-color: #c23a4e;
+  color: #9a2b3d;
+  background: #fff;
+}
+.budget-message {
+  margin: 0 0 14px;
+}

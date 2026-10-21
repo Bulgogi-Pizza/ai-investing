@@ -332,7 +332,8 @@ export type ChangeField =
   | 'costs'
   | 'safeguards'
   | 'liveStop'
-  | 'liveOrder';
+  | 'liveOrder'
+  | 'budgetStop';
 export type Change = {
   field: ChangeField;
   from?: string | null;
@@ -349,7 +350,9 @@ export type AlgorithmEventKind =
   | 'costs-updated'
   | 'safeguards-updated'
   | 'live-stop-released'
-  | 'live-order-resolved';
+  | 'live-order-resolved'
+  | 'budget-stop'
+  | 'budget-stop-released';
 export type AlgorithmEvent = {
   id: string;
   at: string;

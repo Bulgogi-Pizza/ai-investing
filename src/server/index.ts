@@ -24,6 +24,13 @@ import {
   notifierFromEnvironment,
   validAppOrigin,
 } from './notify.js';
+import {
+  BudgetGuard,
+  FirestoreBudgetRepository,
+  MemoryBudgetRepository,
+  budgetPushConfigFromEnvironment,
+  installBudgetGuard,
+} from './budget-guard.js';
 import { FirestoreStore, MemoryStore } from './store.js';
 import { hashPassword, normalizeEmail, validCredentials } from './auth.js';
 const production = process.env.NODE_ENV === 'production';
@@ -62,7 +69,16 @@ const paperRepository = production ? new FirestorePaperRepository() : new Memory
 // Live orders, stops and job status. The screen only reads them (and releases an algorithm stop); the
 // live job is the only writer of orders.
 const tradingStore = production ? new FirestoreTradingStore() : new MemoryTradingStore();
+// Monthly budget stop: the same state document feeds the webhook, the owner screen and the AI gate.
+const budgetRepository = production
+  ? new FirestoreBudgetRepository()
+  : new MemoryBudgetRepository();
+const budgetGuard = new BudgetGuard(budgetRepository);
+installBudgetGuard(budgetGuard);
 const app = createApp({
+  budgetRepository,
+  budgetGuard,
+  budgetPush: budgetPushConfigFromEnvironment(),
   store,
   production,
   ai: aiFromEnvironment(production),

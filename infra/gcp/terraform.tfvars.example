@@ -17,3 +17,6 @@ morning_schedule_enabled = false
 morning_ai_enabled = false
 # REAL ORDERS. Keep false until the order access check passed, the user checked the WTS Open API settings and enabled live on one algorithm (docs/operations/jobs.md)
 live_schedules_enabled = false
+# App-level budget stop (docs/operations/budget.md): the https origin of the app, exactly the APP_ORIGIN value (no path or trailing slash).
+# Needs billing_account above. Empty keeps the Pub/Sub push out.
+# service_url = "https://YOUR_APP_ORIGIN"
