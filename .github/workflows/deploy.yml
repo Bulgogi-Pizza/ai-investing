@@ -24,9 +24,14 @@ jobs:
       CLOUDSDK_BILLING_QUOTA_PROJECT: ${{ vars.GCP_PROJECT_ID }}
       REGION: asia-northeast3
       APP_ORIGIN: ${{ vars.APP_ORIGIN }}
-      AI_PROVIDER: ${{ vars.AI_PROVIDER }}
-      AI_MODEL: ${{ vars.AI_MODEL }}
-      AI_LOCATION: ${{ vars.AI_LOCATION }}
+      # AI defaults (user decision 2026-10-21): Claude Sonnet 5.5 on Vertex AI, region global. A
+      # repository variable still overrides them (AI_PROVIDER=vertex with a Gemini AI_MODEL selects
+      # Gemini). A model id of the wrong family for the provider (for example a stale Gemini
+      # AI_MODEL with the default provider) is a configuration error: AI stays off instead of
+      # calling the wrong model. Delete or update the old AI_PROVIDER/AI_MODEL variables.
+      AI_PROVIDER: ${{ vars.AI_PROVIDER || 'vertex-claude' }}
+      AI_MODEL: ${{ vars.AI_MODEL || 'claude-sonnet-5-5' }}
+      AI_LOCATION: ${{ vars.AI_LOCATION || 'global' }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -114,10 +119,10 @@ jobs:
             --member="serviceAccount:investing-scheduler@$PROJECT.iam.gserviceaccount.com" \
             --role=roles/run.invoker --quiet >/dev/null
       # Morning calendar job (stage 6b): same image digest, service account and VPC as the snapshot
-      # job. It needs no Toss secrets. FRED/ECOS/Telegram secrets are attached only when the service
+      # job. FRED/ECOS/Telegram secrets are attached only when the service
       # is connected to them with numeric versions; a missing one only limits what the job can do
-      # (recorded as a skipped step), it never blocks the deployment. The AI step stays off:
-      # MORNING_AI_ENABLED is false here until the user approves the monthly AI cost.
+      # (recorded as a skipped step), it never blocks the deployment. The AI step is on (Claude Sonnet 5.5,
+      # approved 2026-10-21); Toss secrets are attached too so new events get measured market reactions.
       - name: Deploy morning calendar job
         if: steps.deploy.outputs.deployed == 'true'
         run: |
@@ -137,10 +142,25 @@ jobs:
               *) echo "::warning::$NAME is not connected to the service with a numeric version; the morning job runs without it." ;;
             esac
           done
-          ENV_VARS="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,MORNING_AI_ENABLED=false"
-          if [ -n "$AI_PROVIDER" ] && [ -n "$AI_MODEL" ]; then
-            ENV_VARS="$ENV_VARS,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL"
-            if [ -n "$AI_LOCATION" ]; then ENV_VARS="$ENV_VARS,AI_LOCATION=$AI_LOCATION"; fi
+          # The user approved Claude Sonnet 5.5 (2026-10-21): the AI step is on. It also needs the
+          # investing-jobs service account to hold roles/aiplatform.user (terraform morning_ai_enabled)
+          # and Vertex quota for the model; without either, the step records AI_AUTH_UNAVAILABLE /
+          # AI_QUOTA_PROVIDER and the rest of the morning run is unaffected.
+          ENV_VARS="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,MORNING_AI_ENABLED=true,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION"
+          # Calendar enrichment measures the market reaction with Toss (fixed egress IP): attach the Toss
+          # secrets only when the service has all four as numeric versions; without them that part is
+          # skipped (TOSS_NOT_CONFIGURED) and everything else still runs.
+          TOSS=$(gcloud run services describe ai-investing --region="$REGION" --project="$PROJECT" --format=json | jq -r '
+            [.spec.template.spec.containers[0].env[]?
+              | select(.name | IN("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TOSS_ACCOUNT_SEQ", "TOSS_OWNER_USER_ID"))
+              | select(.valueFrom.secretKeyRef != null)
+              | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"
+            ] | sort | join(",")')
+          TOSS_VALID=$(printf '%s' "$TOSS" | tr ',' '\n' | grep -cE '^TOSS_(CLIENT_ID|CLIENT_SECRET|ACCOUNT_SEQ|OWNER_USER_ID)=investing-toss-[a-z-]+:[0-9]+$' || true)
+          if [ "$TOSS_VALID" = "4" ]; then
+            if [ -n "$SECRETS" ]; then SECRETS="$SECRETS,$TOSS"; else SECRETS="$TOSS"; fi
+          else
+            echo "::warning::Toss secrets are not connected to the service with numeric versions; the morning job skips measured market reactions."
           fi
           SECRET_ARGS=()
           if [ -n "$SECRETS" ]; then SECRET_ARGS=(--set-secrets="$SECRETS"); fi
@@ -161,7 +181,7 @@ jobs:
       # Paper (virtual) algorithm run (docs/operations/jobs.md). Same image digest, identity, VPC and
       # Toss secret versions as the snapshot job. Telegram secrets are attached only when the service
       # already has them as numeric versions; without them notifications are recorded as disabled.
-      # AI stays off (cost approval pending): ALGO_AI_ENABLED is set to false explicitly. The market is
+      # AI-type algorithms stay off until separately requested: ALGO_AI_ENABLED is set to false explicitly. The market is
       # chosen per execution by the Scheduler (ALGO_MARKET override), and the job places no orders.
       - name: Deploy paper algorithm job
         if: steps.deploy.outputs.deployed == 'true'
@@ -196,7 +216,7 @@ jobs:
             --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
             --service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com" \
             --command=node --args=--import,tsx,src/jobs/algo-paper.ts \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,ALGO_AI_ENABLED=false" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,ALGO_AI_ENABLED=false,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION" \
             --set-secrets="$SECRETS" \
             --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
             --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=900s \
@@ -210,8 +230,8 @@ jobs:
       # VPC and Toss secret versions as the paper job, plus the Telegram secrets (the job refuses to
       # run without working alerts). LIVE_TRADING_ENABLED is set on THIS job only, from the repository
       # variable of the same name (absent or not "true" => "false"): it is the deployment kill switch
-      # the job checks before doing anything. Changing the variable takes effect with the next deploy. AI stays off (cost approval
-      # pending): ALGO_AI_ENABLED=false. The Cloud Scheduler triggers (infra/gcp/jobs-live.tf) are
+      # the job checks before doing anything. Changing the variable takes effect with the next deploy.
+      # AI-type algorithms stay off until separately requested: ALGO_AI_ENABLED=false. The Cloud Scheduler triggers (infra/gcp/jobs-live.tf) are
       # created paused; deploying this job does not start anything.
       - name: Deploy live algorithm job
         if: steps.deploy.outputs.deployed == 'true'
@@ -250,7 +270,7 @@ jobs:
             --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
             --service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com" \
             --command=node --args=--import,tsx,src/jobs/algo-live.ts \
-            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,ALGO_AI_ENABLED=false,LIVE_TRADING_ENABLED=$LIVE_FLAG" \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,APP_ORIGIN=$APP_ORIGIN,ALGO_AI_ENABLED=false,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION,LIVE_TRADING_ENABLED=$LIVE_FLAG" \
             --set-secrets="$SECRETS" \
             --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
             --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=900s \
@@ -287,4 +307,44 @@ jobs:
             --set-secrets="$SECRETS" \
             --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
             --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=300s \
+            --cpu=1 --memory=512Mi --quiet
+      # Calendar enrichment (manual): Korean titles, outcome/impact/explainer by Claude Sonnet 5.5 and
+      # measured market reactions from Toss for every registered event. Same image digest, identity,
+      # VPC (fixed egress IP) and Toss secret versions as the jobs above; FRED/ECOS secrets are attached
+      # when the service has them (rate-decision facts), without them those facts are simply absent.
+      # No schedule and no invoker grant: the operator runs it by hand (gcloud run jobs execute), and
+      # the morning job enriches new events every day. It places no orders.
+      - name: Deploy calendar enrichment job
+        if: steps.deploy.outputs.deployed == 'true'
+        run: |
+          set -euo pipefail
+          JOB=investing-calendar-enrich
+          SERVICE_JSON=$(gcloud run services describe ai-investing --region="$REGION" --project="$PROJECT" --format=json)
+          SECRETS=$(printf '%s' "$SERVICE_JSON" | jq -r '
+            [.spec.template.spec.containers[0].env[]?
+              | select(.name | IN("TOSS_CLIENT_ID", "TOSS_CLIENT_SECRET", "TOSS_ACCOUNT_SEQ", "TOSS_OWNER_USER_ID"))
+              | select(.valueFrom.secretKeyRef != null)
+              | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"
+            ] | sort | join(",")')
+          VALID=$(printf '%s' "$SECRETS" | tr ',' '\n' | grep -cE '^TOSS_(CLIENT_ID|CLIENT_SECRET|ACCOUNT_SEQ|OWNER_USER_ID)=investing-toss-[a-z-]+:[0-9]+$' || true)
+          if [ "$VALID" != "4" ]; then
+            echo "::warning::Toss secrets are not connected to the service with numeric versions yet; skipping calendar enrichment job deployment."
+            exit 0
+          fi
+          MACRO=$(printf '%s' "$SERVICE_JSON" | jq -r '
+            [.spec.template.spec.containers[0].env[]?
+              | select(.name | IN("FRED_API_KEY", "ECOS_API_KEY"))
+              | select(.valueFrom.secretKeyRef != null)
+              | "\(.name)=\(.valueFrom.secretKeyRef.name):\(.valueFrom.secretKeyRef.key)"
+              | select(test("^(FRED_API_KEY=investing-fred-api-key|ECOS_API_KEY=investing-ecos-api-key):[0-9]+$"))
+            ] | sort | join(",")')
+          if [ -n "$MACRO" ]; then SECRETS="$SECRETS,$MACRO"; else echo "::warning::FRED/ECOS secrets are not connected to the service with numeric versions; rate-decision facts are skipped."; fi
+          gcloud run jobs deploy "$JOB" \
+            --project="$PROJECT" --region="$REGION" --image="$DEPLOY_IMAGE" \
+            --service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com" \
+            --command=node --args=--import,tsx,src/jobs/calendar-enrich.ts \
+            --set-env-vars="NODE_ENV=production,GOOGLE_CLOUD_PROJECT=$PROJECT,CALENDAR_AI_ENABLED=true,AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION" \
+            --set-secrets="$SECRETS" \
+            --network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic \
+            --max-retries=0 --tasks=1 --parallelism=1 --task-timeout=1800s \
             --cpu=1 --memory=512Mi --quiet

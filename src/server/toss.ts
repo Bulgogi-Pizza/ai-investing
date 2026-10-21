@@ -1049,6 +1049,26 @@ export class TossClient {
   creditTrades(symbol: string, options: { count?: number; until?: string } = {}) {
     return this.tradingSeries('credit-trades', symbol, options, normalizeCreditTradeRecord);
   }
+  /**
+   * GET /api/v1/exchange-rate with the optional `dateTime` query (official spec v1.2.24: "조회할
+   * 환율 시각", an ISO-8601 date-time; omitted = the current rate). Returns the USD/KRW mid rate
+   * (매매기준율) that was in effect at that instant together with its validity window. Not cached.
+   */
+  async exchangeRateAt(dateTime: string) {
+    if (!validBefore(dateTime))
+      throw new ProviderError(400, 'INVALID_MARKET_QUERY', '환율 조회 시각을 확인하세요.');
+    const rate = record(
+      await this.get(
+        `/api/v1/exchange-rate?${new URLSearchParams({ baseCurrency: 'USD', quoteCurrency: 'KRW', dateTime })}`,
+      ),
+    );
+    if (rate.baseCurrency !== 'USD' || rate.quoteCurrency !== 'KRW') throw invalid();
+    return {
+      midRate: decimal(rate.midRate),
+      validFrom: timestamp(rate.validFrom),
+      validUntil: timestamp(rate.validUntil),
+    };
+  }
   async marketIndicators() {
     const query = new URLSearchParams({
       symbols: MARKET_INDICATOR_CATALOG.map((item) => item.symbol).join(','),

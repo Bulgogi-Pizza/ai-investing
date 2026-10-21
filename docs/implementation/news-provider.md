@@ -6,6 +6,10 @@
 
 RSS의 제목·원문 링크·게시시각만 원천 데이터로 사용한다. 기사 본문·첨부·RSS description·guid·channel 본문을 저장하거나 재배포하지 않는다. 항목에서 파생된 KST 게시일시, 출처, 규칙 태그와 분류 한계 안내만 경제 일정 레코드에 함께 저장한다. 원문 기사는 방문·크롤링하지 않는다. 두 기관의 최근 보도자료이므로 일반 언론 뉴스, 전체 금융 시장 또는 모든 국가를 포괄하지 않는다. 일일 스냅샷 작업(4단계, [jobs.md](../operations/jobs.md))이 KR 마감 후 실행마다 같은 수집을 호출한다. 운영 적용 전에는 자동 수집이 없다.
 
+## 제목 정리와 한국어 보강
+
+수집 단계에서 제목을 결정적으로 정리한다(`src/server/calendar-clean.ts`): HTML 엔터티(이중 인코딩 포함)를 풀고 제목 앞 `[보도자료]`·`[보도참고자료]` 태그를 `releaseType`으로 분리한다. 정리로 제목이 달라지면 제공자의 정확한 원문 제목을 `titleOriginal`에 둔다. 한국어 제목·결과·영향·시장 반응은 별도의 보강 단계가 붙인다([캘린더 — 이벤트 보강](calendar.md#이벤트-보강-한국어-결과영향시장-반응)). RSS가 같은 항목을 다시 주어도 보강 내용은 지워지지 않는다(`calendar-merge.ts`).
+
 ## API 및 운영
 
 `src/server/news.ts`의 `syncOfficialNews(repository,{sourceIds,transport?,now?,cache?,authorId?})`는 고정 출처ID만 선택한다.

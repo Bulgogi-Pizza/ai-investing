@@ -18,6 +18,8 @@
     "test:ops": "python3 -m unittest discover -s tests -p 'test_*.py'"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.137.0",
+    "@anthropic-ai/vertex-sdk": "^0.22.0",
     "@google-cloud/firestore": "^8.7.1",
     "cookie-parser": "^1.4.7",
     "express": "^5.1.0",

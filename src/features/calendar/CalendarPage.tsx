@@ -27,6 +27,7 @@ import {
 } from '../../lib/market';
 import { DataState, LoadingState } from '../../components/DataState';
 import { SourceLink } from '../../components/SourceLink';
+import { EventEnrichmentDetail } from './EventEnrichmentDetail';
 import { formatKst, kstToday } from '../../lib/kst';
 import { ApiError, issueOf, signalAuthRequired, type DataIssue } from '../../lib/api';
 import './calendar-morning.css';
@@ -788,7 +789,12 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
               <div className="detail-title">
                 <span className="country-circle">{flag(selectedEvent.country)}</span>
                 <div>
-                  <h3>{selectedEvent.title}</h3>
+                  <h3>
+                    {selectedEvent.releaseType && (
+                      <span className="release-type">{selectedEvent.releaseType}</span>
+                    )}
+                    {selectedEvent.title}
+                  </h3>
                   <p>
                     {selectedEvent.date.replaceAll('-', '. ')}.{' · '}
                     {selectedEvent.time ? `${selectedEvent.time} KST` : UNKNOWN_TIME}
@@ -811,11 +817,14 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                           : '원문 제목 보기'}
                       </button>
                       <small>
-                        AI 번역
-                        {selectedEvent.translation ? ` · ${selectedEvent.translation.model}` : ''}
+                        {selectedEvent.translation
+                          ? `AI 번역 · ${selectedEvent.translation.model}`
+                          : '공식 원문 제목(정리 전)'}
                       </small>
                       {shownOriginals.includes(selectedEvent.id) && (
-                        <q lang="en">{selectedEvent.titleOriginal}</q>
+                        <q lang={selectedEvent.translation ? 'en' : 'ko'}>
+                          {selectedEvent.titleOriginal}
+                        </q>
                       )}
                     </div>
                   )}
@@ -876,6 +885,7 @@ export default function CalendarPage({ search, isAdmin }: { search: string; isAd
                   ))}
                 </ul>
               )}
+              <EventEnrichmentDetail event={selectedEvent} />
               {selectedEvent.aiSummary?.text && (
                 <div className="ai-summary" aria-label="AI 요약">
                   <strong>

@@ -52,7 +52,7 @@ Cloud Scheduler(시간만 알림) ──POST jobs:run──▶ Cloud Run Job inv
 | `investing-deploy` SA    | 기존 `run.admin`으로 job 생성·갱신, 새로 `investing-jobs`에 대한 `iam.serviceAccountUser`(job이 그 계정으로 돌게 함)                                                                                                                                        |
 
 - 프로젝트 단위 `secretAccessor`는 주지 않는다. 스냅샷 작업에는 DART·FRED·ECOS·텔레그램 비밀이 필요 없다. 아침 작업(6b)의 FRED·ECOS·텔레그램 비밀 4개는 `jobs-morning.tf`가 같은 서비스 계정에 비밀 단위로 추가한다(같은 계정이므로 스냅샷 job에도 접근 권한이 생기지만 그 job은 연결하지 않으며, 계정 분리는 필요해지면 한다).
-- Firestore는 컬렉션 단위 IAM이 없어 `datastore.user`가 모든 컬렉션(계정·세션 포함)을 읽고 쓸 수 있다. 서비스(`investing-runtime`)와 같은 수준이며, 작업 코드는 `marketSnapshots`·`snapshotRuns`·`snapshotTargets`·`economicEvents`·`providerTokens`(스냅샷)와 `morningRuns`·`economicEvents`·`notifications`·`aiUsage`(아침 작업)만 건드린다. 이 잔여 위험은 인지하고 있다.
+- Firestore는 컬렉션 단위 IAM이 없어 `datastore.user`가 모든 컬렉션(계정·세션 포함)을 읽고 쓸 수 있다. 서비스(`investing-runtime`)와 같은 수준이며, 작업 코드는 `marketSnapshots`·`snapshotRuns`·`snapshotTargets`·`economicEvents`·`providerTokens`(스냅샷)와 `morningRuns`·`economicEvents`·`notifications`·`aiUsage`·`providerTokens`(아침 작업)와 `calendarEnrichRuns`(캘린더 보강 작업)만 건드린다. 이 잔여 위험은 인지하고 있다.
 - invoker 권한을 Terraform이 아니라 워크플로가 부여하는 이유: job이 Terraform 리소스가 아니라서 job 단위 IAM 바인딩을 Terraform에 쓸 수 없고, 프로젝트 단위 `run.invoker`는 일회성 `investing-toss-setup` 같은 다른 job까지 실행하게 해서 더 넓다.
 
 ## 배포
@@ -93,18 +93,18 @@ gcloud run jobs execute investing-daily-snapshot --region=asia-northeast3 \
 
 ## 아침 캘린더 작업 (6b)
 
-`investing-morning-calendar`: 매일 07:00 KST. 본문 `src/jobs/morning-calendar.ts`, 동작·데이터·화면은 [경제 캘린더 — 아침 갱신](../implementation/calendar.md#아침-갱신-6b), AI 계약은 [ai-provider.md](../implementation/ai-provider.md#아침-작업-계약-6b)에 있다. 상태: **구현·합성 테스트 완료, 운영 적용 전, AI 단계는 꺼짐**.
+`investing-morning-calendar`: 매일 07:00 KST. 본문 `src/jobs/morning-calendar.ts`, 동작·데이터·화면은 [경제 캘린더 — 아침 갱신](../implementation/calendar.md#아침-갱신-6b), AI 계약은 [ai-provider.md](../implementation/ai-provider.md#아침-작업-계약-6b)에 있다. 상태: 운영 배포·07:00 자동 실행 중. AI 단계는 Claude Sonnet 5.5 사용 승인(2026-10-21)에 따라 `MORNING_AI_ENABLED=true`로 배포되며, Vertex 권한·할당량이 없으면 AI 단계만 코드로 실패를 기록한다([AI 켜기](#ai-켜기-claude-sonnet-55)). 새 이벤트의 한국어 보강(`enrich` 단계)도 이 작업이 매일 한다.
 
-| 항목            | 내용                                                                                                                                                                                              |
-| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Scheduler       | `investing-morning-calendar`, 크론 `0 7 * * *`(Asia/Seoul), 호출 실패(5xx)만 2회 재시도. 기본 **일시 정지**(`morning_schedule_enabled = false`, 스냅샷 트리거와 따로 켠다)                        |
-| 실행 계정       | 기존 `investing-jobs`(스냅샷과 같은 계정, 같은 이미지 digest, 같은 VPC·고정 출구 IP)                                                                                                              |
-| 비밀(비밀 단위) | `investing-fred-api-key`, `investing-ecos-api-key`, `investing-telegram-bot-token`, `investing-telegram-chat-id`의 `secretAccessor`. 토스·DART·SEC 비밀은 이 작업에 없다                          |
-| Vertex 권한     | `roles/aiplatform.user`는 Terraform 변수 `morning_ai_enabled = true`일 때만 `investing-jobs`에 부여한다(기본 `false`)                                                                             |
-| 환경변수        | `NODE_ENV=production`, `GOOGLE_CLOUD_PROJECT`, `APP_ORIGIN`(알림의 화면 링크), `MORNING_AI_ENABLED=false`, `AI_PROVIDER`·`AI_MODEL`·`AI_LOCATION`(워크플로 변수가 있을 때만)                      |
-| 종료 코드       | 스냅샷과 같다(`0` 정상, `1` 실패, `2` 설정 오류, `3` 일부 단계 실패). 키가 없거나 AI가 꺼진 것, AI 한도 소진, 아직 올라오지 않은 값은 실패가 아니라 단계 기록의 코드다                            |
-| 실행 기록       | Firestore `morningRuns/{KST 날짜}`. 같은 날 `complete`면 다음 실행은 건너뛴다(`RUN_ALREADY_COMPLETE`). `partial`·`failed`인 날은 다음 실행이 다시 시도하고, 이미 보낸 브리핑은 다시 보내지 않는다 |
-| 실패 알림       | 실행이 `failed`로 끝나면 텔레그램 `job-failure` 알림을 남긴다(전송 실패는 화면 알림 목록에 기록)                                                                                                  |
+| 항목            | 내용                                                                                                                                                                                                                                                                                                                                                                                        |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Scheduler       | `investing-morning-calendar`, 크론 `0 7 * * *`(Asia/Seoul), 호출 실패(5xx)만 2회 재시도. 기본 **일시 정지**(`morning_schedule_enabled = false`, 스냅샷 트리거와 따로 켠다)                                                                                                                                                                                                                  |
+| 실행 계정       | 기존 `investing-jobs`(스냅샷과 같은 계정, 같은 이미지 digest, 같은 VPC·고정 출구 IP)                                                                                                                                                                                                                                                                                                        |
+| 비밀(비밀 단위) | `investing-fred-api-key`, `investing-ecos-api-key`, `investing-telegram-bot-token`, `investing-telegram-chat-id`의 `secretAccessor`(Terraform). 배포 워크플로는 서비스에 연결된 숫자 버전의 FRED·ECOS·텔레그램과 **토스 4개**(캘린더 시장 반응용, 같은 `investing-jobs` 계정의 기존 `jobs_toss` 권한)를 붙인다. 토스가 없으면 반응만 `TOSS_NOT_CONFIGURED`로 건너뛴다. DART·SEC 비밀은 없다 |
+| Vertex 권한     | `roles/aiplatform.user`는 Terraform 변수 `morning_ai_enabled`가 `true`일 때만 `investing-jobs`에 부여한다. **변수 기본값은 `false`로 두고 운영자가 tfvars에서 `true`로 켠다**(캘린더 보강 작업도 같은 권한)                                                                                                                                                                                 |
+| 환경변수        | `NODE_ENV=production`, `GOOGLE_CLOUD_PROJECT`, `APP_ORIGIN`(알림의 화면 링크), `MORNING_AI_ENABLED=true`, `AI_PROVIDER`·`AI_MODEL`·`AI_LOCATION`(저장소 변수가 없으면 `vertex-claude`·`claude-sonnet-5-5`·`global`)                                                                                                                                                                         |
+| 종료 코드       | 스냅샷과 같다(`0` 정상, `1` 실패, `2` 설정 오류, `3` 일부 단계 실패). 키가 없거나 AI가 꺼진 것, AI 한도 소진, 아직 올라오지 않은 값은 실패가 아니라 단계 기록의 코드다                                                                                                                                                                                                                      |
+| 실행 기록       | Firestore `morningRuns/{KST 날짜}`. 같은 날 `complete`면 다음 실행은 건너뛴다(`RUN_ALREADY_COMPLETE`). `partial`·`failed`인 날은 다음 실행이 다시 시도하고, 이미 보낸 브리핑은 다시 보내지 않는다                                                                                                                                                                                           |
+| 실패 알림       | 실행이 `failed`로 끝나면 텔레그램 `job-failure` 알림을 남긴다(전송 실패는 화면 알림 목록에 기록)                                                                                                                                                                                                                                                                                            |
 
 **수동 실행**(로컬에서는 불가, Cloud Run Job 한 번 실행에 환경변수만 덮어쓴다):
 
@@ -123,20 +123,43 @@ gcloud run jobs execute investing-morning-calendar --region=asia-northeast3 \
 
 1. 사용자가 FRED·ECOS 키와 텔레그램 봇 토큰·chat ID를 저장하고 서비스에 연결했는지 확인한다([provider-setup.md](provider-setup.md)). 없어도 배포는 깨지지 않으며 해당 단계가 `*_NOT_CONFIGURED`로 건너뛰어진다.
 2. `node scripts/gcp.mjs plan`. 기대 변경은 **추가만**이다: `secretAccessor` 바인딩 4개(`jobs_morning`), Scheduler 작업 1개(`investing-morning-calendar`, 일시 정지). `google_project_iam_member.jobs_ai`는 **나오면 안 된다**(변수 기본값 `false`). 기존 리소스의 교체·삭제가 있으면 적용하지 않는다. `apply`.
-3. PR을 `main`에 병합하면 `Deploy morning calendar job` 단계가 job을 만든다(`MORNING_AI_ENABLED=false`, 연결된 숫자 버전의 FRED·ECOS·텔레그램 비밀만 붙인다. 연결되지 않은 비밀은 경고만 남긴다). `gcloud run jobs describe investing-morning-calendar …`로 계정·VPC·비밀 버전·환경변수를 눈으로 확인한다.
+3. PR을 `main`에 병합하면 `Deploy morning calendar job` 단계가 job을 만든다(`MORNING_AI_ENABLED=true`, 연결된 숫자 버전의 FRED·ECOS·텔레그램·토스 비밀만 붙인다. 연결되지 않은 비밀은 경고만 남긴다). `gcloud run jobs describe investing-morning-calendar …`로 계정·VPC·비밀 버전·환경변수를 눈으로 확인한다.
 4. **수동 실행 한 번**(위). 정제된 로그와 `morningRuns/{날짜}` 문서, 캘린더의 새 이벤트·값, 텔레그램 브리핑을 확인한다. 값이 `VALUE_NOT_AVAILABLE_YET`로만 나오면 신선도 임계값과 FRED 응답을 점검한다([캘린더 문서](../implementation/calendar.md#작업-단계-모두-멱등-한-단계의-실패가-다음-단계를-막지-않는다)).
 5. `terraform.tfvars`에 `morning_schedule_enabled = true`를 넣고 `plan`(Scheduler `paused`만 바뀌어야 한다)·`apply`.
 6. 이틀 연속 자동 실행을 확인한다(6b 완료 기준).
 
-### 아침 작업 AI 켜기
+### AI 켜기 (Claude Sonnet 5.5)
 
-**사용자 승인 전에는 하지 않는다.** 남은 일:
+사용자가 Sonnet 5.5 사용과 월 비용을 승인했다(2026-10-21, [설계 5절](../planning/next-phase-design.md#5-ai-모델-사용자-결정)). 코드·배포는 이미 켜진 상태이고 남은 것은 **프로젝트 쪽 준비**다:
 
-1. 사용자가 월 AI 비용 상한을 승인한다(근거 계산: [ai-provider.md](../implementation/ai-provider.md#비용-상한-계산-근거-가격-미확인)의 호출 수·토큰 상한에 공식 가격표 단가를 곱한 값을 설계 문서 5절에 기록).
-2. `terraform.tfvars`에 `morning_ai_enabled = true`, `plan`(추가: `google_project_iam_member.jobs_ai` 1개만)·`apply`.
-3. 변경 PR에서 `.github/workflows/deploy.yml`의 morning 단계 `MORNING_AI_ENABLED=false`를 `true`로 바꾸고, 저장소 변수 `AI_PROVIDER=vertex`·`AI_MODEL=gemini-3.8-flash`가 설정되어 있는지 확인한다(없으면 `true`로 설정이 오류가 나 job이 시작하지 않는다). 병합·배포.
-4. 수동 실행(`MORNING_FORCE=1`)으로 한 번 확인한다: `morningRuns/{날짜}.ai`의 호출 수·토큰, 이벤트의 `aiSummary`, 번역 제목. Vertex가 `thinkingLevel: LOW`를 거부하면(400) `ai-morning.ts`의 `MORNING_AI_TASKS`만 고친다.
-5. 끄려면 3번의 값을 `false`로 되돌려 배포하면 된다(IAM은 남아도 호출이 없다).
+1. 저장소 변수(Settings > Variables)의 예전 `AI_PROVIDER=vertex`·`AI_MODEL=gemini-3.8-flash`를 **삭제**(권장: 워크플로 기본값이 `vertex-claude`·`claude-sonnet-5-5`·`global`)하거나 새 값으로 바꾼다. 남아 있으면 그 값이 이기고, `vertex` + Gemini 조합은 Gemini로 동작한다(`vertex-claude` + Gemini 모델처럼 계열이 어긋난 조합은 설정 오류로 AI가 꺼진다).
+2. `terraform.tfvars`에 `morning_ai_enabled = true`, `node scripts/gcp.mjs plan`(추가: `google_project_iam_member.jobs_ai` **1개만**)·`apply`. 서비스 계정 `investing-runtime`(해설용)에도 `aiplatform.user`가 있는지 확인한다.
+3. Vertex Model Garden에서 Claude Sonnet 5.5를 사용 설정하고 **`global` 지역 `anthropic-claude-sonnet` 할당량이 0인 것을 증가 신청으로 올린다**(승인 전에는 모든 호출이 `AI_QUOTA_PROVIDER`).
+4. 수동 확인: 아침 작업 `MORNING_FORCE=1` 또는 캘린더 보강 작업([아래](#캘린더-보강-작업-calendar-enrich))을 한 번 실행하고 `morningRuns/{날짜}.ai`의 호출 수·토큰, `steps.enrich`·`ai-summary`·`ai-translation`의 코드를 본다. 코드가 `AI_QUOTA_PROVIDER`면 3번, `AI_AUTH_UNAVAILABLE`이면 2번, `AI_UNAVAILABLE`이면 모델 사용 설정·지역을 확인한다(`AI_REFUSED`·`AI_RESPONSE_*`는 모델 응답 문제).
+5. 끄려면 morning 단계의 `MORNING_AI_ENABLED`를 `false`로 바꿔 배포한다(IAM은 남아도 호출이 없다). 캘린더 보강 작업은 `CALENDAR_AI_ENABLED=false`로 실행하면 AI만 뺀다.
+6. AI형 알고리즘(`ALGO_AI_ENABLED`)은 **계속 꺼 둔다**. 따로 요청할 때만 켠다.
+
+## 캘린더 보강 작업 (calendar-enrich)
+
+`investing-calendar-enrich`: **수동 전용**(스케줄·invoker 권한 없음. 새 이벤트는 아침 작업이 매일 처리한다). 본문 `src/jobs/calendar-enrich.ts`, 동작·규칙은 [캘린더 — 이벤트 보강](../implementation/calendar.md#이벤트-보강-한국어-결과영향시장-반응), AI 계약은 [ai-provider.md](../implementation/ai-provider.md#캘린더-보강-계약). 토스(시장 반응)가 필요해서 다른 작업과 같은 이미지 digest·`investing-jobs` 계정·VPC(고정 출구 IP)·토스 비밀 버전으로 배포된다(`Deploy calendar enrichment job`, 토스 비밀이 연결돼 있지 않으면 배포를 건너뛴다). FRED·ECOS 비밀은 있으면 붙인다(정책금리 공식 수치용). 주문을 내지 않는다.
+
+| 항목                   | 내용                                                                                                                                                                                |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 환경변수(배포)         | `NODE_ENV=production`, `GOOGLE_CLOUD_PROJECT`, `CALENDAR_AI_ENABLED=true`, `AI_PROVIDER`·`AI_MODEL`·`AI_LOCATION`. 작업 시간 제한 30분, 재시도 0                                    |
+| 실행 시 덮어쓰기       | `CALENDAR_ENRICH_FORCE=1`(이미 보강된 이벤트도 다시), `CALENDAR_ENRICH_FROM=YYYY-MM-DD`(기본: 400일 전), `CALENDAR_ENRICH_MAX_AI_CALLS=1..20`(기본 15, 한 번에 이벤트 10개)         |
+| 설정 오류(종료 코드 2) | `CALENDAR_AI_ENABLED`가 `true`/`false`/빈 값이 아님, `true`인데 제공자 설정이 없음, 옵션 형식 오류                                                                                  |
+| 실행 기록              | `calendarEnrichRuns/{KST날짜}_{HHmmss}`: 상태, 건수(검사·정리·반응·보강·거부), 정제된 코드, AI 호출 수·토큰. 종료 코드는 다른 작업과 같다(`3` = 일부 실패, 예: `AI_QUOTA_PROVIDER`) |
+
+**백필 실행**(운영 이벤트 121건 기준 한 번에 끝난다: AI 호출 약 13회):
+
+```sh
+gcloud run jobs execute investing-calendar-enrich --region=asia-northeast3 \
+  --account=<개인 계정> --project=<개인 프로젝트> --wait
+# 다시 보강하려면: --update-env-vars=CALENDAR_ENRICH_FORCE=1
+# AI 없이 정리와 시장 반응만: --update-env-vars=CALENDAR_AI_ENABLED=false
+```
+
+확인: 로그의 `run-finished`(`codes`), `calendarEnrichRuns` 문서, 캘린더에서 제목이 한국어로 바뀌고 결과·시장 반응 표가 보이는지. 같은 명령을 다시 실행해도 이미 보강된 이벤트는 AI를 부르지 않는다(멱등). Terraform 변경은 없다(예상 `plan`: 변경 없음, `morning_ai_enabled`를 켤 때만 `jobs_ai` 1개 추가).
 
 ## 확인과 문제 해결
 
@@ -200,9 +223,9 @@ gcloud run jobs execute investing-algo-paper --region=asia-northeast3 \
 5. 결과 확인: 정제된 로그, 화면의 "모의 운용" 구역, `algorithmRuns/KR_<날짜>` 문서. 실제 `/prices`의 `timestamp`가 신선도(60초) 판정에 맞는지, 일봉이 직전 거래일까지 오는지 먼저 확인한다(알고리즘 문서의 "확인하지 못한 것").
 6. `terraform.tfvars`에 `algo_schedules_enabled = true`를 넣고 `plan`(Scheduler 두 개의 `paused`만 바뀌어야 한다)·`apply`로 켠다. 영업일마다 모의 판단이 쌓이는지 이틀 이상 지켜본다.
 
-### AI형 켜기 (비용 승인 뒤에만)
+### AI형 켜기 (따로 요청할 때만)
 
-`ALGO_AI_ENABLED`는 정확히 문자열 `true`일 때만 켜진다. 사용자가 월 비용을 승인하면: Vertex 접근 권한(`investing-jobs`에 `aiplatform.user`)과 모델 가격·생각 토큰 설정을 확인하고, 배포 단계의 `ALGO_AI_ENABLED=false`를 `true`로 바꿔 병합한다. 하루 호출은 기능별 12회로 제한된다(`aiUsage/algorithm_{KST날짜}`). 그 전에는 AI형이 "AI 비용 승인 대기"로 건너뛰어진다.
+`ALGO_AI_ENABLED`는 정확히 문자열 `true`일 때만 켜진다. Claude Sonnet 5.5 비용은 승인됐지만(2026-10-21) AI형 알고리즘은 사용자가 따로 요청할 때까지 꺼 둔다. 요청이 오면: Vertex 접근 권한(`investing-jobs`에 `aiplatform.user`)과 Claude 할당량([AI 켜기](#ai-켜기-claude-sonnet-55))을 확인하고(모델은 `AI_PROVIDER`·`AI_MODEL` 또는 `ALGO_AI_MODEL`, 판단 호출은 effort `medium`), 배포 단계의 `ALGO_AI_ENABLED=false`를 `true`로 바꿔 병합한다. 하루 호출은 기능별 12회로 제한된다(`aiUsage/algorithm_{KST날짜}`). 그 전에는 AI형이 "AI 비용 승인 대기"로 건너뛰어진다.
 
 ### 비용 메모
 

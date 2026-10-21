@@ -24,7 +24,7 @@ SOT: docs/planning/requirements.md. 구현: src/features/calendar/CalendarPage.t
 
 ## 아침 갱신 (6b)
 
-작업 `investing-morning-calendar`(매일 07:00 KST, [jobs.md](../operations/jobs.md))가 캘린더를 채운다. 코드: `src/jobs/morning-calendar.ts`(본체), `src/server/ai-morning.ts`(AI 계약), `src/server/morning.ts`(실행 기록·브리핑 API). 상태: **구현·합성 테스트 완료, 운영 적용 전, AI 단계는 꺼짐**(사용자가 월 AI 비용을 승인하기 전까지).
+작업 `investing-morning-calendar`(매일 07:00 KST, [jobs.md](../operations/jobs.md))가 캘린더를 채운다. 코드: `src/jobs/morning-calendar.ts`(본체), `src/server/ai-morning.ts`(AI 계약), `src/server/morning.ts`(실행 기록·브리핑 API). 상태: 구현·운영 배포 완료. AI 단계는 사용자가 승인한(2026-10-21) Claude Sonnet 5.5로 켜지도록 배포되며, Vertex 권한·할당량이 없으면 해당 단계만 코드로 실패를 기록한다. 새 이벤트의 한국어 보강은 [이벤트 보강](#이벤트-보강-한국어-결과영향시장-반응).
 
 ### 이벤트 모델 확장
 
@@ -65,6 +65,61 @@ SOT: docs/planning/requirements.md. 구현: src/features/calendar/CalendarPage.t
 - 실제 FRED·ECOS·Vertex·텔레그램 호출은 하지 않았다. 신선도 임계값, FRED `release/dates`가 과거 날짜에도 동작하는지, 결정일 이후 관측이 언제 올라오는지는 첫 실호출에서 확인한다.
 - 값은 현재 빈티지 기준 최신 관측이다. 이후 수정(revision)이 있으면 더 새 기간이 아닌 한 갱신하지 않는다.
 - 예상치(`forecast`)는 공식 API로 얻을 수 없어 채우지 않는다.
+
+## 이벤트 보강: 한국어 결과·영향·시장 반응
+
+등록된 모든 이벤트를 한국어로 바꾸고, 이벤트마다 읽기 쉬운 모양으로 **결과**(무엇을 결정했거나 보여 줬는지), **시장 반응**(발표 전후 측정값), **영향**(무엇에 영향을 줄 수 있는지), 필요할 때만 **설명**을 저장한다. 코드: `src/server/calendar-clean.ts`(정리), `calendar-enrich.ts`(AI 계약·실행), `reaction.ts`(시장 반응), `calendar-policy.ts`(정책금리 공식 수치), `calendar-merge.ts`(보존 저장), 작업 `src/jobs/calendar-enrich.ts`. 운영 데이터 기준(2026-10-21): 121건이 모두 `news-release`(연준 20건 영어 제목, 한국은행 101건 한국어 제목).
+
+### 데이터 모델 (모두 선택 필드, 기존 이벤트와 호환)
+
+| 필드            | 뜻                                                                                                                                                                                                                                                                    |
+| --------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `title`         | 한국어 표시 제목(번역되거나 정리된 제목)                                                                                                                                                                                                                              |
+| `titleOriginal` | 제공자의 **정확한 원문 제목**(표시 제목과 다를 때만). 번역 없이도 있을 수 있다(정리만 한 경우). `translation`은 AI 번역일 때만 있고 `titleOriginal`이 있어야 한다                                                                                                     |
+| `releaseType`   | 제목 앞의 `[보도자료]`·`[보도참고자료]` 같은 태그(대괄호 없이)                                                                                                                                                                                                        |
+| `outcome`       | `{headline(한국어 60자 이내), facts[](최대 8): {label, value, note?}}`. 예: 기준금리 "2.50%" / 변동 "동결(0bp)". 숫자는 ① 출처 제목 ② 공식 API(FRED 연방기금금리 목표 범위, ECOS 기준금리)에서만 오고, AI가 뽑은 숫자는 입력 텍스트에 그대로 있어야 한다(아니면 버림) |
+| `reaction[]`    | `{asset: KOSPI·KOSDAQ·KR_BOND_3Y·KR_BOND_10Y·USDKRW·SPY, from:{date,value}, to:{date,value}, change, unit: %·%p·원, changePercent?(USD/KRW), source}`. 토스 공식 데이터로 **코드가 계산**한 값                                                                        |
+| `impact[]`      | `{asset, effect(60자 이내)}` 최대 4개. AI가 쓰며 경로와 방향 단어(상승·하락 압력 등)만 쓰고 가격 목표·매수/매도는 쓰지 않는다. 숫자는 입력(결과·반응)에 있는 것만                                                                                                     |
+| `explainer`     | 한국어 최대 2문장. 어려운 개념(할인율, 스트레스 테스트, 토큰화, 정책금리 경로)일 때만. 없으면 필드 자체가 없다                                                                                                                                                        |
+| `enrichment`    | `{model, generatedAt, version, aiFields[title·outcome·impact·explainer]}` 출처 표시. 화면은 AI 작성 부분에 "AI 작성(Claude Sonnet 5.5)"를, 숫자에는 출처와 기준일을 보인다                                                                                            |
+
+### 결정적 정리 (AI 없음, 모든 이벤트)
+
+HTML 엔터티를 해석하고(`&#39;`, 이중 인코딩 `&amp;#39;`, `&#x27;`, `&quot;`, `&middot;` 등), 제목 앞의 `[보도자료]`류 태그를 `releaseType`으로 분리하고, 마크업·제어 문자를 지우고 공백을 정리한다. 원문이 바뀌면 `titleOriginal`에 정확한 원문을 둔다. RSS 수집(`news.ts`)이 새 이벤트에 바로 적용하고, 보강 작업이 이미 저장된 이벤트에 적용한다. 멱등이며 번역된 제목은 건드리지 않는다.
+
+### 시장 반응 규칙 (`reaction.ts`)
+
+**발표 전 마지막 종가 vs 발표 후 첫 종가**를 비교한다.
+
+- 종가 = 거래일의 정규장 종가: 한국(코스피·코스닥·국고채 금리, 그리고 환율을 잰 시각)은 15:30 KST, SPY는 16:00 뉴욕 시각(서머타임 반영; 13:00 조기 종료는 모델링하지 않는다).
+- 한국 발표: 15:30 이전이면 같은 한국 세션(전날 종가 → 당일 종가), 15:30 이후면 다음 세션(당일 → 다음). 정확히 15:30이면 그날 종가가 "전"이다.
+- 미국 발표(연준 등, KST 새벽): SPY는 다음 미국 세션 종가(발표가 장중이면 그날 종가), 한국 자산은 다음 한국 세션 종가. 예) 10월 22일 03:00 KST(= 10월 21일 14:00 ET)의 FOMC 성명: SPY 전 = 10월 20일 종가, 후 = 10월 21일 종가. 코스피 전 = 10월 21일(KST) 종가, 후 = 10월 22일 종가.
+- 주말·휴일은 봉이 없으므로 "다음 봉"이다. 발표 시각이 없는(날짜만 주는 FRED) 이벤트는 반응을 계산하지 않는다(`RELEASE_TIME_UNKNOWN`). 후 종가가 아직 확정되지 않았거나(종가 후 30분 이내 포함) 전·후 봉이 발표에서 7일 넘게 떨어져 있으면 계산하지 않는다.
+- 단위: 지수·SPY는 **%**, 국고채는 금리 차이 **%p**(비율이 아님), USD/KRW는 **원과 %**(`change`는 원, `changePercent`는 %).
+- 데이터: 코스피·코스닥·국고채 3/10년은 토스 시장 지표 일봉(`/market-indicators/{symbol}/candles`), S&P 500은 지수를 받을 수 없어 **SPY ETF 일봉**(표시: "S&P 500 (SPY ETF 기준)"), USD/KRW는 `GET /exchange-rate?baseCurrency=USD&quoteCurrency=KRW&dateTime=`(공식 명세 v1.2.24의 선택 쿼리 `dateTime`, 매매기준율 `midRate`)를 코스피와 같은 두 종가 시각(15:30 KST)에 부른다. 환율 응답의 `validFrom ≤ 시각 ≤ validUntil`이 아니면 쓰지 않는다. 한국 발표에는 SPY를 받지 않는다.
+- 없는 자료는 그 자산만 뺀다. 보간·추정은 없다. 최근 이벤트는 일부만 측정돼도 저장하고 다음 실행에서 채운다(완성되었거나 3일이 지나면 확정). 환율 호출은 실행당 150회 상한(`FX_BUDGET_EXHAUSTED`).
+- 해석 주의: 같은 시기의 다른 요인이 섞인 관측이며 인과가 아니다(화면에도 쓴다).
+
+"직접적인 시장 영향은 작음"이라는 표현은 **측정된 반응이 작을 때만** 쓴다: 지수·환율 변동 모두 |변동| < 0.5%, 국고채 |변동| < 0.05%p, 대표 지수(한국 발표는 코스피, 그 밖은 SPY)가 측정되어 있을 것(`SMALL_INDEX_PERCENT`, `SMALL_BOND_POINTS`). 중요도 낮음이고 AI 영향이 비었으며 반응이 작으면 코드가 고정 문구를 영향에 넣는다. 인가·제재·인사 같은 행정 발표는 한국어 제목과 한 줄 결과만 갖고 영향은 비어 있어도 된다.
+
+### 정책금리 공식 수치 (`calendar-policy.ts`)
+
+연준 FOMC 성명(원문 제목에 `FOMC statement`)은 FRED 연방기금금리 목표 범위(하단·상단)를, 한국은행 통화정책방향(의사록·설명·간담회 제외)은 ECOS 기준금리를 **결정 직후 관측과 직전 관측**으로 비교해 "목표 범위 4.00~4.25%"·"변동: 인하 25bp/인상/동결(0bp)"을 만든다. 연준은 성명이 14:00 ET라 KST 날짜 D = ET 날짜 D-1이고 FRED는 D부터 새 값을 보이므로 직후 = D+3 기준 최신 관측(D~D+5 날짜), 직전 = D-2 기준 최신 관측(14일 이내). 한국은행은 직후 = D+2 기준(D~D+5), 직전 = D-1 기준(60일 이내). 해당 어댑터(키)가 없거나 관측이 맞지 않으면 아무 수치도 만들지 않는다. 결과 표에서 AI 수치보다 앞에 오고, AI는 이 숫자를 문장에 쓸 수 있다.
+
+### 실행
+
+1. 작업 `investing-calendar-enrich`(수동, [jobs.md](../operations/jobs.md#캘린더-보강-작업-calendar-enrich)): 정리 → 시장 반응 → AI(결과·영향·설명·번역). 저장은 `PreservingCalendarRepository`를 거친다: 저장된 값을 널이나 더 적은 값으로 덮지 않고(반응은 자산별 병합), 같은 제공자 항목의 한국어 제목·보강 내용은 RSS 재수집 뒤에도 남는다.
+2. 아침 작업(매일): 최근 14일의 새 이벤트에 같은 단계를 실행한다(AI 호출은 하루 최대 2회, 한도 20회와 별개로 아침 작업 자체가 2회까지만 쓴다). 반응이 아직 측정 중인 최근 이벤트는 AI를 미룬다(`AI_DEFERRED_REACTION_PENDING`). 번역 단계(`ai-translation`)보다 먼저 돈다.
+3. 대상: `enrichment`가 없거나 `version`이 낮은 이벤트(또는 `CALENDAR_ENRICH_FORCE=1`). AI가 아무 부분도 통과시키지 못한 이벤트는 표시되지 않고 다음 실행에서 다시 대상이 된다.
+4. AI가 없을 때(꺼짐·일일 한도·공급자 429·거절): 정리와 시장 반응은 그대로 저장하고 `AI_*` 코드를 실행 기록에 남긴다. Toss가 없으면 반응만 `TOSS_NOT_CONFIGURED`로 건너뛴다.
+
+### 화면
+
+상세에 한국어 제목(+`releaseType` 배지, "원문 제목 보기/숨기기", 번역이면 "AI 번역 · 모델", 정리만 했으면 "공식 원문 제목(정리 전)"), **결과** 표(항목/값, 숫자 오른쪽 정렬), **시장 반응** 표(자산, 전 → 후와 기준일, 부호·단위가 붙은 변화; 상승 빨강·하락 파랑은 색만이 아니라 부호로도 구분), **영향** 목록, 선택적 **설명** 상자, 출처 줄("AI 작성(모델) · 제목·결과·영향·설명 · KST 시각", "수치 출처: …(종가 기준, 추정 없음)")을 보인다. 값이 없는 블록은 렌더링하지 않는다. 모바일에서 표가 카드 안에 들어가고 가로 스크롤이 없다. 코드: `EventEnrichmentDetail.tsx`, `calendar-enrichment.css`.
+
+### 검증과 한계
+
+`tests/calendar-clean.test.ts`(엔터티·태그·RSS 정리·재수집 병합), `tests/reaction.test.ts`(15:30 전/후, 미국→다음 세션, 서머타임, 주말, 단위, 누락, 환율 검증·예산), `tests/calendar-enrich.test.ts`(AI 계약·숫자 출처 규칙·실행·보존 저장·AI 없는 실행), `tests/calendar-enrich-job.test.ts`, `tests/calendar-policy.test.ts`, `tests/calendar-model.test.ts`, E2E `tests/calendar-enrichment.spec.ts`(데스크톱·모바일). 실제 토스·FRED·ECOS·Vertex 호출은 하지 않았다. **확인하지 못한 것**: 토스 일봉의 `timestamp` 날짜가 시장 현지 거래일인지(SPY가 뉴욕 거래일인지), SPY 심볼과 `/exchange-rate?dateTime=`가 과거 몇 달 전 시각에도 응답하는지, 환율 `validFrom/validUntil`이 15:30 KST를 포함하는지, 시장 지표 일봉의 국채 `close`가 수익률(%)인지, 모델 응답 품질.
 
 ## 검증
 

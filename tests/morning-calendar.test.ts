@@ -535,9 +535,19 @@ describe('설정', () => {
   it('true는 Vertex 설정이 모두 있을 때만 켜지고 오타는 설정 오류다', () => {
     const vertex = { AI_PROVIDER: 'vertex', AI_MODEL: 'gemini-3.8-flash' };
     expect(morningConfiguration({ ...base, ...vertex, MORNING_AI_ENABLED: 'true' }).ai).toEqual({
-      project: 'fixture-project',
-      model: 'gemini-3.8-flash',
-      location: 'global',
+      provider: 'vertex',
+      config: { project: 'fixture-project', model: 'gemini-3.8-flash', location: 'global' },
+    });
+    // Claude on Vertex needs no model: the default is claude-sonnet-5-5.
+    expect(
+      morningConfiguration({
+        ...base,
+        AI_PROVIDER: 'vertex-claude',
+        MORNING_AI_ENABLED: 'true',
+      }).ai,
+    ).toEqual({
+      provider: 'vertex-claude',
+      config: { project: 'fixture-project', model: 'claude-sonnet-5-5', location: 'global' },
     });
     expect(() => morningConfiguration({ ...base, MORNING_AI_ENABLED: 'true' })).toThrow();
     for (const value of ['TRUE', 'yes', '1', 'on'])

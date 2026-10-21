@@ -199,16 +199,16 @@ TTL: `algorithmEvents`는 **보존**한다(TTL 정책을 걸지 않는다. 변�
 
 ### 구성
 
-| 파일                                     | 내용                                                                                           |
-| ---------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `src/lib/algo/paper.ts`                  | `runPaperDay`(상태를 가진 하루 판단·가상 체결), `createPaperLedger`, `paperMetrics`. 순수 함수 |
-| `src/lib/algo/supply.ts`                 | 수급 신호 `supplyScore`(제안 규칙)                                                             |
-| `src/jobs/algo-session.ts`               | `selectSessionToTrade`: 장 운영 캘린더로 "지금이 개장 직후인가" 판단                           |
-| `src/jobs/algo-paper.ts`                 | 작업 본체 `runAlgoPaper`와 진입점 `main`                                                       |
-| `src/jobs/algo-paper-sources.ts`         | 저장된 수급 스냅샷 읽기(`marketSnapshots`)                                                     |
-| `src/server/paper.ts`                    | 저장소(Firestore·메모리), `GET /api/algorithms/:id/paper`, 차트 마커용 `listFills`             |
-| `src/server/algorithm-ai.ts`             | AI형 판단 계약(Vertex `gemini-3.8-flash`), 기능별 하루 12회 한도. 기본 꺼짐                    |
-| `src/features/algorithms/PaperPanel.tsx` | 화면의 "모의 운용" 구역                                                                        |
+| 파일                                     | 내용                                                                                                            |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `src/lib/algo/paper.ts`                  | `runPaperDay`(상태를 가진 하루 판단·가상 체결), `createPaperLedger`, `paperMetrics`. 순수 함수                  |
+| `src/lib/algo/supply.ts`                 | 수급 신호 `supplyScore`(제안 규칙)                                                                              |
+| `src/jobs/algo-session.ts`               | `selectSessionToTrade`: 장 운영 캘린더로 "지금이 개장 직후인가" 판단                                            |
+| `src/jobs/algo-paper.ts`                 | 작업 본체 `runAlgoPaper`와 진입점 `main`                                                                        |
+| `src/jobs/algo-paper-sources.ts`         | 저장된 수급 스냅샷 읽기(`marketSnapshots`)                                                                      |
+| `src/server/paper.ts`                    | 저장소(Firestore·메모리), `GET /api/algorithms/:id/paper`, 차트 마커용 `listFills`                              |
+| `src/server/algorithm-ai.ts`             | AI형 판단 계약(Claude Sonnet 5.5(`AI_PROVIDER`·`AI_MODEL`, Gemini 선택 가능)), 기능별 하루 12회 한도. 기본 꺼짐 |
+| `src/features/algorithms/PaperPanel.tsx` | 화면의 "모의 운용" 구역                                                                                         |
 
 ### 작업 흐름
 

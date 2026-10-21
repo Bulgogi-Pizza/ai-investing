@@ -61,6 +61,8 @@ GET `/api/v1/accounts`에서 설정된 accountSeq의 BROKERAGE 계좌가 존재�
 
 토스 `GET /api/v1/market-indicators/prices?symbols=`(`MARKET_INDICATOR` 그룹)에 카탈로그 8종 `KOSPI, KOSDAQ, KR_BOND_2Y/3Y/5Y/10Y/20Y/30Y`를 요청하고, `GET /api/v1/exchange-rate?baseCurrency=USD&quoteCurrency=KRW`(`MARKET_INFO` 그룹)를 함께 조회한다. 입력 파라미터는 없다. 응답: `{source, asOf, indicators:[{symbol, name, kind:'INDEX'|'BOND', unit:'point'|'percent', lastPrice, timestamp:string|null}], exchangeRate:{baseCurrency:'USD', quoteCurrency:'KRW', midRate, rate, rateChangeType:'UP'|'EQUAL'|'DOWN'|null, validFrom, validUntil}}`. `name`, `kind`, `unit`은 카탈로그 상수이고 값은 제공자가 준 `lastPrice`뿐이다(국채는 수익률 %). 명세의 `midRate`는 매매기준율, `rate`는 매수 환율이며 참고용 표시 환율로 실제 주문 환율과 다를 수 있다. 상단 띠는 `midRate`를 보여 준다. 이 API는 등락률을 주지 않으므로 화면도 등락률을 표시하지 않는다. 카탈로그에 없는 심볼, 십진수가 아닌 값, 환율 통화쌍 불일치, `midRate`/`rate`/`validFrom`/`validUntil` 누락·형식 오류는 502 `PROVIDER_SCHEMA_INVALID`이고 두 호출 중 하나라도 실패하면 전체가 실패한다. 알 수 없는 `rateChangeType`은 null로 둔다. 캐시 키는 `market-indicators`(30초). S&P 500과 원/달러 일별 이력은 이 API로 받을 수 없다([계획 설계 정정](../planning/next-phase-plan.md)).
 
+캘린더 보강용 `TossClient.exchangeRateAt(dateTime)`: 같은 `GET /api/v1/exchange-rate`에 공식 명세(v1.2.24)의 선택 쿼리 `dateTime`(ISO-8601, "조회할 환율 시각", 생략하면 현재 유효 환율)을 붙여 그 시각의 `midRate`와 `validFrom`·`validUntil`을 받는다(캐시 없음, 시각 형식 검사). 과거 몇 달 전 시각에도 응답하는지는 실호출로 확인하지 못했다. 사용처와 규칙: [calendar.md](calendar.md#시장-반응-규칙-reactionts).
+
 ### 공통 오류 매핑
 
 제공자 404는 404 `PROVIDER_NOT_FOUND`로, 401/403은 503 `PROVIDER_ACCESS_DENIED`, 429·5xx·통신 실패는 기존 코드(`PROVIDER_RATE_LIMITED`, `PROVIDER_UNAVAILABLE`, `PROVIDER_UNREACHABLE`)로 정제한다. 화면 상태 구분은 [차트](charts.md)의 표를 따른다.
