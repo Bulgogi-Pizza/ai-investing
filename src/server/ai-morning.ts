@@ -50,10 +50,7 @@ export interface MorningAi {
 }
 /** Provider codes (AI_QUOTA_PROVIDER, AI_REFUSED, ...) pass through unchanged. */
 export type MorningAiErrorCode =
-  | AiProviderErrorCode
-  | 'AI_QUOTA_EXCEEDED'
-  | 'AI_INPUT_TOO_LARGE'
-  | 'BUDGET_STOPPED';
+  AiProviderErrorCode | 'AI_QUOTA_EXCEEDED' | 'AI_INPUT_TOO_LARGE' | 'BUDGET_STOPPED';
 export class MorningAiError extends Error {
   constructor(public code: MorningAiErrorCode) {
     // Only a fixed code: never provider text, request bodies or credentials.

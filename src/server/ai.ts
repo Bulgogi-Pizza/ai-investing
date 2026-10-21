@@ -296,7 +296,10 @@ export class AiEnricher {
     let ai: AiResult;
     // Monthly budget stop: before the cache, the quota and any call (fails closed).
     if (await aiBlockedByBudget())
-      return { ...rules, ai: unavailable(this.provider.model, this.provider.name, 'BUDGET_STOPPED') };
+      return {
+        ...rules,
+        ai: unavailable(this.provider.model, this.provider.name, 'BUDGET_STOPPED'),
+      };
     try {
       const input = minimizeAiEvidence(rules);
       const key = hash(
