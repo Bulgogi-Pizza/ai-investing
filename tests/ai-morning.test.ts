@@ -319,7 +319,21 @@ describe('설정', () => {
         AI_MODEL: 'gemini-3.8-flash',
         GOOGLE_CLOUD_PROJECT: 'fixture-project',
       }),
-    ).toEqual(config);
+    ).toEqual({ provider: 'vertex', config });
+    expect(
+      morningAiConfigFromEnvironment({
+        AI_PROVIDER: 'vertex-claude',
+        GOOGLE_CLOUD_PROJECT: 'fixture-project',
+      }),
+    ).toEqual({ provider: 'vertex-claude', config: { ...config, model: 'claude-sonnet-5-5' } });
+    // A model of the wrong family for the provider is a configuration error.
+    expect(
+      morningAiConfigFromEnvironment({
+        AI_PROVIDER: 'vertex-claude',
+        AI_MODEL: 'gemini-3.8-flash',
+        GOOGLE_CLOUD_PROJECT: 'fixture-project',
+      }),
+    ).toBeNull();
     expect(morningAiConfigFromEnvironment({ AI_MODEL: 'x' })).toBeNull();
     expect(
       morningAiConfigFromEnvironment({

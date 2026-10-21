@@ -15,7 +15,7 @@ type AiNarrative =
   | {
       status: 'ready';
       type: 'llm';
-      provider: 'vertex';
+      provider: 'vertex' | 'vertex-claude';
       model: string;
       asOf: string;
       summary: string;
@@ -29,7 +29,7 @@ type AiNarrative =
   | {
       status: 'disabled' | 'unavailable';
       type: 'llm';
-      provider: 'vertex';
+      provider: 'vertex' | 'vertex-claude';
       model?: string;
       message: string;
     };
@@ -427,7 +427,7 @@ export function parseInsight(body: unknown, period: string): LiveInsight {
     v.ai = {
       status: 'unavailable',
       type: 'llm',
-      provider: 'vertex',
+      provider: 'vertex-claude',
       message: 'AI 해석의 응답 형식을 확인하지 못했습니다.',
     };
   return v;

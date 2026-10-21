@@ -107,6 +107,6 @@ node scripts/gcp.mjs apply
 
 서비스는 https://ai-investing-688204744640.asia-northeast3.run.app 에 배포되어 있다. GitHub main의 Verify 성공 후 Deploy GCP가 검증 SHA를 이미지 digest로 배포하고 health를 확인한다. main4b1033e의 실제 OIDC 배포 성공을 확인했다. 오래된 SHA는 배포 직전 현재 main과 비교해 건너뛴다.
 
-`AI_PROVIDER=vertex`, `AI_MODEL=gemini-3.1-flash-lite`, `AI_LOCATION=global`은 비밀이 아닌 GitHub 저장소 변수다. 런타임 SA의 개인 프로젝트 Vertex IAM으로 호출하며 개인키/API키를 보관하지 않는다. 공유 Firestore aiUsage TTL과 하루25회 제한을 적용한다. 자세한 계약과 데이터 최소화는 implementation/ai-provider.md를 따른다.
+`AI_PROVIDER=vertex-claude`, `AI_MODEL=claude-sonnet-5-5`, `AI_LOCATION=global`은 비밀이 아닌 GitHub 저장소 변수이며, 비어 있으면 배포 워크플로가 이 값을 기본으로 쓴다(Gemini를 쓰려면 `AI_PROVIDER=vertex`와 Gemini 모델 ID). 예전 `vertex`+`gemini-*` 변수가 남아 있으면 지우거나 바꾼다. 런타임 SA의 개인 프로젝트 Vertex IAM으로 호출하며 개인키/API키를 보관하지 않는다. 공유 Firestore aiUsage TTL과 기능별 하루 한도를 적용한다. 자세한 계약과 데이터 최소화는 implementation/ai-provider.md를 따른다.
 
 실제 인증 스모크는 `node scripts/smoke-deployed.mjs`로 수행한다. 개인 접속 파일을 내부에서 읽고 세션을 폐기하며 비밀번호·세션을 출력하지 않는다. `--sync-news`를 추가하면 공식 공개 보도자료를 실제 저장하며 출처별 건수/상태만 출력한다. 로그인 시도 제한에 포함되므로 짧은 시간에 반복하지 않는다. 토스 미설정503은 정상적인 미연결 상태로 확인한다.

@@ -137,7 +137,7 @@ describe('optional Vertex AI narrative', () => {
     const body = JSON.parse(String(init.body));
     expect(body.generationConfig).toMatchObject({
       temperature: 0.2,
-      maxOutputTokens: 1600,
+      maxOutputTokens: 4000,
       responseMimeType: 'application/json',
     });
     expect(body.generationConfig.responseSchema.required).toContain('counterScenario');

@@ -15,6 +15,7 @@ import type { AlgorithmRecord } from '../src/lib/algorithmRecords';
 import {
   MemoryFeatureQuota,
   VertexAlgorithmDecider,
+  ProviderAlgorithmDecider,
   type AlgorithmDecider,
 } from '../src/server/algorithm-ai';
 import type { NotificationEvent } from '../src/server/notify';
@@ -878,7 +879,8 @@ describe('algo-paper job: configuration and safety', () => {
       ALGO_AI_ENABLED: 'true',
       GOOGLE_CLOUD_PROJECT: 'test-project-1',
     } as NodeJS.ProcessEnv) as AlgorithmDecider | undefined;
-    expect(ok).toBeInstanceOf(VertexAlgorithmDecider);
+    expect(ok).toBeInstanceOf(ProviderAlgorithmDecider);
+    expect((ok as ProviderAlgorithmDecider).model).toBe('Claude Sonnet 5.5');
     expect(
       mod.algorithmDeciderFromEnvironment({ GOOGLE_CLOUD_PROJECT: 'test-project-1' }),
     ).toBeUndefined();
