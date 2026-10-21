@@ -22,7 +22,7 @@
 1. 소유자 계정으로 로그인해 실제 지수·보유·종목 분석 탭이 보이는지 확인한다. 이상하면 화면을 알려 준다.
 2. 키 입력: 아래 명령에 값이 생긴 항목만 넣는다(숨김 입력, 채팅에 붙이지 않는다). 발급 방법은 [provider-setup.md](../operations/provider-setup.md).
    - `python scripts/provider-secrets.py dart fred ecos telegram sec --attach`
-3. AI 월 비용 승인: [설계 5절](next-phase-design.md#5-ai-모델-사용자-결정)(2026년 약 7천 원/월, 2027년 약 1만 3천 원/월). 예산 알림 금액(지금 월 15,000원)도 함께 정한다.
+3. (2026-10-21 결정) AI 기본 모델은 Claude Sonnet 5.5(월 약 1만 8천 원 예상). 프로젝트의 Vertex `anthropic-claude-sonnet` global 할당량이 0이라 **할당량 증가 요청·승인이 필요하다.** 예산은 월 3만 원으로 하고, 2만 원에 경고, 3만 원에 앱 기능 자동 중지(예약 작업·AI·실전 주문 중지, 사이트·데이터 유지)를 둔다.
 4. 실전을 원할 때: 토스 WTS 설정 > Open API에서 주문 관련 설정 확인 → 알고리즘 하나를 소액으로 실전 켜기 → 에이전트에게 실전 일정 켜기를 요청한다.
 
 ### 에이전트 (사용자 입력이 있으면 바로 할 수 있는 순서)
@@ -42,7 +42,7 @@
 ## 이어서 작업하기 전에 확인할 것
 
 1. 환경: [다른 컴퓨터에서 이어서 작업하기](next-phase-design.md#다른-컴퓨터에서-이어서-작업하기)대로 `.local/deployment.json`, `.local/deployment-account.md`, `.local/owner-access.json`, `.local/gcs-backend.hcl`, `infra/gcp/terraform.tfvars`를 안전한 경로로 옮긴다. Terraform state는 GCS에 있으므로 옮기지 않는다.
-2. **`terraform.tfvars`의 스케줄 변수**는 gitignore 대상이라 저장소에 없다. 지금 운영 값은 `snapshot_schedules_enabled = true`, `morning_schedule_enabled = true`, `algo_schedules_enabled = true`, `live_schedules_enabled = false`(기본값), `morning_ai_enabled = false`(기본값)다. 이 값이 빠진 컴퓨터에서 `apply`하면 켜 둔 스케줄이 다시 멈춘다. `node scripts/gcp.mjs plan` 결과가 "No changes"인지 먼저 본다.
+2. **`terraform.tfvars`의 스케줄 변수**는 gitignore 대상이라 저장소에 없다. 지금 운영 값은 `snapshot_schedules_enabled = true`, `morning_schedule_enabled = true`, `algo_schedules_enabled = true`, `live_schedules_enabled = false`(기본값), `morning_ai_enabled = false`(기본값), `monthly_budget_amount = 30000`, `budget_warning_amount = 20000`, `budget_currency = "KRW"`다. 이 값이 빠진 컴퓨터에서 `apply`하면 켜 둔 스케줄이 다시 멈춘다. `node scripts/gcp.mjs plan` 결과가 "No changes"인지 먼저 본다.
 3. 검사: `git pull`, `npm ci`, `npm run check`, `E2E_PORT=<빈 포트> npm run test:e2e`가 통과하는지 확인한다. 여러 worktree를 동시에 돌릴 때는 포트를 나눈다.
 4. 클라우드: `gcloud auth login <지정 개인 계정>` 후 `node scripts/gcp.mjs doctor`·`init`·`plan`. 토큰이 만료되면 `invalid_grant`가 난다.
 5. 운영 확인 명령: 작업 실행은 `gcloud run jobs execute <작업> --region=asia-northeast3 --wait`(계정·프로젝트 명시), 로그는 `gcloud logging read`로 실행 이름별로 읽는다. 로그에는 허용한 키만 있고 토큰·계좌 값은 없다.
