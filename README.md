@@ -14,11 +14,11 @@ npx playwright install chromium
 npm run test:e2e
 ```
 
-브라우저: http://127.0.0.1:5173 . 로그인 전 화면 데이터는 합성 데모다. 토스 공식 명세 기반 주식 잔고·일봉 조회와 저장 전략·등록 일정에 따른 규칙 분석을 구현했다. 실제 조회는 토스 자격증명·소유자 지정·고정 IP 허용 등록 후 가능하며 실계좌 검증은 대기 상태다. 한국은행·연준 공식 RSS를 관리자 요청으로 수집하고, 실제 규칙 분석에 선택적 Vertex 해설을 추가한다. 예약 수집은 구성하지 않았다. 제공자별 실제 연결 상태는 진행 상태 문서를 따른다. 토스 API 키를 설정하는 것만으로 연동 완료되지 않는다. 커뮤니티는 포함하지 않는다. 주문은 소유자 전용 알고리즘 실전 운용에서 [설계](docs/planning/next-phase-design.md) 4절의 안전장치를 모두 통과할 때만 허용하며 아직 구현되지 않았다.
+브라우저: http://127.0.0.1:5173 . 로그인 전에는 로그인 화면만 보이고, 데모 데이터는 없다. 화면은 토스·DART·SEC·FRED·ECOS 실데이터만 쓰며 소유자 계정 전용이다. 예약 작업(일일 스냅샷, 아침 캘린더 갱신, 모의 운용)은 Cloud Run Job과 Cloud Scheduler로 돈다. 커뮤니티는 포함하지 않는다. 주문은 소유자 전용 알고리즘 실전 운용에서 [설계](docs/planning/next-phase-design.md) 4절의 안전장치를 모두 통과할 때만 나가며, 실전 일정은 사용자가 켜기 전까지 꺼져 있다. 지금 상태와 다음 할 일은 [다음 할 일과 인수인계](docs/planning/next-steps.md)를 먼저 본다.
 
 - [공통 에이전트 지침](AGENTS.md): Codex·Claude·Gemini 공통 SOT
 - [요구사항](docs/planning/requirements.md) / [아키텍처](docs/architecture/system.md)
-- [진행 상태](docs/implementation/status.md) / [검증 흐름](docs/testing/workflow.md)
+- [다음 할 일과 인수인계](docs/planning/next-steps.md) / [진행 상태](docs/implementation/status.md) / [검증 흐름](docs/testing/workflow.md)
 - [클라우드 비교](docs/operations/cloud-comparison.md) / [배포 운영](docs/operations/deployment.md)
 - [인증](docs/implementation/auth.md) / [금융 연동](docs/implementation/integrations.md)
 
