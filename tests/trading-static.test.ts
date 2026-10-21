@@ -14,7 +14,16 @@ function walk(dir: string): string[] {
   if (!existsSync(dir)) return [];
   return readdirSync(dir).flatMap((name) => {
     if (
-      ['node_modules', 'dist', '.git', '.local', 'test-results', 'playwright-report'].includes(name)
+      [
+        'node_modules',
+        'dist',
+        '.git',
+        '.local',
+        'test-results',
+        'playwright-report',
+        // Terraform's downloaded providers (gitignored, hundreds of MB after `terraform init`).
+        '.terraform',
+      ].includes(name)
     )
       return [];
     const full = join(dir, name);
