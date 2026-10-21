@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { cleanTitle } from './calendar-clean.js';
+import { PreservingCalendarRepository } from './calendar-merge.js';
 import { cleanEvent, type CalendarRepository, type EconomicEvent } from './calendar.js';
 import { ownerGate } from './owner.js';
 
@@ -243,6 +244,12 @@ export async function syncOfficialNews(
     flights = new Map();
     flightsByCache.set(cache, flights);
   }
+  // RSS items carry none of the stored Korean title, enrichment or reaction: a plain upsert (a full
+  // set) would wipe them on every sync, so writes always go through the preserving repository.
+  const target =
+    repository instanceof PreservingCalendarRepository
+      ? repository
+      : new PreservingCalendarRepository(repository);
   const result: NewsSyncResult = { count: 0, sources: [], warnings: [newsCoverageWarning] };
   for (const source of sources) {
     try {
@@ -263,7 +270,7 @@ export async function syncOfficialNews(
           flights.delete(source.id);
         }
       }
-      await repository.upsert(entry!.events, options.authorId ?? 'official-news-sync');
+      await target.upsert(entry!.events, options.authorId ?? 'official-news-sync');
       result.count += entry!.events.length;
       result.sources.push({
         id: source.id,

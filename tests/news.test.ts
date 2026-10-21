@@ -92,6 +92,42 @@ describe('공식 RSS 뉴스 수집', () => {
       expect(result.warnings).toHaveLength(1);
     }
   });
+  it('다시 동기화해도 저장된 한국어 제목·보강·반응을 지우지 않는다(일반 저장소를 넘겨도)', async () => {
+    const repository = new MemoryCalendarRepository();
+    await syncOfficialNews(repository, {
+      sourceIds: ['fed-press'],
+      transport: mockTransport(),
+      cache: new Map(),
+      now,
+    });
+    const [synced] = await repository.list('2026-10-01', '2026-10-31');
+    const enriched = {
+      ...synced,
+      title: '연준 보도자료 한국어 제목',
+      titleOriginal: synced.title,
+      translation: { model: 'm', translatedAt: '2026-10-21T00:00:00.000Z' },
+      outcome: { headline: '보강된 결과 문장', facts: [] },
+      enrichment: {
+        model: 'm',
+        generatedAt: '2026-10-21T00:00:00.000Z',
+        version: 1,
+        aiFields: ['outcome' as const],
+      },
+    };
+    await repository.upsert([enriched], 'enrich');
+    await syncOfficialNews(repository, {
+      sourceIds: ['fed-press'],
+      transport: mockTransport(),
+      cache: new Map(),
+      now,
+    });
+    const [after] = await repository.list('2026-10-01', '2026-10-31');
+    expect(after).toMatchObject({
+      title: '연준 보도자료 한국어 제목',
+      outcome: { headline: '보강된 결과 문장' },
+      enrichment: { version: 1 },
+    });
+  });
   it('15분 캐시·고정 URL·redirect 금지·8초 제한 및 중복 ID upsert를 지킨다', async () => {
     const repository = new MemoryCalendarRepository();
     const transport = mockTransport();
