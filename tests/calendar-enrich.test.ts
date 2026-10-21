@@ -200,12 +200,17 @@ describe('AI 결과 검증(부분별로 버리고 고치지 않는다)', () => {
     expect(effect.items[0].impact).toBeUndefined();
     const explainer = run({ explainer: '정책금리는 3.00%이다. 기준이다.' });
     expect(explainer.items[0].explainer).toBeUndefined();
-    // The measured reaction numbers (0.4, 2500, 2510) and the title numbers are allowed.
+    // The measured reaction numbers (0.4, 2500, 2510) and the title numbers are allowed in facts,
+    // but impact describes the mechanism and may not replay the reaction (shown separately).
     const ok = run({
-      impact: [{ asset: '주식', effect: '코스피 0.4% 상승이 관측됨, 상승 압력 해소' }],
+      impact: [{ asset: '주식', effect: '금리 부담이 커지면 성장주에 하락 압력' }],
       facts: [{ label: '코스피 종가', value: '2510', note: '' }],
     });
     expect(ok.rejected).toBe(0);
+    const replay = run({
+      impact: [{ asset: '주식', effect: '코스피 0.4% 상승이 관측됨, 상승 압력 해소' }],
+    });
+    expect(replay.items[0].impact).toBeUndefined();
     expect(allowedNumbers(input()).has('2.5')).toBe(true);
     expect(allowedNumbers(input()).has('3')).toBe(false);
   });
@@ -666,6 +671,23 @@ describe('enrichCalendar', () => {
     );
     expect(failing.codes.POLICY_FACTS_FAILED).toBe(1);
     expect(failing.enriched).toBe(1);
+  });
+  it('공식 수치가 아직 없으면(null) 최근 일정은 AI를 미루고, 일주일이 지나면 수치 없이 보강한다', async () => {
+    const { memory, repo } = makeRepo([
+      bok({ id: 1, title: '2026년 9월 생산자물가지수(잠정)', date: '2026-10-20' }),
+      bok({ id: 2, title: '2026년 7월 생산자물가지수(잠정)', date: '2026-08-21' }),
+    ]);
+    const { client, create } = claude((sent) => sent.map((entry) => item(entry.ref)));
+    const report = await enrichCalendar(
+      deps(repo, { ai: enrichAi(client), policyFacts: vi.fn(async () => null) }),
+      options,
+    );
+    expect(report.codes.AI_DEFERRED_FACTS_PENDING).toBe(1);
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create.mock.calls[0][0].messages[0].content).toContain('2026-08-21');
+    expect(create.mock.calls[0][0].messages[0].content).not.toContain('2026-10-20');
+    expect((await read(memory, 1)).enrichment).toBeUndefined();
+    expect((await read(memory, 2)).enrichment).toBeDefined();
   });
   it('저장된 값을 널이나 더 적은 값으로 덮지 않는다(보존 저장)', async () => {
     const stored = bok({

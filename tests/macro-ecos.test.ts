@@ -84,6 +84,32 @@ describe('ECOS 일별 시리즈', () => {
     ]);
   });
 
+  it('두 단계 항목 코드가 있는 표는 둘째 코드를 경로에 붙이고 응답 행에서도 확인한다', async () => {
+    const line = (code2: string) => ({
+      STAT_CODE: '402Y014',
+      ITEM_CODE1: '*AA',
+      ITEM_CODE2: code2,
+      TIME: '202609',
+      DATA_VALUE: '182.29',
+      UNIT_NAME: '2020=100',
+    });
+    const ok = vi.fn(async () =>
+      reply({ StatisticSearch: { list_total_count: 1, row: [line('W')] } }),
+    );
+    const rows = await adapter(ok).observations('kr-export-price', {
+      from: '2026-09-01',
+      to: '2026-09-30',
+    });
+    expect(String(calls(ok)[0][0])).toContain('/402Y014/M/202609/202609/*AA/W/');
+    expect(rows.map((item) => item.value)).toEqual(['182.29']);
+    const wrong = vi.fn(async () =>
+      reply({ StatisticSearch: { list_total_count: 1, row: [line('D')] } }),
+    );
+    const error = await failure(
+      adapter(wrong).observations('kr-export-price', { from: '2026-09-01', to: '2026-09-30' }),
+    );
+    expect((error as ProviderError).code).toBe('PROVIDER_SCHEMA_INVALID');
+  });
   it('주기별 날짜 형식(문서: 2020, 2020Q1, 202001, 20200101) 변환', () => {
     expect(periodArgument('2026-10-12', 'D')).toBe('20261012');
     expect(periodArgument('2026-10-12', 'M')).toBe('202610');

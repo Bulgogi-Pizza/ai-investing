@@ -144,6 +144,7 @@ export class EcosAdapter {
       periodArgument(start, entry.cycle),
       periodArgument(end, entry.cycle),
       entry.itemCode,
+      ...(entry.itemCode2 ? [entry.itemCode2] : []),
     ];
     return `${base}${segments.map(encodeURIComponent).join('/')}/`;
   }
@@ -258,7 +259,11 @@ export function parsePage(
   if (!Array.isArray(raw) || raw.length > ecosLimits.pageSize) throw schemaInvalid();
   const rows = raw.map((item) => {
     const row = record(item);
-    if (text(row.STAT_CODE, 20) !== entry.statCode || text(row.ITEM_CODE1, 40) !== entry.itemCode)
+    if (
+      text(row.STAT_CODE, 20) !== entry.statCode ||
+      text(row.ITEM_CODE1, 40) !== entry.itemCode ||
+      (entry.itemCode2 !== undefined && text(row.ITEM_CODE2, 40) !== entry.itemCode2)
+    )
       throw schemaInvalid();
     const period = text(row.TIME, 13);
     return {
