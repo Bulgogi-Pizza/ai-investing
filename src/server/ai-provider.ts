@@ -1,5 +1,7 @@
+import Anthropic from '@anthropic-ai/sdk';
 import { AnthropicVertex } from '@anthropic-ai/vertex-sdk';
 import { GoogleAuth } from 'google-auth-library';
+import { aiBlockedByBudget } from './budget-guard.js';
 
 /**
  * Provider abstraction shared by every AI feature (explanations in ai.ts, the morning summary and
@@ -7,10 +9,14 @@ import { GoogleAuth } from 'google-auth-library';
  * algorithm-ai.ts). A feature builds the request (minimized input, JSON schema, effort) and
  * validates the answer; the provider only moves it to the model and back.
  *
- *   vertex-claude  Claude Sonnet 5.5 on Google Vertex AI through @anthropic-ai/vertex-sdk (default)
+ *   anthropic      Claude Sonnet 5.5 on the first-party Anthropic API through @anthropic-ai/sdk
+ *                  (the production route since 2026-10-21; needs ANTHROPIC_API_KEY from Secret Manager)
+ *   vertex-claude  Claude Sonnet 5.5 on Google Vertex AI through @anthropic-ai/vertex-sdk (same model;
+ *                  blocked for this project: its anthropic-claude-sonnet quota is 0)
  *   vertex         Gemini on Vertex AI generateContent (kept selectable by configuration)
  *
- * Both use the project's own Google credentials (ADC / IAM); there is no API key anywhere.
+ * The Vertex providers use the project's own Google credentials (ADC / IAM). Only `anthropic` has an
+ * API key; it is read from the environment once, never logged, never part of an error.
  *
  * Provider contract (the part that does not depend on the model):
  *   - the call never retries by itself (the SDK's maxRetries is 0); a failed generation is a failed
@@ -18,15 +24,20 @@ import { GoogleAuth } from 'google-auth-library';
  *   - the caller's AbortSignal bounds the call;
  *   - errors are fixed codes only: never provider text, request bodies or credentials;
  *   - a 429 from the provider is its own code (AI_QUOTA_PROVIDER) so a provider-side quota problem
- *     is visible and distinct from our own per-feature daily quota (AI_QUOTA_EXCEEDED).
+ *     is visible and distinct from our own per-feature daily quota (AI_QUOTA_EXCEEDED);
+ *   - the monthly budget stop is checked inside every provider call, in front of the network
+ *     (AI_BUDGET_STOPPED). The features check it too (cheaper, before they charge their daily quota);
+ *     this one exists because Anthropic spend is outside the GCP budget, so the app's own stop is the
+ *     only brake, and it must also cover callers that forgot theirs.
  */
-export type AiProviderName = 'vertex-claude' | 'vertex';
+export type AiProviderName = 'anthropic' | 'vertex-claude' | 'vertex';
 export type AiEffort = 'low' | 'medium';
 export type AiProviderErrorCode =
   | 'AI_AUTH_UNAVAILABLE'
   | 'AI_TIMEOUT'
   | 'AI_UNAVAILABLE'
   | 'AI_QUOTA_PROVIDER'
+  | 'AI_BUDGET_STOPPED'
   | 'AI_REFUSED'
   | 'AI_RESPONSE_INVALID'
   | 'AI_RESPONSE_INCOMPLETE';
@@ -53,7 +64,16 @@ export type AiGenerateRequest = {
   temperature?: number;
   gemini?: { thinkingLevel?: 'LOW' | 'MEDIUM' | 'HIGH'; thinkingBudget?: number };
 };
-export type AiGenerateResult = { json: unknown; usage: AiUsage };
+export type AiGenerateResult = {
+  json: unknown;
+  usage: AiUsage;
+  /**
+   * Present only when a different model than the requested one produced the answer (Anthropic
+   * server-side refusal fallback). `model` is the model id that served it; it is billed at that
+   * model's rates (docs/implementation/ai-provider.md).
+   */
+  fallback?: { model: string };
+};
 export interface AiProvider {
   readonly name: AiProviderName;
   readonly model: string;
@@ -73,6 +93,10 @@ export const validProviderConfig = (config: AiProviderConfig) =>
 const count = (value: unknown) =>
   typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : 0;
 export const emptyUsage = (): AiUsage => ({ prompt: 0, output: 0, thoughts: 0, total: 0 });
+/** The monthly budget stop, in front of every provider call (fails closed, see budget-guard.ts). */
+async function assertNotBudgetStopped() {
+  if (await aiBlockedByBudget()) throw new AiProviderError('AI_BUDGET_STOPPED');
+}
 
 /** Maps an HTTP status from the provider to one fixed code. */
 export function codeForStatus(status: unknown): AiProviderErrorCode {
@@ -145,14 +169,87 @@ export type ClaudeMessageParams = {
   };
 };
 export type ClaudeMessage = {
+  /** The model that produced the message (the fallback model after a server-side fallback). */
+  model?: unknown;
   stop_reason?: string | null;
   content?: { type: string; text?: unknown }[];
   usage?: {
     input_tokens?: unknown;
     output_tokens?: unknown;
     output_tokens_details?: { thinking_tokens?: unknown } | null;
+    /** Per-attempt usage; a `fallback_message` entry means a fallback model served the answer. */
+    iterations?:
+      { type?: unknown; model?: unknown; input_tokens?: unknown; output_tokens?: unknown }[] | null;
   };
 };
+
+/**
+ * Turns a finished Claude message into the provider result. Shared by the Vertex and the Anthropic
+ * API providers; it never throws anything but an AiProviderError with a fixed code.
+ */
+function readClaudeMessage(message: ClaudeMessage): AiGenerateResult {
+  // Always before reading content: a refusal or a cut-off answer is never parsed.
+  if (message.stop_reason === 'refusal') throw new AiProviderError('AI_REFUSED');
+  if (
+    message.stop_reason === 'max_tokens' ||
+    message.stop_reason === 'model_context_window_exceeded'
+  )
+    throw new AiProviderError('AI_RESPONSE_INCOMPLETE');
+  if (message.stop_reason !== 'end_turn') throw new AiProviderError('AI_RESPONSE_INVALID');
+  const blocks = message.content;
+  if (!Array.isArray(blocks)) throw new AiProviderError('AI_RESPONSE_INVALID');
+  // After a server-side fallback the content has a `fallback` marker where the first model's
+  // output gave way to the next model's; only what follows the last marker is the answer.
+  const lastBoundary = blocks.map((block) => block?.type).lastIndexOf('fallback');
+  // Thinking blocks (summarized or empty) are skipped; any other non-text block is not expected.
+  const texts: string[] = [];
+  for (const block of blocks.slice(lastBoundary + 1)) {
+    if (block?.type === 'thinking' || block?.type === 'redacted_thinking') continue;
+    if (block?.type !== 'text' || typeof block.text !== 'string')
+      throw new AiProviderError('AI_RESPONSE_INVALID');
+    texts.push(block.text);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(texts.join(''));
+  } catch {
+    throw new AiProviderError('AI_RESPONSE_INVALID');
+  }
+  const usage = message.usage ?? {};
+  let prompt = count(usage.input_tokens);
+  let output = count(usage.output_tokens);
+  const iterations = Array.isArray(usage.iterations) ? usage.iterations : [];
+  const served = iterations.find((entry) => entry?.type === 'fallback_message');
+  if (!served) {
+    return {
+      json,
+      usage: {
+        prompt,
+        output,
+        thoughts: count(usage.output_tokens_details?.thinking_tokens),
+        total: prompt + output,
+      },
+    };
+  }
+  // Top-level usage covers only the attempt that produced the message; the declined attempts are
+  // spent tokens too, so the per-attempt entries are the source of truth for a fallback turn.
+  prompt = iterations.reduce((sum, entry) => sum + count(entry?.input_tokens), 0);
+  output = iterations.reduce((sum, entry) => sum + count(entry?.output_tokens), 0);
+  const model = typeof served.model === 'string' ? served.model : message.model;
+  return {
+    json,
+    usage: {
+      prompt,
+      output,
+      thoughts: count(usage.output_tokens_details?.thinking_tokens),
+      total: prompt + output,
+    },
+    fallback: {
+      model:
+        typeof model === 'string' && /^[a-z][a-z0-9.@-]{1,80}$/.test(model) ? model : 'unknown',
+    },
+  };
+}
 
 /**
  * Claude Sonnet 5.5 on Vertex AI. Request rules (claude-api skill, model-migration.md "Migrating
@@ -199,6 +296,7 @@ export class ClaudeVertexProvider implements AiProvider {
   }
   async generate(request: AiGenerateRequest): Promise<AiGenerateResult> {
     request.signal.throwIfAborted();
+    await assertNotBudgetStopped();
     let message: ClaudeMessage;
     try {
       message = await this.sdk().messages.create(
@@ -224,42 +322,152 @@ export class ClaudeVertexProvider implements AiProvider {
         failure?.name === 'APIConnectionTimeoutError' ? 'AI_TIMEOUT' : 'AI_UNAVAILABLE',
       );
     }
-    // Always before reading content: a refusal or a cut-off answer is never parsed.
-    if (message.stop_reason === 'refusal') throw new AiProviderError('AI_REFUSED');
-    if (
-      message.stop_reason === 'max_tokens' ||
-      message.stop_reason === 'model_context_window_exceeded'
-    )
-      throw new AiProviderError('AI_RESPONSE_INCOMPLETE');
-    if (message.stop_reason !== 'end_turn') throw new AiProviderError('AI_RESPONSE_INVALID');
-    const blocks = message.content;
-    if (!Array.isArray(blocks)) throw new AiProviderError('AI_RESPONSE_INVALID');
-    // Thinking blocks (summarized or empty) are skipped; any other non-text block is not expected.
-    const texts: string[] = [];
-    for (const block of blocks) {
-      if (block?.type === 'thinking' || block?.type === 'redacted_thinking') continue;
-      if (block?.type !== 'text' || typeof block.text !== 'string')
-        throw new AiProviderError('AI_RESPONSE_INVALID');
-      texts.push(block.text);
-    }
-    let json: unknown;
-    try {
-      json = JSON.parse(texts.join(''));
-    } catch {
-      throw new AiProviderError('AI_RESPONSE_INVALID');
-    }
-    const usage = message.usage ?? {};
-    const prompt = count(usage.input_tokens);
-    const output = count(usage.output_tokens);
-    return {
-      json,
-      usage: {
-        prompt,
-        output,
-        thoughts: count(usage.output_tokens_details?.thinking_tokens),
-        total: prompt + output,
+    return readClaudeMessage(message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Claude Sonnet 5.5 on the first-party Anthropic API (production route).
+// ---------------------------------------------------------------------------
+export const ANTHROPIC_API_BASE_URL = 'https://api.anthropic.com';
+/** Beta header of the `fallbacks: "default"` form (claude-api skill, model-migration.md). */
+export const SERVER_FALLBACK_BETA = 'server-side-fallback-2026-07-01';
+/** Loose shape check only (starts with sk-ant-, 20-300 characters); the provider decides if it works. */
+export const validAnthropicApiKey = (value: unknown): value is string =>
+  typeof value === 'string' &&
+  value.length >= 20 &&
+  value.length <= 300 &&
+  /^sk-ant-[A-Za-z0-9_-]+$/.test(value);
+/** Upper bound for one HTTP call; every caller's own AbortSignal is shorter and wins. */
+const ANTHROPIC_HTTP_TIMEOUT_MS = 180_000;
+/** The part of the SDK client this adapter uses (the standard and the beta messages endpoint). */
+export interface AnthropicApiClient {
+  messages: {
+    create(
+      params: ClaudeMessageParams,
+      options: { signal: AbortSignal; maxRetries?: number },
+    ): Promise<ClaudeMessage>;
+  };
+  beta: {
+    messages: {
+      create(
+        params: ClaudeMessageParams & { betas: string[]; fallbacks: 'default' },
+        options: { signal: AbortSignal; maxRetries?: number },
+      ): Promise<ClaudeMessage>;
+    };
+  };
+}
+export type AnthropicProviderOptions = {
+  /** ANTHROPIC_API_KEY. Held in memory only. */
+  apiKey: string;
+  /** Server-side refusal fallback; on unless explicitly turned off (ANTHROPIC_REFUSAL_FALLBACK=false). */
+  refusalFallback?: boolean;
+};
+
+/** Maps an error thrown by the SDK to one fixed code, by class (never by message text). */
+export function codeForSdkError(error: unknown, aborted: boolean): AiProviderErrorCode {
+  if (error instanceof AiProviderError) return error.code;
+  if (aborted || error instanceof Anthropic.APIUserAbortError) return 'AI_TIMEOUT';
+  // APIConnectionTimeoutError extends APIConnectionError: the more specific class goes first.
+  if (error instanceof Anthropic.APIConnectionTimeoutError) return 'AI_TIMEOUT';
+  if (error instanceof Anthropic.APIConnectionError) return 'AI_UNAVAILABLE';
+  if (error instanceof Anthropic.RateLimitError) return 'AI_QUOTA_PROVIDER';
+  if (
+    error instanceof Anthropic.AuthenticationError ||
+    error instanceof Anthropic.PermissionDeniedError
+  )
+    return 'AI_AUTH_UNAVAILABLE';
+  // Remaining API errors (400, 404, 409, 422, 5xx incl. 529 overloaded; 408/504 through the status).
+  if (error instanceof Anthropic.APIError) return codeForStatus(error.status);
+  return 'AI_UNAVAILABLE';
+}
+
+/**
+ * Claude Sonnet 5.5 on the Anthropic API through the official SDK (claude-api skill: TypeScript
+ * README "Client Initialization" and "Stop Reasons", tool-use.md "Structured Outputs", shared
+ * error-codes.md, model-migration.md "Migrating to Claude Sonnet 5.5" and the server-side
+ * `fallbacks` sections). Same request rules as the Vertex path (see ClaudeVertexProvider):
+ * adaptive thinking by default (no `thinking`), depth by `output_config.effort`, structured JSON by
+ * `output_config.format`, no sampling parameters, no prefill, no forced tool choice, stop_reason
+ * always checked before the content is read.
+ *
+ * Refusal fallback (on by default; ANTHROPIC_REFUSAL_FALLBACK=false turns it off): the request goes
+ * to the beta messages endpoint with `betas: ['server-side-fallback-2026-07-01']` and
+ * `fallbacks: 'default'`. A policy decline is then re-run server-side, inside the same call, on the
+ * model Anthropic picks for that refusal category. The skill documents this form next to
+ * `output_config.format`, so structured outputs stay on. The `fallback_message` entry of
+ * `usage.iterations` and the `fallback` content block are read (readClaudeMessage) and the serving
+ * model is returned as `fallback.model`. Billing: a fallback attempt is billed at the FALLBACK
+ * model's own rates, not Sonnet 5.5's.
+ *
+ * The API key is the SDK's `apiKey` and nothing else. The base URL is pinned (an ANTHROPIC_BASE_URL in
+ * the environment cannot redirect the key) and ANTHROPIC_AUTH_TOKEN is ignored (sending both
+ * credentials is a 401).
+ */
+export class AnthropicProvider implements AiProvider {
+  readonly name = 'anthropic' as const;
+  /** A private field: neither enumerable nor serialized, so logging the provider cannot print it. */
+  readonly #apiKey: string;
+  readonly #refusalFallback: boolean;
+  #client: AnthropicApiClient | undefined;
+  constructor(
+    private config: { model: string },
+    options: AnthropicProviderOptions,
+    client?: AnthropicApiClient,
+  ) {
+    if (!/^claude-[a-z0-9.-]{1,80}$/.test(config.model) || !validAnthropicApiKey(options.apiKey))
+      throw new Error('Invalid AI configuration');
+    this.#apiKey = options.apiKey;
+    this.#refusalFallback = options.refusalFallback ?? true;
+    this.#client = client;
+  }
+  get model() {
+    return this.config.model;
+  }
+  get label() {
+    return this.config.model === DEFAULT_CLAUDE_MODEL ? 'Claude Sonnet 5.5' : this.config.model;
+  }
+  get refusalFallback() {
+    return this.#refusalFallback;
+  }
+  /** Created on first use. maxRetries 0: a failed generation is not retried by the SDK. */
+  private sdk(): AnthropicApiClient {
+    this.#client ??= new Anthropic({
+      apiKey: this.#apiKey,
+      authToken: null,
+      baseURL: ANTHROPIC_API_BASE_URL,
+      maxRetries: 0,
+      timeout: ANTHROPIC_HTTP_TIMEOUT_MS,
+    }) as unknown as AnthropicApiClient;
+    return this.#client;
+  }
+  async generate(request: AiGenerateRequest): Promise<AiGenerateResult> {
+    request.signal.throwIfAborted();
+    // The app's monthly budget stop, before any network use of the key.
+    await assertNotBudgetStopped();
+    const params: ClaudeMessageParams = {
+      model: this.config.model,
+      max_tokens: request.maxOutputTokens,
+      system: request.system,
+      messages: [{ role: 'user', content: request.prompt }],
+      output_config: {
+        effort: request.effort,
+        format: { type: 'json_schema', schema: toClaudeSchema(request.schema) as JsonSchema },
       },
     };
+    const options = { signal: request.signal, maxRetries: 0 };
+    let message: ClaudeMessage;
+    try {
+      message = this.#refusalFallback
+        ? await this.sdk().beta.messages.create(
+            { ...params, betas: [SERVER_FALLBACK_BETA], fallbacks: 'default' },
+            options,
+          )
+        : await this.sdk().messages.create(params, options);
+    } catch (error) {
+      throw new AiProviderError(codeForSdkError(error, request.signal.aborted));
+    }
+    return readClaudeMessage(message);
   }
 }
 
@@ -294,6 +502,7 @@ export class GeminiVertexProvider implements AiProvider {
   async generate(request: AiGenerateRequest): Promise<AiGenerateResult> {
     const { signal } = request;
     signal.throwIfAborted();
+    await assertNotBudgetStopped();
     let token: string | null | undefined;
     try {
       token = await this.auth.getAccessToken();
@@ -397,25 +606,59 @@ export class GeminiVertexProvider implements AiProvider {
 export type AiEnvironment = {
   provider: AiProviderName;
   config: AiProviderConfig;
+  /** anthropic only: the server-side refusal fallback switch (default on). */
+  refusalFallback?: boolean;
 };
+/** The API key travels with a selection but is not an enumerable property: it never serializes. */
+const API_KEY = Symbol('anthropic-api-key');
+type SecretCarrier = { [API_KEY]?: string };
 /**
- * AI_PROVIDER = vertex-claude | vertex (anything else, or unset, means "no provider").
- * vertex-claude defaults AI_MODEL to claude-sonnet-5-5; vertex needs AI_MODEL (a Gemini model id).
- * A model id of the wrong family for the provider is a configuration error (returns null).
+ * ANTHROPIC_REFUSAL_FALLBACK: unset or empty = on; exactly "true" = on; exactly "false" = off. Any
+ * other value is a configuration error (a typo must not silently change what a call may cost).
+ */
+export function refusalFallbackFlag(value: string | undefined): boolean | null {
+  if (value === undefined || value === '' || value === 'true') return true;
+  return value === 'false' ? false : null;
+}
+/**
+ * AI_PROVIDER = anthropic | vertex-claude | vertex (anything else, or unset, means "no provider").
+ * anthropic and vertex-claude default AI_MODEL to claude-sonnet-5-5; vertex needs AI_MODEL (a Gemini
+ * model id). A model id of the wrong family for the provider is a configuration error (null).
+ * anthropic additionally needs a plausible ANTHROPIC_API_KEY (starts with sk-ant-, 20-300
+ * characters; checked, and kept out of the returned object's enumerable state) and a valid
+ * ANTHROPIC_REFUSAL_FALLBACK; otherwise the provider is off (null) and nothing is called.
  */
 export function aiEnvironment(env: NodeJS.ProcessEnv): AiEnvironment | null {
   const { AI_PROVIDER, AI_LOCATION, GOOGLE_CLOUD_PROJECT } = env;
-  if ((AI_PROVIDER !== 'vertex-claude' && AI_PROVIDER !== 'vertex') || !GOOGLE_CLOUD_PROJECT)
+  if (
+    (AI_PROVIDER !== 'anthropic' && AI_PROVIDER !== 'vertex-claude' && AI_PROVIDER !== 'vertex') ||
+    !GOOGLE_CLOUD_PROJECT
+  )
     return null;
-  const model = env.AI_MODEL || (AI_PROVIDER === 'vertex-claude' ? DEFAULT_CLAUDE_MODEL : '');
+  const model = env.AI_MODEL || (AI_PROVIDER === 'vertex' ? '' : DEFAULT_CLAUDE_MODEL);
   const config = { project: GOOGLE_CLOUD_PROJECT, model, location: AI_LOCATION || 'global' };
   if (!model || !validProviderConfig(config)) return null;
   const claude = /^claude-/.test(model);
-  if ((AI_PROVIDER === 'vertex-claude') !== claude) return null;
-  return { provider: AI_PROVIDER, config };
+  if ((AI_PROVIDER !== 'vertex') !== claude) return null;
+  if (AI_PROVIDER !== 'anthropic') return { provider: AI_PROVIDER, config };
+  const apiKey = env.ANTHROPIC_API_KEY;
+  const refusalFallback = refusalFallbackFlag(env.ANTHROPIC_REFUSAL_FALLBACK);
+  if (!validAnthropicApiKey(apiKey) || refusalFallback === null) return null;
+  const selection: AiEnvironment & SecretCarrier = {
+    provider: AI_PROVIDER,
+    config,
+    refusalFallback,
+  };
+  Object.defineProperty(selection, API_KEY, { value: apiKey, enumerable: false });
+  return selection;
 }
 /** Builds the provider for a validated environment; throws only on an invalid configuration. */
 export function createAiProvider(selection: AiEnvironment): AiProvider {
+  if (selection.provider === 'anthropic')
+    return new AnthropicProvider(selection.config, {
+      apiKey: (selection as SecretCarrier)[API_KEY] ?? '',
+      refusalFallback: selection.refusalFallback ?? true,
+    });
   return selection.provider === 'vertex-claude'
     ? new ClaudeVertexProvider(selection.config)
     : new GeminiVertexProvider(selection.config);

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Provider key intake (DART, FRED, ECOS, Telegram, SEC contact); plaintext stays in memory and gcloud stdin only.
+"""Provider key intake (DART, FRED, ECOS, Telegram, SEC contact, Anthropic API); plaintext stays in memory and gcloud stdin only.
 
 Usage: python scripts/provider-secrets.py <alias>... [--rotate | --attach | --attach-only]
 Secret names, environment names and aliases are fixed below and never come from operator input.
@@ -20,6 +20,9 @@ REGION = "asia-northeast3"
 
 API_KEY = re.compile(r"[A-Za-z0-9_-]{16,128}")
 DART_KEY = re.compile(r"[0-9A-Za-z]{40}")  # OpenDART crtfc_key is documented as 40 characters.
+# Anthropic API keys start with "sk-ant-" (for example sk-ant-api03-...). The exact format is not
+# documented as a contract, so only the prefix, the alphabet and a loose length range are checked.
+ANTHROPIC_KEY = re.compile(r"sk-ant-[A-Za-z0-9_-]+")
 TELEGRAM_TOKEN = re.compile(r"[0-9]{3,20}:[A-Za-z0-9_-]{20,128}")
 TELEGRAM_CHAT = re.compile(r"-?[0-9]{1,19}")
 CONTACT_EMAIL = re.compile(r"[^\s@<>()]+@[^\s@<>()]+\.[^\s@<>()]+")
@@ -31,6 +34,10 @@ def _api_key(value):
 
 def _dart_key(value):
     return DART_KEY.fullmatch(value) is not None
+
+
+def _anthropic_key(value):
+    return 20 <= len(value) <= 300 and ANTHROPIC_KEY.fullmatch(value) is not None
 
 
 def _telegram_token(value):
@@ -57,6 +64,7 @@ SECRETS = {
     "investing-telegram-bot-token": ("TELEGRAM_BOT_TOKEN", _telegram_token, "<숫자>:<영문·숫자·-·_ 20~128자>"),
     "investing-telegram-chat-id": ("TELEGRAM_CHAT_ID", _telegram_chat, "정수(그룹은 음수 가능)"),
     "investing-sec-user-agent": ("SEC_USER_AGENT", _sec_user_agent, "연락 이메일을 포함한 한 줄, 200자 이하"),
+    "investing-anthropic-api-key": ("ANTHROPIC_API_KEY", _anthropic_key, "sk-ant로 시작하는 영문·숫자·-·_ 20~300자"),
 }
 ALIASES = {
     "dart": ("investing-dart-api-key",),
@@ -66,8 +74,21 @@ ALIASES = {
     "telegram-token": ("investing-telegram-bot-token",),
     "telegram-chat": ("investing-telegram-chat-id",),
     "sec": ("investing-sec-user-agent",),
+    "anthropic": ("investing-anthropic-api-key",),
 }
 ATTACH_FAILURE = "Cloud Run 서비스 비밀 연결에 실패했습니다. 개인 계정 권한과 서비스 상태를 확인하세요."
+# `gcloud run services update` waits while Cloud Run rolls out a new revision, which can take minutes.
+ATTACH_TIMEOUT_SECONDS = 300
+ATTACH_UNCONFIRMED = (
+    "서비스 연결 확인 시간이 초과되었습니다(300초). Cloud Run이 새 리비전을 배포하는 중일 수 있어, 연결이 실패했다는 뜻이 아닙니다. "
+    "비밀 값은 이미 저장되었습니다. 다시 실행하기 전에 `gcloud run services describe ai-investing --region=asia-northeast3`로 "
+    "환경변수에 비밀이 숫자 버전으로 연결되었는지(예: ANTHROPIC_API_KEY=investing-anthropic-api-key:<버전>) 확인하세요. "
+    "연결되어 있지 않으면 같은 항목으로 --attach-only를 실행하세요."
+)
+
+
+class AttachUnconfirmed(SetupError):
+    """The attach call timed out: the update may still have succeeded."""
 
 
 def resolve_aliases(aliases):
@@ -162,6 +183,8 @@ def attach(config, versions, *, runner=secret_intake.run_gcloud_process, progres
         ["run", "services", "update", SERVICE, f"--region={REGION}", "--update-secrets=" + ",".join(pairs)],
         runner=runner,
         failure=ATTACH_FAILURE,
+        timeout=ATTACH_TIMEOUT_SECONDS,
+        on_timeout=AttachUnconfirmed(ATTACH_UNCONFIRMED),
     )
     progress(f"서비스 {SERVICE}에 연결 완료: " + ", ".join(pairs))
 

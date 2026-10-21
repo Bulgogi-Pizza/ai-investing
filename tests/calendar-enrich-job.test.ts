@@ -338,15 +338,15 @@ describe('배포 정의(정적 검사)', () => {
     expect(step).toContain(
       '--network=investing-network --subnet=investing-subnet --vpc-egress=all-traffic',
     );
-    expect(step).toContain('CALENDAR_AI_ENABLED=true');
+    expect(step).toContain('CALENDAR_AI_ENABLED=$CALENDAR_AI');
     expect(step).toContain('AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION');
     expect(step).toContain('investing-toss-[a-z-]+:[0-9]+');
     expect(step).toContain('--max-retries=0');
     expect(step).not.toContain('run.invoker');
     expect(step).not.toContain('ALGO_AI_ENABLED');
   });
-  it('AI 기본값은 Claude Sonnet 5.5(vertex-claude, global), AI형 알고리즘은 꺼 둔다', () => {
-    expect(deploy).toContain("AI_PROVIDER: ${{ vars.AI_PROVIDER || 'vertex-claude' }}");
+  it('AI 기본값은 Claude Sonnet 5.5(Anthropic API), AI형 알고리즘은 꺼 둔다', () => {
+    expect(deploy).toContain("AI_PROVIDER: ${{ vars.AI_PROVIDER || 'anthropic' }}");
     expect(deploy).toContain("AI_MODEL: ${{ vars.AI_MODEL || 'claude-sonnet-5-5' }}");
     expect(deploy).toContain("AI_LOCATION: ${{ vars.AI_LOCATION || 'global' }}");
     expect(deploy.match(/--set-env-vars="[^"]*ALGO_AI_ENABLED=false[^"]*"/g)?.length).toBe(2);

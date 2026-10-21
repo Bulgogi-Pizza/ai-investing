@@ -99,7 +99,9 @@ def read_identity(root=ROOT):
     return config
 
 
-def gcloud(config, args, *, value=None, runner=run_gcloud_process, failure=DEFAULT_FAILURE):
+def gcloud(config, args, *, value=None, runner=run_gcloud_process, failure=DEFAULT_FAILURE, timeout=60, on_timeout=None):
+    """Run gcloud with fixed identity flags. `on_timeout` is an exception to raise instead of the
+    generic failure when the call exceeds `timeout` (the operation may still have succeeded)."""
     argv = [
         "gcloud", *args,
         f"--account={config['account']}",
@@ -113,9 +115,13 @@ def gcloud(config, args, *, value=None, runner=run_gcloud_process, failure=DEFAU
             input=None if value is None else value.encode("utf-8"),
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            timeout=60,
+            timeout=timeout,
             check=False,
         )
+    except subprocess.TimeoutExpired:
+        if on_timeout is not None:
+            raise on_timeout from None
+        raise SetupError("gcloud 실행에 실패했습니다. 개인 계정 로그인과 네트워크를 확인하세요.") from None
     except (OSError, subprocess.SubprocessError):
         raise SetupError("gcloud 실행에 실패했습니다. 개인 계정 로그인과 네트워크를 확인하세요.") from None
     if result.returncode != 0:

@@ -188,7 +188,10 @@ describe('인프라 정의(정적 검사; terraform validate는 별도로 실행
     const next = deploy.indexOf('- name: ', start + 1);
     // Only this step: later job steps (e.g. the paper algorithm job) legitimately use Toss secrets.
     const step = deploy.slice(start, next === -1 ? undefined : next);
-    expect(step).toContain('MORNING_AI_ENABLED=true');
+    // On by default; switched off in the step only when the Anthropic key is not connected (a missing
+    // provider would otherwise be a configuration error that takes the whole brief down).
+    expect(step).toContain('MORNING_AI=true');
+    expect(step).toContain('MORNING_AI_ENABLED=$MORNING_AI');
     expect(step).toContain('AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION');
     expect(step).not.toContain('MORNING_AI_ENABLED=false');
     expect(step).toContain('--image="$DEPLOY_IMAGE"');

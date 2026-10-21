@@ -1,4 +1,5 @@
 import { AI_FEATURE_LIMITS, type AiQuota } from './ai.js';
+import { aiBlockedByBudget } from './budget-guard.js';
 import {
   canonical,
   clip,
@@ -80,7 +81,13 @@ export type EnrichItem = {
   impact?: EventImpact[];
   explainer?: string;
 };
-export type EnrichBatch = { items: EnrichItem[]; rejected: number; usage: AiUsage };
+export type EnrichBatch = {
+  items: EnrichItem[];
+  rejected: number;
+  usage: AiUsage;
+  /** Set when a fallback model (not the configured one) produced this batch: its model id. */
+  fallbackModel?: string;
+};
 export interface EnrichAi {
   /** Label stored as enrichment.model ("Claude Sonnet 5.5"). */
   readonly model: string;
@@ -321,6 +328,8 @@ export class ProviderEnrichAi implements EnrichAi {
       throw new EnrichAiError('AI_INPUT_TOO_LARGE');
     const signal = AbortSignal.timeout(TIMEOUT_MS);
     const operation = (async () => {
+      // Monthly budget stop: before the quota is charged and before any call.
+      if (await aiBlockedByBudget()) throw new EnrichAiError('BUDGET_STOPPED');
       let allowed: boolean;
       try {
         allowed = await this.quota.consume(kstDay(this.clock()));
@@ -341,7 +350,10 @@ export class ProviderEnrichAi implements EnrichAi {
           signal,
         });
       } catch (error) {
-        if (error instanceof AiProviderError) throw new EnrichAiError(error.code);
+        if (error instanceof AiProviderError)
+          throw new EnrichAiError(
+            error.code === 'AI_BUDGET_STOPPED' ? 'BUDGET_STOPPED' : error.code,
+          );
         throw new EnrichAiError(signal.aborted ? 'AI_TIMEOUT' : 'AI_UNAVAILABLE');
       }
     })();
@@ -351,9 +363,13 @@ export class ProviderEnrichAi implements EnrichAi {
       }),
     );
     operation.catch(() => undefined);
-    const { json, usage } = await Promise.race([operation, timeout]);
+    const { json, usage, fallback } = await Promise.race([operation, timeout]);
     // Validate against what was actually sent.
-    return { ...validateEnrichment(json, sent), usage };
+    return {
+      ...validateEnrichment(json, sent),
+      usage,
+      ...(fallback ? { fallbackModel: fallback.model } : {}),
+    };
   }
 }
 export const CALENDAR_AI_DAILY_LIMIT = AI_FEATURE_LIMITS.calendar;
@@ -474,6 +490,7 @@ const STOP_CODES = new Set<string>([
   'AI_QUOTA_PROVIDER',
   'AI_AUTH_UNAVAILABLE',
   'AI_TIMEOUT',
+  'BUDGET_STOPPED',
 ]);
 
 export async function enrichCalendar(
@@ -603,7 +620,8 @@ export async function enrichCalendar(
       } catch (error) {
         const failure = error instanceof EnrichAiError ? error.code : 'AI_UNAVAILABLE';
         // A used-up daily quota is the guard working; everything else is a failure worth recording.
-        code(failure, failure !== 'AI_QUOTA_EXCEEDED');
+        // The budget stop is a guard working too; it also ends the run's AI calls (STOP_CODES).
+        code(failure, failure !== 'AI_QUOTA_EXCEEDED' && failure !== 'BUDGET_STOPPED');
         if (STOP_CODES.has(failure)) break;
         continue;
       }
@@ -611,6 +629,8 @@ export async function enrichCalendar(
         report.usage[key] += result.usage[key];
       report.rejected += result.rejected;
       if (result.rejected) code('AI_OUTPUT_REJECTED', false);
+      // A refusal fallback answered with another model, billed at that model's rates: visible in the run.
+      if (result.fallbackModel) code('AI_FALLBACK_SERVED', false);
       const at = now().toISOString();
       for (const item of result.items) {
         const entry = prepared.find((candidate) => candidate.input.ref === item.ref);
@@ -620,7 +640,7 @@ export async function enrichCalendar(
           item,
           entry.input.knownFacts,
           entry.input.reactionSmall,
-          deps.ai.model,
+          result.fallbackModel ?? deps.ai.model,
           at,
         );
         if (next !== events.get(entry.event.id)) {

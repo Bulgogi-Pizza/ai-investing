@@ -426,7 +426,7 @@ export async function runMorningCalendar(deps: MorningDependencies): Promise<Job
 
   // c. AI step: off unless MORNING_AI_ENABLED=true produced an adapter
   const ai = deps.ai;
-  const useAi = async <T extends { usage: MorningUsage }>(
+  const useAi = async <T extends { usage: MorningUsage; fallbackModel?: string }>(
     name: string,
     call: (adapter: MorningAi) => Promise<T>,
   ): Promise<T | null> => {
@@ -436,6 +436,8 @@ export async function runMorningCalendar(deps: MorningDependencies): Promise<Job
       const result = await call(ai);
       for (const key of Object.keys(run.ai.tokens) as (keyof MorningUsage)[])
         run.ai.tokens[key] += result.usage[key];
+      // A refusal fallback answered with another model, billed at that model's rates: visible in the run.
+      if (result.fallbackModel) steps.info(name, 'AI_FALLBACK_SERVED');
       return result;
     } catch (error) {
       const code = aiErrorCode(error);
@@ -495,7 +497,14 @@ export async function runMorningCalendar(deps: MorningDependencies): Promise<Job
     for (const item of result.items) {
       const event = refs.find((ref) => ref.refId === item.refId)?.event;
       if (event)
-        written.push({ ...event, aiSummary: { text: item.text, model: ai.model, generatedAt } });
+        written.push({
+          ...event,
+          aiSummary: {
+            text: item.text,
+            model: result.fallbackModel ?? ai.model,
+            generatedAt,
+          },
+        });
     }
     // Rejected items stay "no summary"; the safety check working is recorded, not a failure.
     if (result.rejected) steps.info('ai-summary', 'AI_OUTPUT_REJECTED');
@@ -525,7 +534,7 @@ export async function runMorningCalendar(deps: MorningDependencies): Promise<Job
             ...event,
             title: item.titleKo,
             titleOriginal: event.title,
-            translation: { model: ai.model, translatedAt },
+            translation: { model: result.fallbackModel ?? ai.model, translatedAt },
           })
         : null;
       if (translated) written.push(translated);
