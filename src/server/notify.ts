@@ -19,7 +19,8 @@ export type RiskIncreaseChange =
   | 'min-holding-lowered'
   | 'loss-stop-loosened'
   | 'liquidity-lowered'
-  | 'live-strategy-changed';
+  | 'live-strategy-changed'
+  | 'budget-stop-released';
 export type NotificationEvent =
   | {
       kind: 'fill';
@@ -72,6 +73,10 @@ export type NotificationEvent =
       outcome: 'filled' | 'canceled' | 'not-placed';
     }
   | { kind: 'job-failure'; jobName: string }
+  /** Monthly cloud budget (docs/operations/budget.md). Deliberately no amounts: only the state. */
+  | { kind: 'budget-warning' }
+  | { kind: 'budget-stop' }
+  | { kind: 'budget-resumed' }
   | { kind: 'morning-brief'; summary?: string }
   | {
       kind: 'setting-risk-increase';
@@ -176,6 +181,9 @@ const screenPaths: Record<NotificationKind, string> = {
   'data-error': '/algorithms',
   'job-failure': '/algorithms',
   'morning-brief': '/calendar',
+  'budget-warning': '/',
+  'budget-stop': '/',
+  'budget-resumed': '/',
   'setting-risk-increase': '/algorithms',
 };
 function bodyLines(event: NotificationEvent): string[] {
@@ -255,6 +263,25 @@ function bodyLines(event: NotificationEvent): string[] {
         '[아침 브리핑]',
         text(event.summary, '오늘의 브리핑이 준비되었습니다.', maximumSummaryLength),
       ];
+    case 'budget-warning':
+      return [
+        '[월 예산 경고]',
+        '이번 달 클라우드 사용 비용이 월 예산 경고 기준에 도달했습니다.',
+        '한도에 도달하면 예약 작업, AI 호출, 실전 주문이 자동으로 멈춥니다.',
+      ];
+    case 'budget-stop':
+      return [
+        '[월 예산 한도 도달]',
+        '예약 작업, AI 호출, 실전 주문을 멈추고 긴급 정지를 켰습니다. 사이트와 데이터는 그대로 유지됩니다.',
+        '예산 알림은 몇 시간 늦을 수 있고, 고정 비용(고정 IP, NAT, 저장소)은 계속 청구됩니다.',
+        '화면 상단 안내에서 확인하고, 계속하려면 소유자가 직접 해제하세요.',
+      ];
+    case 'budget-resumed':
+      return [
+        '[월 예산 새 기간 시작]',
+        '새 청구 기간이 시작되어 월 예산 정지를 풀었습니다.',
+        '긴급 정지는 자동으로 풀리지 않습니다. 확인 후 직접 해제하세요.',
+      ];
     case 'setting-risk-increase':
       return [
         `[위험 증가 설정 변경] ${pick(
@@ -268,6 +295,7 @@ function bodyLines(event: NotificationEvent): string[] {
             'loss-stop-loosened': '누적 손실 정지 기준 완화',
             'liquidity-lowered': '최소 거래대금 기준 하향',
             'live-strategy-changed': '실전 알고리즘 전략 변경(대상 종목·기준값·가중치·포지션 크기)',
+            'budget-stop-released': '월 예산 정지 해제',
           },
           event.change,
           '설정 변경',

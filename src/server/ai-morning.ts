@@ -1,4 +1,5 @@
 import { GoogleAuth } from 'google-auth-library';
+import { aiBlockedByBudget } from './budget-guard.js';
 import { AI_ALLOCATION_INSTRUCTION, AI_TRADE_INSTRUCTION, type AiQuota } from './ai.js';
 
 /**
@@ -39,6 +40,7 @@ export interface MorningAi {
 }
 export type MorningAiErrorCode =
   | 'AI_QUOTA_EXCEEDED'
+  | 'BUDGET_STOPPED'
   | 'AI_AUTH_UNAVAILABLE'
   | 'AI_TIMEOUT'
   | 'AI_UNAVAILABLE'
@@ -350,6 +352,8 @@ export class VertexMorningAi implements MorningAi {
   ): Promise<{ json: unknown; usage: MorningUsage }> {
     const signal = AbortSignal.timeout(task.timeoutMs);
     const operation = (async () => {
+      // Monthly budget stop: before the quota is charged and before any call.
+      if (await aiBlockedByBudget()) throw new MorningAiError('BUDGET_STOPPED');
       let allowed: boolean;
       try {
         allowed = await this.quota.consume(kstDay(this.clock()));

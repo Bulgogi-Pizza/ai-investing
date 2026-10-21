@@ -83,6 +83,7 @@ import {
   type JobLogger,
   type JobOutcome,
 } from './runner.js';
+import { installJobBudgetGuard } from './budget-gate.js';
 
 /**
  * Live (real-money) algorithm run, one invocation per scheduler slot (stage 7f).
@@ -148,6 +149,12 @@ export type LiveJobDependencies = {
   notify?: (event: NotificationEvent) => Promise<unknown>;
   /** AI-method algorithms run only when `enabled` and a decider exist. */
   ai?: { enabled: boolean; decider?: AlgorithmDecider };
+  /**
+   * Monthly budget flag (docs/operations/budget.md). Not 'running' means: reconcile existing orders
+   * (fills, locks, fill notices) and place nothing new. Unreadable ('unknown') also raises a job-failure
+   * notice. Absent (tests that do not care) means no budget check.
+   */
+  budget?: () => Promise<'running' | 'stopped' | 'unknown'>;
   now?: () => Date;
   sleep?: (ms: number) => Promise<void>;
   log: JobLogger;
@@ -549,6 +556,22 @@ function summarize(results: Record<string, AlgorithmRunResult>): AlgorithmRun['s
   return bad === all.length ? 'failed' : 'partial';
 }
 
+/** Reconciles non-terminal live orders only: records fills, clears stale locks, sends fill notices. */
+function orderReconciler(
+  deps: Pick<LiveJobDependencies, 'client' | 'store' | 'notify'>,
+  now: () => Date,
+  names: Map<string, string>,
+) {
+  return new LiveOrderExecutor({
+    client: deps.client,
+    store: deps.store,
+    notifier: { notify: async (event) => void (await deps.notify?.(event)) },
+    now,
+    tradingDaysSince: () => null,
+    algorithmName: (id) => names.get(id) ?? '(삭제된 알고리즘)',
+  });
+}
+
 /** One invocation: decide from the calendar whether the market just opened, then run every live algorithm. */
 export async function runAlgoLive(deps: LiveJobDependencies): Promise<JobOutcome> {
   const options = { ...DEFAULT_LIVE_OPTIONS, ...deps.options };
@@ -585,6 +608,34 @@ export async function runAlgoLive(deps: LiveJobDependencies): Promise<JobOutcome
       log.warn('heartbeat-failed', { market });
     }
   };
+
+  // Monthly budget stop: books keep being kept (reconcile), but nothing new is decided or ordered. No
+  // run record is written, so a later run the same day (after a release) can still trade.
+  const budget = deps.budget ? await deps.budget() : 'running';
+  if (budget !== 'running') {
+    const names = new Map<string, string>();
+    try {
+      for (const a of await deps.algorithms.list()) names.set(a.id, a.name);
+    } catch {
+      /* names are only for notices */
+    }
+    try {
+      const { updated } = await orderReconciler(deps, full.now, names).reconcile();
+      log.info('reconciled', { market, count: updated });
+    } catch {
+      log.warn('reconcile-failed', { market });
+    }
+    const code = budget === 'stopped' ? 'BUDGET_STOPPED' : 'BUDGET_UNKNOWN';
+    if (budget === 'stopped') {
+      log.warn('job-skipped', { market, code });
+      await heartbeat('skipped', null, code);
+      return 'ok';
+    }
+    log.error('job-skipped', { market, code });
+    await heartbeat('failed', null, code);
+    await failureNotice();
+    return 'failed';
+  }
 
   let calendar: MarketCalendar;
   let session: Session;
@@ -646,14 +697,7 @@ export async function runAlgoLive(deps: LiveJobDependencies): Promise<JobOutcome
     // new orders for that symbol (fail closed).
     const all = await deps.algorithms.list();
     const names = new Map(all.map((a) => [a.id, a.name]));
-    const reconciler = new LiveOrderExecutor({
-      client: deps.client,
-      store,
-      notifier: { notify: async (event) => void (await deps.notify?.(event)) },
-      now: full.now,
-      tradingDaysSince: () => null,
-      algorithmName: (id) => names.get(id) ?? '(삭제된 알고리즘)',
-    });
+    const reconciler = orderReconciler(deps, full.now, new Map(names));
     try {
       const { updated } = await reconciler.reconcile();
       log.info('reconciled', { market, count: updated });
@@ -813,6 +857,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const config = jobConfiguration(env);
     const db = new Firestore({ projectId: config.project });
     try {
+      const budgetGuard = installJobBudgetGuard(db);
       const toss = new TossClient(config.toss, new FirestoreTokenCache(config.toss.clientId, db));
       const transport = new TossOrderTransport(toss);
       const origin = env.APP_ORIGIN ?? '';
@@ -834,6 +879,7 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
         notify: notifications ? (event) => notifications.notify(event) : undefined,
         // AI cost approval is pending: off unless ALGO_AI_ENABLED is exactly "true" (the deployment keeps it false).
         ai: { enabled: algorithmAiEnabled(env), decider: algorithmDeciderFromEnvironment(env, db) },
+        budget: () => budgetGuard.status(),
         log,
         options: config.options,
       });

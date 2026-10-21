@@ -51,6 +51,7 @@ import {
   type JobLogger,
   type JobOutcome,
 } from './runner.js';
+import { budgetJobGate } from './budget-gate.js';
 
 export const JOB_NAME = 'morning-calendar';
 const AUTHOR = 'morning-calendar-job';
@@ -700,6 +701,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const config = morningConfiguration(env);
     const db = new Firestore({ projectId: config.project });
     try {
+      const skipped = await budgetJobGate(db, log, { failClosed: false });
+      if (skipped) return skipped;
       const notifications = new NotificationService({
         repository: new FirestoreNotificationRepository(db),
         notifier: notifierFromEnvironment(env),

@@ -5,6 +5,7 @@
 ## 현재 상태
 
 - 다음 단계(실데이터 전환·종목 분석·알고리즘 자동 매매)의 코드는 모두 main에 병합·배포됐다(#17–#33).
+- 월 예산 자동 중지(Pub/Sub 푸시 → `/api/internal/budget-alert`, 예산 100%에 예약 작업·AI·실전 주문 중지와 긴급 정지, 소유자 화면 배너·해제)의 **코드와 Terraform은 완료, 적용 전**이다. 순서와 한계는 [budget.md](../operations/budget.md).
 - 운영 작업:
 
 | 작업                           | 스케줄                                 | 마지막 확인                                                                           |
@@ -27,15 +28,16 @@
 
 ### 에이전트 (사용자 입력이 있으면 바로 할 수 있는 순서)
 
-| 우선 | 할 일                                                                                                                                                                                | 막힌 점          |
-| ---- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------- |
-| 1    | 스냅샷 이틀 연속 자동 실행 확인: `snapshotRuns/KR_2026-10-21`(16:30), `US_2026-10-21`(10-22 06:30) 상태와 작업 로그                                                                  | 없음             |
-| 2    | 아침 작업 07:00 자동 실행 확인(`morningRuns/{날짜}`)                                                                                                                                 | 없음             |
-| 3    | 키 입력 후 실호출 확인: DART·SEC(종목 분석 재무 탭), FRED `verifyCatalog()`·ECOS(차트 비교, 아침 작업), SEC companyfacts 응답 모양, 텔레그램 실발송(`MORNING_FORCE=1` 수동 실행)     | 키 입력          |
-| 4    | 모의 알고리즘이 생기면 개장 직후 실행 기록(`algorithmRuns`, `paperTrades`) 확인                                                                                                      | 모의 알고리즘    |
-| 5    | AI 승인 시: `morning_ai_enabled = true`(tfvars, plan·apply), deploy.yml의 `MORNING_AI_ENABLED`·`ALGO_AI_ENABLED`를 바꾸는 PR, 저장소 변수 `AI_MODEL=gemini-3.8-flash` 확인, 수동 1회 | AI 비용 승인     |
-| 6    | 실전 요청 시: [jobs.md 실전 순서](../operations/jobs.md)대로 저장소 변수 `LIVE_TRADING_ENABLED=true`, `live_schedules_enabled = true`, 첫 주문을 로그·화면·텔레그램·토스 앱으로 관찰 | 사용자 실전 켜기 |
-| 7    | 단계 8 도메인: 연결 방식·비용 비교 후 사용자와 결정                                                                                                                                  | 사용자 결정      |
+| 우선 | 할 일                                                                                                                                                                                                                                                                                                                                                       | 막힌 점          |
+| ---- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| 0    | 월 예산 자동 중지 적용: 배포 후 tfvars에 `service_url`(= `APP_ORIGIN`) 추가 → `init`(새 `google-beta` provider)·`plan`(예상: pubsub API, 주제, `investing-budget-push` 계정, Pub/Sub 서비스 에이전트 `google_project_service_identity`, token creator, 구독, 예산 제자리 수정) → apply → [합성 메시지 시험](../operations/budget.md#합성-메시지로-시험하기) | 없음             |
+| 1    | 스냅샷 이틀 연속 자동 실행 확인: `snapshotRuns/KR_2026-10-21`(16:30), `US_2026-10-21`(10-22 06:30) 상태와 작업 로그                                                                                                                                                                                                                                         | 없음             |
+| 2    | 아침 작업 07:00 자동 실행 확인(`morningRuns/{날짜}`)                                                                                                                                                                                                                                                                                                        | 없음             |
+| 3    | 키 입력 후 실호출 확인: DART·SEC(종목 분석 재무 탭), FRED `verifyCatalog()`·ECOS(차트 비교, 아침 작업), SEC companyfacts 응답 모양, 텔레그램 실발송(`MORNING_FORCE=1` 수동 실행)                                                                                                                                                                            | 키 입력          |
+| 4    | 모의 알고리즘이 생기면 개장 직후 실행 기록(`algorithmRuns`, `paperTrades`) 확인                                                                                                                                                                                                                                                                             | 모의 알고리즘    |
+| 5    | AI 승인 시: `morning_ai_enabled = true`(tfvars, plan·apply), deploy.yml의 `MORNING_AI_ENABLED`·`ALGO_AI_ENABLED`를 바꾸는 PR, 저장소 변수 `AI_MODEL=gemini-3.8-flash` 확인, 수동 1회                                                                                                                                                                        | AI 비용 승인     |
+| 6    | 실전 요청 시: [jobs.md 실전 순서](../operations/jobs.md)대로 저장소 변수 `LIVE_TRADING_ENABLED=true`, `live_schedules_enabled = true`, 첫 주문을 로그·화면·텔레그램·토스 앱으로 관찰                                                                                                                                                                        | 사용자 실전 켜기 |
+| 7    | 단계 8 도메인: 연결 방식·비용 비교 후 사용자와 결정                                                                                                                                                                                                                                                                                                         | 사용자 결정      |
 
 남은 개선(급하지 않음): 종목 이름 검색(`/stocks/all`), 캔들 차트 보기, 업종 비교의 서버 일괄 계산, 지표 매개변수 편집, `toss.ts`와 `toss-analysis.ts`의 수급 정규화 중복 통합, `liveOrders`·`blockedOrders` 보존 기간, 뉴스 점수 규칙(현재 신호에서 제외), KRX 호가 단위표(현재는 400 응답의 안내로 한 번 보정).
 
@@ -52,3 +54,4 @@
    - main 보호 규칙상 PR은 최신 main 위에 있어야 병합된다. squash 병합 뒤 남은 브랜치는 `git rebase --onto origin/main <이전 기준>`으로 옮긴다.
    - 운영 이미지는 `src/server`·`src/jobs`·`src/lib`만 담는다. 서버가 다른 폴더를 import하면 Dockerfile을 함께 고친다.
 7. 사용자만 열 수 있는 관문(키, AI 비용, 실전 주문)은 사용자 지시 없이 열지 않는다.
+8. **`service_url`**(tfvars, 저장소에 없음)은 `APP_ORIGIN`과 같은 https 주소다. 빠지면 Pub/Sub 구독과 예산의 Pub/Sub 규칙이 plan에서 사라진다(예산 이메일 알림은 그대로). 월 예산 중지 때문에 작업이 건너뛰어졌다면 로그의 `job-skipped`(`BUDGET_STOPPED`)와 `opsControl/budget`을 본다.

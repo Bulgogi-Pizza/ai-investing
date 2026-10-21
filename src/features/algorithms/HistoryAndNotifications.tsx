@@ -15,6 +15,8 @@ const kindLabels: Record<AlgorithmEvent['kind'], string> = {
   'safeguards-updated': '안전장치 설정 변경',
   'live-stop-released': '알고리즘 자동 정지 해제',
   'live-order-resolved': '미확인 주문 정리',
+  'budget-stop': '월 예산 한도 도달로 긴급 정지 켬',
+  'budget-stop-released': '월 예산 정지 해제',
 };
 const fieldLabels: Record<Change['field'], string> = {
   name: '이름',
@@ -32,6 +34,7 @@ const fieldLabels: Record<Change['field'], string> = {
   safeguards: '안전장치',
   liveStop: '실전 자동 정지',
   liveOrder: '실전 주문',
+  budgetStop: '월 예산 정지',
 };
 const modeName = (value: string | null | undefined) =>
   value && value in modeLabels ? modeLabels[value as keyof typeof modeLabels] : (value ?? '없음');
@@ -192,6 +195,9 @@ const kindNames: Record<string, string> = {
   'data-error': '데이터 오류',
   'job-failure': '작업 실패',
   'morning-brief': '아침 브리핑',
+  'budget-warning': '월 예산 경고',
+  'budget-stop': '월 예산 한도 도달',
+  'budget-resumed': '월 예산 새 기간',
   'setting-risk-increase': '위험 증가 설정 변경',
 };
 function parseNotifications(body: unknown): NotificationRow[] {

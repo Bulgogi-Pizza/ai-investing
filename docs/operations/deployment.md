@@ -101,6 +101,8 @@ node scripts/gcp.mjs apply
 
 `budget_currency`는 실제 청구통화와 일치해야 한다. 이 배포는 KRW/월15,000원을 사용하고50/90/100% 알림을 설정한다. 다른 계정에서는 통화·금액을 다시 지정한다. 개인 프로젝트를 quota project로 처음 사용할 때 Cloud Billing/Cloud Resource Manager API를 명시적으로 활성화한 후 plan을 수행한다.
 
+월 예산이 100%에 닿으면 앱이 예약 작업·AI·실전 주문을 스스로 멈춘다(결제는 끄지 않는다). Pub/Sub 푸시 구성(`infra/gcp/budget.tf`, tfvars의 `service_url` = `APP_ORIGIN`), 한계(알림 지연, 고정 비용), 수동 해제, 합성 메시지 시험은 [월 예산 자동 중지](budget.md)를 따른다.
+
 ## 실제 배포와 제공자 확인
 
 서비스는 https://ai-investing-688204744640.asia-northeast3.run.app 에 배포되어 있다. GitHub main의 Verify 성공 후 Deploy GCP가 검증 SHA를 이미지 digest로 배포하고 health를 확인한다. main4b1033e의 실제 OIDC 배포 성공을 확인했다. 오래된 SHA는 배포 직전 현재 main과 비교해 건너뛴다.

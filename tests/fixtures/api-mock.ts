@@ -46,6 +46,8 @@ export type MockOptions = {
   ecos?: 'ok' | 'unavailable' | 'error';
   /** Market-indicator / SPY candle requests that fail with a provider error. */
   compareFail?: ('KOSPI' | 'KOSDAQ' | 'SPY')[];
+  /** Monthly budget stop (GET /api/ops/budget). Default: the endpoint answers 404 and no banner shows. */
+  budget?: 'running' | 'warned' | 'stopped';
 };
 
 export const registeredEvents = [
@@ -236,6 +238,7 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
     user: options.user === undefined ? ownerUser : options.user,
     /** While true every market request fails with a transient provider error. */
     failing: market === 'transient',
+    budget: options.budget ?? 'running',
   };
   const requests: string[] = [];
   await page.clock.setFixedTime(fixedNow);
@@ -263,6 +266,30 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
       ['/api/calendar/events', '/api/news/sources', '/api/strategy'].includes(path)
     )
       return json(errorBody('OWNER_REQUIRED', '소유자 계정 전용 기능입니다.'), 403);
+    if (path === '/api/ops/budget' && options.budget) {
+      const stopped = state.budget === 'stopped';
+      return json({
+        budget: {
+          stopped,
+          reason: stopped ? 'budget' : null,
+          costAmount: null,
+          budgetAmount: null,
+          currency: null,
+          intervalStart: null,
+          warned: state.budget === 'warned',
+          stoppedAt: stopped ? '2026-10-20T01:00:00Z' : null,
+          releasedAt: null,
+          lastMessageAt: '2026-10-20T00:30:00Z',
+          updatedAt: null,
+        },
+        emergencyStop: true,
+        enabled: true,
+      });
+    }
+    if (path === '/api/ops/budget/release' && method === 'POST' && options.budget) {
+      state.budget = 'running';
+      return json({ notification: { status: 'sent' } });
+    }
     if (path === '/api/calendar/events')
       return json({ events: options.events ?? registeredEvents, truncated: false });
     if (path === '/api/news/sources') return json({ sources: [], warnings: [] });

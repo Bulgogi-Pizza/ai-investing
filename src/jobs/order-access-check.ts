@@ -13,6 +13,7 @@ import {
   type JobLogger,
   type JobOutcome,
 } from './runner.js';
+import { budgetJobGate } from './budget-gate.js';
 
 /**
  * One-off, READ-ONLY order-API access check (design "주문 권한 확인" step 1, plan stage 7e).
@@ -113,6 +114,8 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const config = jobConfiguration(env);
     const db = new Firestore({ projectId: config.project });
     try {
+      const skipped = await budgetJobGate(db, log, { failClosed: false });
+      if (skipped) return skipped;
       const toss = new TossClient(config.toss, new FirestoreTokenCache(config.toss.clientId, db));
       return await runOrderAccessCheck({
         // Read-only transport: the allow-list has no write path at all (defence in depth).
