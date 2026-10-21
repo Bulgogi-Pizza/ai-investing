@@ -4,6 +4,7 @@ import { ClaudeVertexProvider, type ClaudeMessagesClient } from '../src/server/a
 import {
   ENRICH_BATCH_SIZE,
   ENRICH_SCHEMA,
+  EnrichAiError,
   ProviderEnrichAi,
   allowedNumbers,
   enrichCalendar,
@@ -495,6 +496,37 @@ describe('enrichCalendar', () => {
     expect(report.codes.TOSS_NOT_CONFIGURED).toBe(1);
     expect(report.enriched).toBe(1);
     expect((await read(memory, 1)).reaction).toBeUndefined();
+  });
+  it('거절 폴백 모델이 답했으면 그 모델 ID를 저장하고 AI_FALLBACK_SERVED를 기록한다(실패 아님)', async () => {
+    const { memory, repo } = makeRepo([bok()]);
+    const inner = enrichAi(claude(responder).client);
+    const ai = {
+      model: inner.model,
+      enrich: async (items: EnrichInput[]) => ({
+        ...(await inner.enrich(items)),
+        fallbackModel: 'claude-sonnet-5',
+      }),
+    };
+    const report = await enrichCalendar(deps(repo, { ai }), options);
+    expect(report.codes.AI_FALLBACK_SERVED).toBe(1);
+    expect(report.failures).toEqual([]);
+    expect((await read(memory, 1)).enrichment?.model).toBe('claude-sonnet-5');
+  });
+  it('월 예산 중지(BUDGET_STOPPED)는 실패가 아닌 기록이고 남은 배치를 멈춘다', async () => {
+    const events = Array.from({ length: 12 }, (_, i) =>
+      bok({ id: 300 + i, title: `한국은행 발표 ${String.fromCharCode(97 + i)}` }),
+    );
+    const { repo } = makeRepo(events);
+    const enrich = vi.fn(async () => {
+      throw new EnrichAiError('BUDGET_STOPPED');
+    });
+    const report = await enrichCalendar(
+      deps(repo, { ai: { model: 'Claude Sonnet 5.5', enrich } }),
+      options,
+    );
+    expect(report.codes.BUDGET_STOPPED).toBe(1);
+    expect(report.failures).toEqual([]);
+    expect(enrich).toHaveBeenCalledTimes(1);
   });
   it('일일 한도를 다 쓰면 건너뛰고(실패 아님), 공급자 429는 실패로 기록하고 멈춘다', async () => {
     const events = Array.from({ length: 12 }, (_, i) =>

@@ -33,6 +33,7 @@ import {
   type JobLogger,
   type JobOutcome,
 } from './runner.js';
+import { budgetJobGate } from './budget-gate.js';
 
 /**
  * Calendar enrichment job (manual Cloud Run Job `investing-calendar-enrich`; the morning job runs
@@ -227,6 +228,9 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
     const config = calendarEnrichConfiguration(env);
     const db = new Firestore({ projectId: config.project });
     try {
+      // Monthly budget stop (also installs the AI gate the provider reads; docs/operations/budget.md).
+      const skipped = await budgetJobGate(db, log, { failClosed: false });
+      if (skipped) return skipped;
       const today = kstDate(new Date());
       return await runCalendarEnrich({
         calendar: new FirestoreCalendarRepository(db),

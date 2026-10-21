@@ -187,11 +187,13 @@ Windows 참고(2026-10-21 확인):
 
 ## 5. AI 모델 (사용자 결정)
 
-**결정(사용자, 2026-10-21): 기본 모델은 Claude Sonnet 5.5(`claude-sonnet-5-5`)이며 Google Vertex AI로 부른다(같은 GCP 프로젝트, ADC/IAM, API 키 없음, 지역 `global`).** 아침 브리핑·번역, AI 해설, 캘린더 보강, 알고리즘 판단 모두 이 하나다. 사용자가 이 모델 사용과 월 비용(약 1만 8천 원)을 승인했다. 승인 범위는 아침 작업·해설·캘린더 보강이며, **AI형 알고리즘은 따로 요청할 때까지 꺼 둔다**(`ALGO_AI_ENABLED=false`). Gemini는 설정(`AI_PROVIDER=vertex`)으로 고를 수 있지만 기본이 아니다. 제공자 계약·SDK·오류 코드는 [ai-provider.md](../implementation/ai-provider.md).
+**결정(사용자, 2026-10-21): 기본 모델은 Claude Sonnet 5.5(`claude-sonnet-5-5`)다.** 아침 브리핑·번역, AI 해설, 캘린더 보강, 알고리즘 판단 모두 이 하나다. 사용자가 이 모델 사용과 월 비용(약 1만 8천 원)을 승인했다. 승인 범위는 아침 작업·해설·캘린더 보강이며, **AI형 알고리즘은 따로 요청할 때까지 꺼 둔다**(`ALGO_AI_ENABLED=false`). 제공자 계약·SDK·오류 코드는 [ai-provider.md](../implementation/ai-provider.md).
+
+**경로 변경(사용자, 2026-10-21 이후): Vertex AI가 아니라 Anthropic API를 직접 부른다(`AI_PROVIDER=anthropic`, 같은 모델·같은 가격).** 처음에는 Google Vertex AI로 부르기로 했으나(같은 GCP 프로젝트, ADC/IAM, API 키 없음) 이 프로젝트의 `anthropic-claude-sonnet` `global` 할당량이 0이고 증가 요청이 자동으로 거절되어 호출이 모두 429였다. 그래서 첫 번째 경로(Anthropic API)는 API 키(Secret Manager `investing-anthropic-api-key`)를 쓰고, 사용자가 **Anthropic Console에서 월 지출 한도를 직접 정한다.** Anthropic 요금은 GCP 청구 밖이므로 GCP 월 예산이 막지 못하지만, 앱의 월 예산 중지는 이 호출도 막는다([budget.md](../operations/budget.md#anthropic-지출은-gcp-예산-밖이다)). Vertex의 Claude(`AI_PROVIDER=vertex-claude`)와 Gemini(`AI_PROVIDER=vertex`)는 설정으로 고를 수 있게 남겨 둔다.
 
 - **예산 알림 금액은 아직 미결정**이다(지금 월 15,000원, 아래 비용 참고).
-- **프로젝트의 `anthropic-claude-sonnet` 계열 `global` 할당량은 현재 0**이다. 할당량 증가가 승인되기 전에는 호출이 모두 429(`AI_QUOTA_PROVIDER`)로 끝난다. 코드는 이를 고정 코드로 기록하고 계속 진행한다.
-- 서버 쪽 `fallbacks`는 Vertex에서 쓸 수 없고, 다른 Claude 모델은 이 프로젝트에서 할당량이 0이라 클라이언트 폴백도 넣지 않았다. 거절(`stop_reason: refusal`)은 그대로 실패 코드로 남는다.
+- **Vertex 경로는 막혀 있다**: 프로젝트의 `anthropic-claude-sonnet` 계열 `global` 할당량이 0이고 증가 요청이 거절됐다. 그래서 위의 경로 변경이 생겼다. `vertex-claude`를 고르면 호출이 429(`AI_QUOTA_PROVIDER`)로 끝나며, 코드는 이를 고정 코드로 기록하고 계속 진행한다.
+- **서버 쪽 거절 폴백(Anthropic API 경로, 기본 켬)**: claude-api 스킬이 `claude-sonnet-5-5`에 권하는 `fallbacks: "default"`(베타 `server-side-fallback-2026-07-01`)를 쓴다. 구조화 출력과 함께 쓸 수 있어 충돌이 없다. 폴백이 답한 호출은 **폴백 모델의 요금**으로 청구되고 결과에 폴백 모델이 기록된다. `ANTHROPIC_REFUSAL_FALLBACK=false`로 끈다. Vertex에는 서버 쪽 폴백이 없고 거절은 그대로 실패 코드로 남는다.
 - 생각은 적응형(기본)이고 `output_config.effort`로 조절한다: 텍스트 작업 `low`, 알고리즘 판단 `medium`. 현재 하루 한도는 기능별로 나뉘어 있다(해설 25, 아침 4, 캘린더 20, 알고리즘 12).
 
 **월 예상 비용 — Claude Sonnet 5.5** (Anthropic 1P 가격 기준 입력 $2, 출력 $10 / 100만 토큰. Vertex의 Claude 가격은 [Vertex 가격표](https://cloud.google.com/vertex-ai/generative-ai/pricing#claude-models)에서 따로 확인해야 하며, 이 계산은 같다고 가정한 추정이다. 환율 1달러 1,400원.)

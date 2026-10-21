@@ -15,7 +15,7 @@ type AiNarrative =
   | {
       status: 'ready';
       type: 'llm';
-      provider: 'vertex' | 'vertex-claude';
+      provider: 'anthropic' | 'vertex' | 'vertex-claude';
       model: string;
       asOf: string;
       summary: string;
@@ -29,7 +29,7 @@ type AiNarrative =
   | {
       status: 'disabled' | 'unavailable';
       type: 'llm';
-      provider: 'vertex' | 'vertex-claude';
+      provider: 'anthropic' | 'vertex' | 'vertex-claude';
       model?: string;
       message: string;
     };

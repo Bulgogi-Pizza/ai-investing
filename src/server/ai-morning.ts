@@ -6,6 +6,7 @@ import {
   aiEnvironment,
   type AccessTokenSource,
   type AiEnvironment,
+  type AiGenerateResult,
   type AiProvider,
   type AiProviderConfig,
   type AiProviderErrorCode,
@@ -40,7 +41,13 @@ export type MorningSummaryInput = {
 };
 export type MorningTranslationInput = { refId: string; title: string };
 export type MorningUsage = { prompt: number; output: number; thoughts: number; total: number };
-export type MorningBatch<T> = { items: T[]; rejected: number; usage: MorningUsage };
+export type MorningBatch<T> = {
+  items: T[];
+  rejected: number;
+  usage: MorningUsage;
+  /** Set when a fallback model (not the configured one) produced this batch: its model id. */
+  fallbackModel?: string;
+};
 export interface MorningAi {
   readonly model: string;
   summarize(items: MorningSummaryInput[]): Promise<MorningBatch<{ refId: string; text: string }>>;
@@ -277,7 +284,7 @@ export function validateTranslations(
 // Provider adapter (Claude on Vertex by default; Gemini selectable, see ai-provider.ts).
 // ---------------------------------------------------------------------------
 export type MorningAiConfig = AiProviderConfig;
-/** Null unless AI_PROVIDER (vertex-claude | vertex), the model and the project are all valid. */
+/** Null unless AI_PROVIDER (anthropic | vertex-claude | vertex), the model, the project (and the API key) are valid. */
 export function morningAiConfigFromEnvironment(env: NodeJS.ProcessEnv): AiEnvironment | null {
   return aiEnvironment(env);
 }
@@ -313,13 +320,17 @@ export class ProviderMorningAi implements MorningAi {
     if (Buffer.byteLength(prompt, 'utf8') > 16000) throw new MorningAiError('AI_INPUT_TOO_LARGE');
     // Validate against what was actually sent, not what the caller held.
     const sent = items.map((item, index) => ({ ...item, ...minimized[index] }));
-    const { json, usage } = await this.generate(
+    const { json, usage, fallback } = await this.generate(
       MORNING_AI_TASKS.summary,
       SUMMARY_SYSTEM,
       prompt,
       SUMMARY_SCHEMA,
     );
-    return { ...validateSummaries(json, sent as MorningSummaryInput[]), usage };
+    return {
+      ...validateSummaries(json, sent as MorningSummaryInput[]),
+      usage,
+      ...(fallback ? { fallbackModel: fallback.model } : {}),
+    };
   }
   async translate(items: MorningTranslationInput[]) {
     if (!items.length || items.length > MORNING_MAX_TRANSLATION_ITEMS)
@@ -327,20 +338,24 @@ export class ProviderMorningAi implements MorningAi {
     const minimized = items.map((item) => ({ refId: item.refId, title: clip(item.title, 300) }));
     const prompt = JSON.stringify({ task: 'translate-titles', items: minimized });
     if (Buffer.byteLength(prompt, 'utf8') > 16000) throw new MorningAiError('AI_INPUT_TOO_LARGE');
-    const { json, usage } = await this.generate(
+    const { json, usage, fallback } = await this.generate(
       MORNING_AI_TASKS.translation,
       TRANSLATION_SYSTEM,
       prompt,
       TRANSLATION_SCHEMA,
     );
-    return { ...validateTranslations(json, minimized), usage };
+    return {
+      ...validateTranslations(json, minimized),
+      usage,
+      ...(fallback ? { fallbackModel: fallback.model } : {}),
+    };
   }
   private async generate(
     task: (typeof MORNING_AI_TASKS)[keyof typeof MORNING_AI_TASKS],
     system: string,
     prompt: string,
     schema: JsonSchema,
-  ): Promise<{ json: unknown; usage: MorningUsage }> {
+  ): Promise<AiGenerateResult> {
     const signal = AbortSignal.timeout(task.timeoutMs);
     const operation = (async () => {
       // Monthly budget stop: before the quota is charged and before any call.
@@ -365,7 +380,10 @@ export class ProviderMorningAi implements MorningAi {
           signal,
         });
       } catch (error) {
-        if (error instanceof AiProviderError) throw new MorningAiError(error.code);
+        if (error instanceof AiProviderError)
+          throw new MorningAiError(
+            error.code === 'AI_BUDGET_STOPPED' ? 'BUDGET_STOPPED' : error.code,
+          );
         throw new MorningAiError(signal.aborted ? 'AI_TIMEOUT' : 'AI_UNAVAILABLE');
       }
     })();

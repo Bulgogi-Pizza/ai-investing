@@ -36,6 +36,8 @@ export type AiResult =
         type: 'llm';
         provider: AiProviderName;
         model: string;
+        /** Set when a fallback model produced the text; the requested model's label. */
+        fallbackFrom?: string;
       })
   | {
       status: 'disabled' | 'unavailable';
@@ -340,7 +342,7 @@ export class AiEnricher {
       const day = new Date(this.clock() + 9 * 3600000).toISOString().slice(0, 10);
       if (!(await this.quota.consume(day))) throw new Error('AI quota exceeded');
       signal.throwIfAborted();
-      const { json } = await this.provider.generate({
+      const { json, fallback } = await this.provider.generate({
         system: SYSTEM,
         prompt: input.serialized,
         schema: RESPONSE_SCHEMA,
@@ -355,7 +357,9 @@ export class AiEnricher {
         status: 'ready',
         type: 'llm',
         provider: this.provider.name,
-        model: this.provider.label,
+        // After a server-side refusal fallback the text came from another model: say so.
+        model: fallback?.model ?? this.provider.label,
+        ...(fallback ? { fallbackFrom: this.provider.label } : {}),
         asOf: new Date(this.clock()).toISOString(),
         ...narrative,
         sources: input.sources,

@@ -20,6 +20,7 @@ SAMPLES = {
     "investing-telegram-bot-token": "123456789:EXAMPLE-token_0123456789abcdefghij",
     "investing-telegram-chat-id": "-1001234567890",
     "investing-sec-user-agent": "Example Research owner@example.test",
+    "investing-anthropic-api-key": "sk-ant-api03-EXAMPLE_0123456789",
 }
 
 
@@ -68,6 +69,8 @@ class ValidationTests(unittest.TestCase):
             "investing-telegram-chat-id": ["", "abc", "--5", "1" * 20, "12.5", "٣٣٣", "+123"],
             "investing-sec-user-agent": ["", "no contact info", "x@y", "bot@example", "a" * 190 + " me@example.test", "Mozilla\nme@example.test",
                                          "Agent me@example.test\x00", "Agent 한글 me@example.test"],
+            "investing-anthropic-api-key": ["", "sk-ant-", "sk-ant-short", "api03-" + "a" * 30, "sk-or-" + "a" * 30, "sk-ant-" + "a" * 294,
+                                            "sk-ant-api03 with space-0123456789", "sk-ant-" + "a" * 20 + "\n" + "a" * 10, "sk-ant-키" + "a" * 20, "SK-ANT-" + "a" * 20],
         }
         for name, values in bad.items():
             for value in values:
@@ -79,6 +82,17 @@ class ValidationTests(unittest.TestCase):
         self.assertIsNotNone(module.TELEGRAM_TOKEN.fullmatch("123456789:" + "A" * 35))
         self.assertIsNotNone(module.TELEGRAM_CHAT.fullmatch("-1" + "0" * 18))
         self.assertIsNone(module.TELEGRAM_CHAT.fullmatch("-"))
+
+    def test_anthropic_key_length_boundaries(self):
+        name = "investing-anthropic-api-key"
+        shortest = "sk-ant-" + "a" * 13
+        longest = "sk-ant-" + "a" * 293
+        self.assertEqual((len(shortest), len(longest)), (20, 300))
+        self.assertEqual(module.validate(name, shortest), shortest)
+        self.assertEqual(module.validate(name, longest), longest)
+        for value in (shortest[:-1], longest + "a"):
+            with self.assertRaises(module.SetupError):
+                module.validate(name, value)
 
     def test_sec_user_agent_boundaries(self):
         name = "investing-sec-user-agent"
@@ -107,7 +121,9 @@ class AliasTests(unittest.TestCase):
             "investing-telegram-bot-token": "TELEGRAM_BOT_TOKEN",
             "investing-telegram-chat-id": "TELEGRAM_CHAT_ID",
             "investing-sec-user-agent": "SEC_USER_AGENT",
+            "investing-anthropic-api-key": "ANTHROPIC_API_KEY",
         })
+        self.assertEqual(module.resolve_aliases(["anthropic"]), ("investing-anthropic-api-key",))
 
     def test_unknown_or_missing_alias_is_rejected_without_echo(self):
         pasted = "pasted-secret-value-0123456789"
@@ -223,6 +239,38 @@ class AttachTests(unittest.TestCase):
         # Only --update-secrets: no flag that would replace or clear other settings.
         self.assertFalse(any(flag in " ".join(argv) for flag in ("--set-secrets", "--clear-secrets", "--remove-secrets", "--set-env-vars", ":latest")))
 
+    def test_attach_gives_the_service_update_five_minutes_and_other_calls_one(self):
+        cloud = FakeCloud()
+        module.attach(CONFIG, {"investing-anthropic-api-key": "2"}, runner=cloud, progress=lambda message: None)
+        argv, options = cloud.calls[0]
+        self.assertIn("--update-secrets=ANTHROPIC_API_KEY=investing-anthropic-api-key:2", argv)
+        self.assertEqual(options["timeout"], 300)
+        self.assertEqual(module.ATTACH_TIMEOUT_SECONDS, 300)
+        cloud = FakeCloud(enabled={"investing-anthropic-api-key": 1})
+        module.latest_version(CONFIG, "investing-anthropic-api-key", runner=cloud)
+        self.assertEqual(cloud.calls[0][1]["timeout"], 60)
+
+    def test_attach_timeout_says_to_verify_instead_of_claiming_failure(self):
+        def runner(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"], output=b"", stderr=b"provider echoed example-secret-value")
+        progress = []
+        with self.assertRaises(module.AttachUnconfirmed) as caught:
+            module.attach(CONFIG, {"investing-anthropic-api-key": "2"}, runner=runner, progress=progress.append)
+        message = str(caught.exception)
+        self.assertIn("gcloud run services describe ai-investing --region=asia-northeast3", message)
+        self.assertIn("실패했다는 뜻이 아닙니다", message)
+        self.assertNotIn("example-secret-value", message)
+        self.assertNotIn("실패했습니다", message)
+        self.assertEqual(progress, [])  # no "attached" claim either
+
+    def test_a_timeout_elsewhere_is_still_a_plain_failure(self):
+        def runner(argv, **kwargs):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        with self.assertRaises(module.SetupError) as caught:
+            module.latest_version(CONFIG, "investing-anthropic-api-key", runner=runner)
+        self.assertNotIsInstance(caught.exception, module.AttachUnconfirmed)
+        self.assertIn("gcloud 실행에 실패했습니다", str(caught.exception))
+
     def test_attach_refuses_latest_and_non_numeric_versions(self):
         for version in ("latest", "1; rm", "", "-1"):
             with self.assertRaises(module.SetupError):
@@ -293,6 +341,17 @@ class MainTests(unittest.TestCase):
         self.assertEqual(cloud.writes(), [])
         self.assertNotIn("bad key", err.getvalue())
         self.assertIn("FRED_API_KEY", err.getvalue())
+
+    def test_main_reports_an_unconfirmed_attach_without_a_failure_claim(self):
+        def runner(argv, **kwargs):
+            if argv[1:4] == ["run", "services", "update"]:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            return FakeCloud(enabled={"investing-anthropic-api-key": 1})(argv, **kwargs)
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(module, "read_identity", return_value=CONFIG), redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(module.main(["anthropic", "--attach-only"], runner=runner), 1)
+        self.assertIn("gcloud run services describe", err.getvalue())
+        self.assertNotIn("연결 완료", out.getvalue())
 
     def test_attach_only_needs_no_prompt_and_uses_numeric_versions(self):
         cloud = FakeCloud(enabled={"investing-dart-api-key": 3, "investing-sec-user-agent": 1})

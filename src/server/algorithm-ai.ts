@@ -293,8 +293,9 @@ export class ProviderAlgorithmDecider implements AlgorithmDecider {
       if (!allowed) return { status: 'unavailable', code: 'QUOTA_EXCEEDED' };
       signal.throwIfAborted();
       let json: unknown;
+      let fallback: { model: string } | undefined;
       try {
-        ({ json } = await this.provider.generate({
+        ({ json, fallback } = await this.provider.generate({
           system: SYSTEM,
           prompt: minimized.serialized,
           schema: RESPONSE_SCHEMA,
@@ -313,7 +314,8 @@ export class ProviderAlgorithmDecider implements AlgorithmDecider {
       }
       try {
         const decisions = validateAiDecisions(json, minimized.symbols);
-        return { status: 'ready', model: this.provider.label, decisions };
+        // After a server-side refusal fallback the decisions came from another model: say so.
+        return { status: 'ready', model: fallback?.model ?? this.provider.label, decisions };
       } catch {
         return { status: 'unavailable', code: 'OUTPUT_INVALID' };
       }
@@ -335,6 +337,8 @@ function algorithmFailure(code: AiProviderError['code']): AlgorithmAiFailure {
       return 'AUTH_UNAVAILABLE';
     case 'AI_QUOTA_PROVIDER':
       return 'PROVIDER_QUOTA';
+    case 'AI_BUDGET_STOPPED':
+      return 'BUDGET_STOPPED';
     case 'AI_REFUSED':
       return 'REFUSED';
     case 'AI_TIMEOUT':
