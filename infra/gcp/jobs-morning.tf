@@ -14,7 +14,7 @@ variable "morning_schedule_enabled" {
 variable "morning_ai_enabled" {
   type        = bool
   default     = false
-  description = "Grant the jobs account Vertex AI access for the morning AI step. Leave false until the user has approved the monthly AI cost (docs/operations/jobs.md)."
+  description = "Grant the jobs account Vertex AI access (roles/aiplatform.user) for the AI steps of the morning job and the calendar-enrich job (Claude Sonnet 5.5 on Vertex AI). The default stays false so a fresh project grants nothing; the user approved the AI cost on 2026-10-21, so the operator sets morning_ai_enabled = true in terraform.tfvars (docs/operations/jobs.md). Claude on Vertex also needs the model enabled and quota in the project (currently 0 for anthropic-claude-sonnet in region global until an increase is approved)."
 }
 
 locals {
@@ -33,8 +33,11 @@ resource "google_secret_manager_secret_iam_member" "jobs_morning" {
   member    = "serviceAccount:${google_service_account.jobs.email}"
 }
 
-# Vertex AI call permission, only when the AI step is meant to be used. The job itself stays off
-# unless MORNING_AI_ENABLED=true is set on the Cloud Run Job (deploy.yml sets it to false).
+# Vertex AI call permission, only when the AI steps are meant to be used. deploy.yml now sets
+# MORNING_AI_ENABLED=true on the morning job and CALENDAR_AI_ENABLED=true on the manual
+# investing-calendar-enrich job (same service account); without this grant those steps record
+# AI_AUTH_UNAVAILABLE and the rest of the run is unaffected. The calendar-enrich job itself has no
+# scheduler and no Terraform resource: deploy.yml creates it and the operator runs it by hand.
 resource "google_project_iam_member" "jobs_ai" {
   count   = var.morning_ai_enabled ? 1 : 0
   project = var.project_id

@@ -28,6 +28,51 @@ export interface EventTranslation {
   model: string;
   translatedAt: string;
 }
+/** What the release decided or showed, as short Korean facts (src/server/calendar-enrich.ts). */
+export interface EventOutcome {
+  /** One Korean sentence, at most 60 characters. */
+  headline: string;
+  /** At most 8. Numbers come from the source title or an official API, never from a guess. */
+  facts: { label: string; value: string; note?: string }[];
+}
+export const REACTION_ASSETS = [
+  'KOSPI',
+  'KOSDAQ',
+  'KR_BOND_3Y',
+  'KR_BOND_10Y',
+  'USDKRW',
+  'SPY',
+] as const;
+export type ReactionAsset = (typeof REACTION_ASSETS)[number];
+export const REACTION_UNITS = ['%', '%p', '원'] as const;
+/** Measured market move around the release; computed from official Toss data only (src/server/reaction.ts). */
+export interface EventReaction {
+  asset: ReactionAsset;
+  /** Last close before the release. */
+  from: { date: string; value: number };
+  /** First close after the release. */
+  to: { date: string; value: number };
+  /** % for indices and SPY, %p for bond yields, 원 for USD/KRW. */
+  change: number;
+  unit: (typeof REACTION_UNITS)[number];
+  /** USD/KRW only: the same move in percent. */
+  changePercent?: number;
+  source: string;
+}
+export interface EventImpact {
+  asset: string;
+  /** Mechanism and direction in at most 60 characters. */
+  effect: string;
+}
+export const ENRICHED_FIELDS = ['title', 'outcome', 'impact', 'explainer'] as const;
+/** Provenance of the AI-written parts. */
+export interface EventEnrichment {
+  model: string;
+  generatedAt: string;
+  version: number;
+  /** Which of title/outcome/impact/explainer the model wrote. */
+  aiFields: (typeof ENRICHED_FIELDS)[number][];
+}
 export interface EconomicEvent {
   id: number;
   eventKind?: 'scheduled' | 'news-release';
@@ -39,9 +84,18 @@ export interface EconomicEvent {
   values?: EventValue[];
   /** null = the AI step ran (or was disabled) and there is no summary; undefined = never processed. */
   aiSummary?: EventAiSummary | null;
-  /** Provider's own title when `title` is a Korean translation of it. */
+  /** Exact provider title when `title` differs from it (Korean translation or cleaned text). */
   titleOriginal?: string;
+  /** Present when `title` is an AI translation of `titleOriginal`. */
   translation?: EventTranslation;
+  /** Leading release-type tag of the source title ("보도자료"), split off the title. */
+  releaseType?: string;
+  outcome?: EventOutcome;
+  reaction?: EventReaction[];
+  impact?: EventImpact[];
+  /** At most two Korean sentences, only for hard concepts. */
+  explainer?: string;
+  enrichment?: EventEnrichment;
   title: string;
   country: '한국' | '미국' | '글로벌';
   category: string;
@@ -218,8 +272,116 @@ const decimal = (value: unknown): value is string =>
   typeof value === 'string' && /^-?\d{1,20}(?:\.\d{1,12})?$/.test(value);
 type Extras = Pick<
   EconomicEvent,
-  'indicatorIds' | 'values' | 'aiSummary' | 'titleOriginal' | 'translation'
+  | 'indicatorIds'
+  | 'values'
+  | 'aiSummary'
+  | 'titleOriginal'
+  | 'translation'
+  | 'releaseType'
+  | 'outcome'
+  | 'reaction'
+  | 'impact'
+  | 'explainer'
+  | 'enrichment'
 >;
+/** Stored display text: bounded, no control characters, no markup, no links. */
+const display = (value: unknown, max: number, allowEmpty = false): value is string =>
+  text(value, max, allowEmpty) &&
+  !/<[^>]*>|https?:|www\.|javascript:|data:/i.test(value) &&
+  value === value.trim();
+const finite = (value: unknown): value is number =>
+  typeof value === 'number' && Number.isFinite(value);
+const dated = (value: unknown): value is { date: string; value: number } => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  return realDate(row.date) && finite(row.value) && Math.abs(row.value) < 1e9;
+};
+function cleanOutcome(value: unknown): EventOutcome | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (!display(raw.headline, 60) || !Array.isArray(raw.facts) || raw.facts.length > 8) return null;
+  const facts: EventOutcome['facts'] = [];
+  for (const entry of raw.facts) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const fact = entry as Record<string, unknown>;
+    if (
+      !display(fact.label, 40) ||
+      !display(fact.value, 80) ||
+      (fact.note !== undefined && !display(fact.note, 120))
+    )
+      return null;
+    facts.push({
+      label: fact.label,
+      value: fact.value,
+      ...(fact.note === undefined ? {} : { note: fact.note as string }),
+    });
+  }
+  return { headline: raw.headline, facts };
+}
+function cleanReaction(value: unknown): EventReaction[] | null {
+  if (!Array.isArray(value) || value.length > REACTION_ASSETS.length) return null;
+  const rows: EventReaction[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const row = entry as Record<string, unknown>;
+    if (
+      !REACTION_ASSETS.includes(row.asset as ReactionAsset) ||
+      !dated(row.from) ||
+      !dated(row.to) ||
+      !finite(row.change) ||
+      Math.abs(row.change) > 1e6 ||
+      !REACTION_UNITS.includes(row.unit as (typeof REACTION_UNITS)[number]) ||
+      (row.changePercent !== undefined &&
+        (!finite(row.changePercent) || Math.abs(row.changePercent) > 1e4)) ||
+      !display(row.source, 80)
+    )
+      return null;
+    rows.push({
+      asset: row.asset as ReactionAsset,
+      from: { date: row.from.date, value: row.from.value },
+      to: { date: row.to.date, value: row.to.value },
+      change: row.change,
+      unit: row.unit as EventReaction['unit'],
+      ...(row.changePercent === undefined ? {} : { changePercent: row.changePercent as number }),
+      source: row.source,
+    });
+  }
+  if (new Set(rows.map((row) => row.asset)).size !== rows.length) return null;
+  return rows;
+}
+function cleanImpact(value: unknown): EventImpact[] | null {
+  if (!Array.isArray(value) || value.length > 4) return null;
+  const rows: EventImpact[] = [];
+  for (const entry of value) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const row = entry as Record<string, unknown>;
+    if (!display(row.asset, 30) || !display(row.effect, 60)) return null;
+    rows.push({ asset: row.asset, effect: row.effect });
+  }
+  return rows;
+}
+function cleanEnrichment(value: unknown): EventEnrichment | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const raw = value as Record<string, unknown>;
+  if (
+    !display(raw.model, 100) ||
+    !instant(raw.generatedAt) ||
+    !Number.isInteger(raw.version) ||
+    (raw.version as number) < 1 ||
+    (raw.version as number) > 99 ||
+    !Array.isArray(raw.aiFields) ||
+    raw.aiFields.length > ENRICHED_FIELDS.length ||
+    !raw.aiFields.every((field) => ENRICHED_FIELDS.includes(field)) ||
+    new Set(raw.aiFields).size !== raw.aiFields.length
+  )
+    return null;
+  return {
+    model: raw.model,
+    generatedAt: raw.generatedAt,
+    version: raw.version as number,
+    aiFields: raw.aiFields as EventEnrichment['aiFields'],
+  };
+}
 /** Validates the optional morning-job fields; null means "reject the whole event". */
 function cleanExtras(item: Record<string, unknown>): Extras | null {
   const extras: Extras = {};
@@ -288,10 +450,16 @@ function cleanExtras(item: Record<string, unknown>): Extras | null {
       };
     }
   }
+  // The exact provider title may be kept without a translation (cleaned text); a translation always
+  // needs the original it translated.
   if (item.titleOriginal !== undefined) {
-    const translation = item.translation as Record<string, unknown> | undefined;
+    if (!text(item.titleOriginal, 300)) return null;
+    extras.titleOriginal = item.titleOriginal;
+  }
+  if (item.translation !== undefined) {
+    const translation = item.translation as Record<string, unknown> | null;
     if (
-      !text(item.titleOriginal, 300) ||
+      item.titleOriginal === undefined ||
       !translation ||
       typeof translation !== 'object' ||
       Array.isArray(translation) ||
@@ -299,9 +467,36 @@ function cleanExtras(item: Record<string, unknown>): Extras | null {
       !instant(translation.translatedAt)
     )
       return null;
-    extras.titleOriginal = item.titleOriginal;
     extras.translation = { model: translation.model, translatedAt: translation.translatedAt };
-  } else if (item.translation !== undefined) return null;
+  }
+  if (item.releaseType !== undefined) {
+    if (!display(item.releaseType, 40)) return null;
+    extras.releaseType = item.releaseType;
+  }
+  if (item.outcome !== undefined) {
+    const outcome = cleanOutcome(item.outcome);
+    if (!outcome) return null;
+    extras.outcome = outcome;
+  }
+  if (item.reaction !== undefined) {
+    const reaction = cleanReaction(item.reaction);
+    if (!reaction) return null;
+    extras.reaction = reaction;
+  }
+  if (item.impact !== undefined) {
+    const impact = cleanImpact(item.impact);
+    if (!impact) return null;
+    extras.impact = impact;
+  }
+  if (item.explainer !== undefined) {
+    if (!display(item.explainer, 300)) return null;
+    extras.explainer = item.explainer;
+  }
+  if (item.enrichment !== undefined) {
+    const enrichment = cleanEnrichment(item.enrichment);
+    if (!enrichment) return null;
+    extras.enrichment = enrichment;
+  }
   return extras;
 }
 export function createCalendarRouter({

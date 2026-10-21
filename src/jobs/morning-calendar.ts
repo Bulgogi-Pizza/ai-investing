@@ -3,14 +3,17 @@ import { Firestore } from '@google-cloud/firestore';
 import { FirestoreAiQuota } from '../server/ai.js';
 import {
   MorningAiError,
-  VertexMorningAi,
+  ProviderMorningAi,
   MORNING_MAX_SUMMARY_ITEMS,
   MORNING_MAX_TRANSLATION_ITEMS,
   morningAiConfigFromEnvironment,
   type MorningAi,
-  type MorningAiConfig,
   type MorningUsage,
 } from '../server/ai-morning.js';
+import { createAiProvider, type AiEnvironment } from '../server/ai-provider.js';
+import { enrichCalendar, type EnrichReport } from '../server/calendar-enrich.js';
+import { enrichmentCollaborators } from './calendar-enrich.js';
+import { PreservingCalendarRepository } from '../server/calendar-merge.js';
 import {
   FirestoreCalendarRepository,
   cleanEvent,
@@ -71,6 +74,8 @@ export type MorningOptions = {
   aheadDays: number;
   /** AI summaries are written for results of the last N days that have none yet. */
   summaryDays: number;
+  /** Calendar enrichment looks at events of the last N days (the calendar-enrich job backfills older ones). */
+  enrichDays: number;
   /** A "running" record older than this is treated as a crashed run. */
   staleRunMs: number;
 };
@@ -80,6 +85,7 @@ export const DEFAULT_OPTIONS: MorningOptions = {
   pastDays: 7,
   aheadDays: 45,
   summaryDays: 3,
+  enrichDays: 14,
   staleRunMs: 30 * 60 * 1000,
 };
 export type MorningDependencies = {
@@ -92,62 +98,23 @@ export type MorningDependencies = {
   syncNews?: (repository: CalendarRepository) => Promise<{ count: number; failedSources: number }>;
   /** Present only when MORNING_AI_ENABLED=true; the job never builds it otherwise. */
   ai?: MorningAi;
+  /**
+   * Calendar enrichment for new events (cleanup, measured reactions, Korean outcome/impact). It gets
+   * the preserving repository and builds its own Toss/AI collaborators; undefined = step skipped.
+   */
+  enrich?: (
+    calendar: CalendarRepository,
+    window: { from: string; to: string },
+  ) => Promise<EnrichReport>;
   notifier: MorningNotifier;
   now?: () => Date;
   log: JobLogger;
   options?: Partial<MorningOptions>;
 };
 
-// ---------------------------------------------------------------------------
-// Calendar writes that keep what earlier runs attached.
-// ---------------------------------------------------------------------------
-/**
- * Merges a fresh provider event into the stored one so a re-sync never erases attached values, AI
- * summaries or translations (and never replaces a known release time with "unknown").
- */
-export function mergeStoredEvent(
-  stored: EconomicEvent | undefined,
-  incoming: EconomicEvent,
-): EconomicEvent {
-  if (!stored) return incoming;
-  const merged: EconomicEvent = { ...incoming };
-  if (merged.values === undefined && stored.values) merged.values = stored.values;
-  if (merged.indicatorIds === undefined && stored.indicatorIds)
-    merged.indicatorIds = stored.indicatorIds;
-  if (merged.aiSummary === undefined && stored.aiSummary !== undefined)
-    merged.aiSummary = stored.aiSummary;
-  // A translation stays while the provider's title is unchanged (RSS re-delivers the English one).
-  if (
-    merged.titleOriginal === undefined &&
-    stored.titleOriginal !== undefined &&
-    incoming.title === stored.titleOriginal
-  ) {
-    merged.title = stored.title;
-    merged.titleOriginal = stored.titleOriginal;
-    merged.translation = stored.translation;
-  }
-  if (merged.time === '' && stored.time !== '') merged.time = stored.time;
-  return merged;
-}
-export class PreservingCalendarRepository implements CalendarRepository {
-  constructor(private inner: CalendarRepository) {}
-  list(from: string, to: string) {
-    return this.inner.list(from, to);
-  }
-  async upsert(events: EconomicEvent[], authorId: string) {
-    if (!events.length) return;
-    const dates = events.map((event) => event.date).sort();
-    const stored = new Map<number, EconomicEvent>();
-    for (const record of await this.inner.list(dates[0], dates[dates.length - 1])) {
-      const event = cleanEvent(record);
-      if (event) stored.set(event.id, event);
-    }
-    await this.inner.upsert(
-      events.map((event) => mergeStoredEvent(stored.get(event.id), event)),
-      authorId,
-    );
-  }
-}
+// Calendar writes that keep what earlier runs attached live in src/server/calendar-merge.ts
+// (shared with the calendar-enrich job); re-exported here for the existing imports.
+export { PreservingCalendarRepository, mergeStoredEvent } from '../server/calendar-merge.js';
 
 // ---------------------------------------------------------------------------
 // Released values.
@@ -272,8 +239,11 @@ class Steps {
     this.tally(name).count += count;
   }
   /** A known condition worth recording that does not make the step fail. */
-  info(name: string, code: string) {
-    this.code(name, code);
+  info(name: string, code: string, times = 1) {
+    if (CODE.test(code)) {
+      const codes = this.tally(name).codes;
+      codes[code] = (codes[code] ?? 0) + times;
+    }
   }
   skipped(name: string, code: string) {
     this.tally(name).skipped = true;
@@ -475,6 +445,24 @@ export async function runMorningCalendar(deps: MorningDependencies): Promise<Job
       return null;
     }
   };
+  // c0. calendar enrichment of new events: runs before the older title translation so that step only
+  // sees what enrichment could not handle. Cleanup and measured reactions need no AI.
+  await guarded('enrich', async () => {
+    if (!deps.enrich) return steps.skipped('enrich', 'NOT_CONFIGURED');
+    const report = await deps.enrich(calendar, {
+      from: addDays(today, -options.enrichDays),
+      to: today,
+    });
+    run.ai.calls += report.aiCalls;
+    for (const key of Object.keys(run.ai.tokens) as (keyof MorningUsage)[])
+      run.ai.tokens[key] += report.usage[key];
+    for (const [code, times] of Object.entries(report.codes)) {
+      if (code === 'AI_QUOTA_EXCEEDED') steps.skipped('enrich', code);
+      else if (!report.failures.includes(code)) steps.info('enrich', code, times);
+    }
+    for (const code of report.failures) steps.failed('enrich', code);
+    steps.done('enrich', report.cleaned + report.reactions + report.enriched);
+  });
   await guarded('ai-summary', async () => {
     if (!ai) return steps.disabled('ai-summary', 'AI_DISABLED');
     const refs = (await readEvents(addDays(today, -options.summaryDays), addDays(today, -1)))
@@ -658,8 +646,8 @@ export type MorningConfiguration = {
   project: string;
   appOrigin: string;
   options: Partial<MorningOptions>;
-  /** Non-null only when MORNING_AI_ENABLED=true (and Vertex is fully configured). */
-  ai: MorningAiConfig | null;
+  /** Non-null only when MORNING_AI_ENABLED=true (and the AI provider is fully configured). */
+  ai: AiEnvironment | null;
 };
 /**
  * Only runs as a Cloud Run Job in an explicit project. The AI step is off unless
@@ -679,7 +667,7 @@ export function morningConfiguration(env: NodeJS.ProcessEnv): MorningConfigurati
   const flag = env.MORNING_AI_ENABLED;
   if (flag !== undefined && flag !== '' && flag !== 'true' && flag !== 'false')
     throw new JobConfigError();
-  let ai: MorningAiConfig | null = null;
+  let ai: AiEnvironment | null = null;
   if (flag === 'true') {
     ai = morningAiConfigFromEnvironment(env);
     if (!ai) throw new JobConfigError();
@@ -721,8 +709,17 @@ export async function main(env: NodeJS.ProcessEnv = process.env) {
           };
         },
         ai: config.ai
-          ? new VertexMorningAi(config.ai, new FirestoreAiQuota(db, 'morning'))
+          ? new ProviderMorningAi(createAiProvider(config.ai), new FirestoreAiQuota(db, 'morning'))
           : undefined,
+        enrich: async (repository, window) =>
+          enrichCalendar(
+            {
+              calendar: repository,
+              ...enrichmentCollaborators(env, db, config.ai),
+              author: AUTHOR,
+            },
+            { ...window, force: false, maxAiCalls: 2 },
+          ),
         notifier: notifications,
         log,
         options: config.options,

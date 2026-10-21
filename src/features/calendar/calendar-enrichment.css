@@ -1,0 +1,139 @@
+/* Calendar enrichment detail: outcome table, measured reaction table, impact list, explainer. */
+.event-enrichment {
+  display: grid;
+  gap: 14px;
+  margin-bottom: 14px;
+  min-width: 0;
+}
+.event-enrichment h4 {
+  margin: 0 0 6px;
+  font-size: 11px;
+  font-weight: 600;
+  color: #6b6f7d;
+}
+.enrich-headline {
+  margin: 0 0 8px;
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.6;
+  color: #3b3e4d;
+  overflow-wrap: anywhere;
+}
+.enrich-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  table-layout: auto;
+}
+.enrich-table caption {
+  text-align: left;
+  font-size: 10px;
+  color: #8f94a3;
+  padding-bottom: 4px;
+}
+.enrich-table th,
+.enrich-table td {
+  padding: 6px 4px;
+  border-bottom: 1px solid #eeeaf6;
+  vertical-align: top;
+  text-align: left;
+  font-weight: 400;
+  overflow-wrap: anywhere;
+}
+.enrich-table thead th {
+  font-size: 10px;
+  color: #8f94a3;
+}
+.enrich-table tbody th {
+  font-weight: 600;
+  color: #4a4d5b;
+}
+.enrich-table .num {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.enrich-table td small {
+  display: block;
+  font-size: 10px;
+  color: #8f94a3;
+  line-height: 1.5;
+}
+.enrich-table .change {
+  font-weight: 600;
+}
+.enrich-table .pair {
+  white-space: nowrap;
+}
+.reaction-table th[scope='row'] {
+  width: 30%;
+}
+/* Korean convention: up is red, down is blue; the sign and the word stay in the text. */
+.enrich-table .change.rise {
+  color: #d23b3b;
+}
+.enrich-table .change.fall {
+  color: #2f6fd1;
+}
+.enrich-table .change.flat {
+  color: #6b6f7d;
+}
+.enrich-impact {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+.enrich-impact li {
+  display: grid;
+  grid-template-columns: minmax(64px, 28%) 1fr;
+  gap: 8px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #4a4d5b;
+  border-left: 2px solid #e4def2;
+  padding-left: 10px;
+}
+.enrich-impact strong {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.enrich-impact span {
+  overflow-wrap: anywhere;
+}
+.enrich-explainer {
+  background: #f8f5ff;
+  border: 1px solid #e9e0f6;
+  border-radius: 8px;
+  padding: 10px 12px;
+}
+.enrich-explainer p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #4a4d5b;
+  overflow-wrap: anywhere;
+}
+.enrich-provenance {
+  margin: 0;
+  font-size: 10px;
+  line-height: 1.6;
+  color: #8f94a3;
+  overflow-wrap: anywhere;
+}
+.release-type {
+  display: inline-block;
+  font-size: 10px;
+  color: #6b6f7d;
+  background: #f1eff7;
+  border-radius: 4px;
+  padding: 1px 6px;
+  margin-right: 6px;
+  vertical-align: middle;
+}
+@media (max-width: 520px) {
+  .enrich-impact li {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}

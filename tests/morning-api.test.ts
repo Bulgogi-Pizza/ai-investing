@@ -72,7 +72,6 @@ describe('캘린더 모델 확장(아침 작업)', () => {
       { indicatorIds: ['a', 'a'] },
       { aiSummary: { text: '', model: 'm', generatedAt: '2026-10-21T00:00:00Z' } },
       { aiSummary: { text: 'x', model: 'm', generatedAt: 'nope' } },
-      { titleOriginal: 'Original' },
       { translation: { model: 'm', translatedAt: '2026-10-21T00:00:00Z' } },
     ])
       expect(cleanEvent({ ...event, ...bad }), JSON.stringify(bad)).toBeNull();
@@ -184,12 +183,14 @@ describe('인프라 정의(정적 검사; terraform validate는 별도로 실행
     expect(tf).toContain('count   = var.morning_ai_enabled ? 1 : 0');
     expect(tf).toContain('roles/aiplatform.user');
   });
-  it('배포 단계는 AI를 명시적으로 끄고 토스 비밀 없이 같은 이미지·계정·VPC로 job을 만든다', () => {
+  it('배포 단계는 AI를 켜고(Claude Sonnet 5.5 승인) 토스 비밀은 숫자 버전일 때만 붙여 같은 이미지·계정·VPC로 job을 만든다', () => {
     const start = deploy.indexOf('- name: Deploy morning calendar job');
     const next = deploy.indexOf('- name: ', start + 1);
     // Only this step: later job steps (e.g. the paper algorithm job) legitimately use Toss secrets.
     const step = deploy.slice(start, next === -1 ? undefined : next);
-    expect(step).toContain('MORNING_AI_ENABLED=false');
+    expect(step).toContain('MORNING_AI_ENABLED=true');
+    expect(step).toContain('AI_PROVIDER=$AI_PROVIDER,AI_MODEL=$AI_MODEL,AI_LOCATION=$AI_LOCATION');
+    expect(step).not.toContain('MORNING_AI_ENABLED=false');
     expect(step).toContain('--image="$DEPLOY_IMAGE"');
     expect(step).toContain('--service-account="investing-jobs@$PROJECT.iam.gserviceaccount.com"');
     expect(step).toContain('src/jobs/morning-calendar.ts');
@@ -198,8 +199,9 @@ describe('인프라 정의(정적 검사; terraform validate는 별도로 실행
     );
     expect(step).toContain('--role=roles/run.invoker');
     expect(step).toContain('--member="serviceAccount:investing-scheduler@');
-    expect(step).not.toMatch(/TOSS_/);
-    expect(step).not.toContain('MORNING_AI_ENABLED=true');
+    // Toss secrets (market reactions) only as numeric versions the service already uses; never a value.
+    expect(step).toContain('investing-toss-[a-z-]+:[0-9]+');
+    expect(step).not.toMatch(/TOSS_[A-Z_]+=[^$]/);
     // Appended after the snapshot job step, which is untouched.
     expect(deploy.indexOf('Deploy daily snapshot job')).toBeLessThan(
       deploy.indexOf('Deploy morning calendar job'),

@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Router } from 'express';
 import { rateLimit } from 'express-rate-limit';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
+import { cleanTitle } from './calendar-clean.js';
 import { cleanEvent, type CalendarRepository, type EconomicEvent } from './calendar.js';
 import { ownerGate } from './owner.js';
 
@@ -150,16 +151,18 @@ export function parseOfficialFeed(
       continue;
     }
     const local = new Date(published + 9 * 60 * 60 * 1000).toISOString();
-    const title = item.title
-      .replace(/&middot;/g, '·')
-      .replace(/&nbsp;/g, ' ')
-      .trim();
+    // Deterministic cleanup: entities decoded, leading release-type tag split off. The exact
+    // provider title is kept in titleOriginal whenever the cleaned title differs from it.
+    const rawTitle = item.title.trim();
+    const { title, releaseType } = cleanTitle(rawTitle);
     const candidate = cleanEvent({
       id: stableEventId(source.id, link.href),
       eventKind: 'news-release',
       date: local.slice(0, 10),
       time: local.slice(11, 16),
       title,
+      ...(title === rawTitle ? {} : { titleOriginal: rawTitle }),
+      ...(releaseType ? { releaseType } : {}),
       country: source.country,
       ...classify(title, source),
       description:

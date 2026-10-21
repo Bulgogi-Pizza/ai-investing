@@ -57,9 +57,38 @@ export type MarketEvent = {
   values?: EventValue[];
   /** Present only when an AI summary exists; null/undefined means none. */
   aiSummary?: { text: string; model: string; generatedAt: string } | null;
-  /** Provider's own title when `title` is a Korean AI translation. */
+  /** Exact provider title when `title` differs from it (Korean translation or cleaned text). */
   titleOriginal?: string;
+  /** Present when `title` is an AI translation of `titleOriginal`. */
   translation?: { model: string; translatedAt: string };
+  /** Leading release-type tag of the source title ("보도자료"). */
+  releaseType?: string;
+  outcome?: EventOutcome;
+  reaction?: EventReaction[];
+  impact?: EventImpact[];
+  explainer?: string;
+  enrichment?: EventEnrichment;
+};
+export type EventOutcome = {
+  headline: string;
+  facts: { label: string; value: string; note?: string }[];
+};
+export type EventReaction = {
+  asset: 'KOSPI' | 'KOSDAQ' | 'KR_BOND_3Y' | 'KR_BOND_10Y' | 'USDKRW' | 'SPY';
+  from: { date: string; value: number };
+  to: { date: string; value: number };
+  change: number;
+  unit: '%' | '%p' | '원';
+  /** USD/KRW only. */
+  changePercent?: number;
+  source: string;
+};
+export type EventImpact = { asset: string; effect: string };
+export type EventEnrichment = {
+  model: string;
+  generatedAt: string;
+  version: number;
+  aiFields: ('title' | 'outcome' | 'impact' | 'explainer')[];
 };
 export type EventValue = {
   indicatorId: string;
