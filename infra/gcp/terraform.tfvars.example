@@ -4,7 +4,9 @@ github_repository_id = "123456789"
 # Optional: budget notification (not a hard spending cap)
 # billing_account = "XXXXXX-XXXXXX-XXXXXX"
 monthly_budget_amount = 10
-budget_currency = "USD" # Must match the billing account (e.g. KRW with amount15000)
+budget_currency = "USD" # Must match the billing account (e.g. KRW with amount 30000)
+# Optional extra warning (e.g. 20000 with a 30000 budget). The 100% notification also triggers the app-level budget stop.
+budget_warning_amount = 0
 # Set true only after the first deploy created the investing-daily-snapshot Cloud Run Job (docs/operations/jobs.md)
 snapshot_schedules_enabled = false
 # Set true only after the first deploy created the investing-algo-paper Cloud Run Job and a manual run was checked (docs/operations/jobs.md)

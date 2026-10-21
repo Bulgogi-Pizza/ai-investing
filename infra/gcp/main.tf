@@ -38,8 +38,18 @@ variable "billing_account" {
   default = ""
 }
 variable "monthly_budget_amount" {
-  type    = number
-  default = 10
+  type        = number
+  default     = 10
+  description = "Monthly budget; the 100% notification triggers the app-level budget stop (docs/operations/budget.md)."
+}
+variable "budget_warning_amount" {
+  type        = number
+  default     = 0
+  description = "Extra warning notification at this amount (same currency); 0 disables it."
+  validation {
+    condition     = var.budget_warning_amount >= 0
+    error_message = "Use 0 or a positive amount."
+  }
 }
 
 variable "budget_currency" {
@@ -144,7 +154,10 @@ resource "google_billing_budget" "app" {
       units         = tostring(var.monthly_budget_amount)
     }
   }
-  threshold_rules { threshold_percent = 0.5 }
+  dynamic "threshold_rules" {
+    for_each = var.budget_warning_amount > 0 && var.budget_warning_amount < var.monthly_budget_amount ? [var.budget_warning_amount / var.monthly_budget_amount] : []
+    content { threshold_percent = threshold_rules.value }
+  }
   threshold_rules { threshold_percent = 0.9 }
   threshold_rules { threshold_percent = 1.0 }
   depends_on = [google_project_service.api]
