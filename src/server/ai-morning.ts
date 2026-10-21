@@ -161,6 +161,53 @@ export const canonical = (token: string) => {
   const integer = whole.replace(/^0+(?=\d)/, '');
   return fraction === undefined ? integer : `${integer}.${fraction.replace(/0+$/, '') || '0'}`;
 };
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+const WORDS: Record<string, number> = {
+  one: 1,
+  first: 1,
+  two: 2,
+  second: 2,
+  three: 3,
+  third: 3,
+  four: 4,
+  fourth: 4,
+  five: 5,
+  fifth: 5,
+  six: 6,
+  sixth: 6,
+  seven: 7,
+  seventh: 7,
+  eight: 8,
+  eighth: 8,
+  nine: 9,
+  ninth: 9,
+  ten: 10,
+  tenth: 10,
+  eleven: 11,
+  eleventh: 11,
+  twelve: 12,
+  twelfth: 12,
+};
+/**
+ * Numbers a Korean translation of `title` may contain: the title's digits plus what English
+ * spells out in words ("September" -> 9월, "third-party" -> 제3자, "second quarter" -> 2분기).
+ */
+export function titleNumbers(title: string): Set<string> {
+  const allowed = new Set(numberTokens(title).map(canonical));
+  for (const word of title.toLowerCase().match(/[a-z]+/g) ?? []) {
+    const month = MONTHS.indexOf(word.slice(0, 3));
+    if (
+      month >= 0 &&
+      (word.length === 3 ||
+        /^(?:january|february|march|april|may|june|july|august|sept?(?:ember)?|october|november|december)$/.test(
+          word,
+        ))
+    )
+      allowed.add(String(month + 1));
+    if (word in WORDS) allowed.add(String(WORDS[word]));
+  }
+  return allowed;
+}
 const KOREAN_EXTRA =
   /(?:매수|매도)\s*(?:추천|권고|권장|의견|적기|타이밍)|(?:사|팔)\s*(?:세요|라|자)(?![가-힣])|비중\s*(?:확대|축소|조절|조정)|(?:목표|적정)\s*(?:주가|가격)|수익\s*(?:보장|확실)|반드시\s*(?:오른|상승|하락|내린)/;
 const PROBABILITY =
@@ -269,7 +316,7 @@ export function validateTranslations(
       rejected++;
       continue;
     }
-    const original = new Set(numberTokens(input.title).map(canonical));
+    const original = titleNumbers(input.title);
     if (numberTokens(titleKo).some((token) => !original.has(canonical(token)))) {
       rejected++;
       continue;
