@@ -50,7 +50,7 @@
 | 7    | 단계 8 도메인: 연결 방식·비용 비교 후 사용자와 결정                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     | 사용자 결정             |
 
 | 4c | FOMC 수정 배포 후: 다음 아침 작업에서 `fred-release:101:2026-10-28` 일정이 `2026-10-29 03:00`(연준 캘린더 출처)로 옮겨졌는지, 새 가짜 일정이 없는지 확인. 매년 연준이 다음 해 일정을 내면 `officialReleaseSchedules`(src/server/macro/catalog.ts)에 추가 | 없음 |
-| 4d | 2026-10-22 이후(일일 한도 초기화 뒤) `CALENDAR_ENRICH_FORCE=1 CALENDAR_ENRICH_MAX_AI_CALLS=20`으로 한 번 더 실행해 나머지 일정의 ECOS 수치 반영·영문 5건 번역을 마친다. 다음부터는 강제 없이 실행. FOMC `fred-release:101:2026-10-28` 일정이 아침 작업 뒤 `2026-10-29 03:00`으로 옮겨졌는지도 확인 | 일일 AI 한도 |
+| 4d | 캘린더 AI 한도를 **하루 20만 토큰**으로 바꾼 뒤(사용자 결정, 이 PR) 강제 재보강과 아침 작업을 다시 실행했다. 결과는 현재 상태 참고. 다음부터는 강제 없이 실행. 한도 상태는 `aiUsage/{KST날짜}_calendar`의 `tokens` | 없음 |
 | 4e | **완료(이 PR)** — 한국은행 통계 발표에 ECOS 공식 수치(`calendar-release-facts.ts`, 계열 9개)를 붙이고, 영향 문장이 반응 수치를 되풀이하지 못하게 했다. 배포 후 `CALENDAR_ENRICH_FORCE=1 CALENDAR_ENRICH_MAX_AI_CALLS=20`으로 1회 다시 보강했다(결과는 위 현재 상태). 남은 것: 토스 과거 환율이 없을 때 원/달러 반응을 ECOS 일별 환율로 대체(`FX_UNAVAILABLE`) | 없음 |
 
 남은 개선(급하지 않음): 종목 이름 검색(`/stocks/all`), 캔들 차트 보기, 업종 비교의 서버 일괄 계산, 지표 매개변수 편집, `toss.ts`와 `toss-analysis.ts`의 수급 정규화 중복 통합, `liveOrders`·`blockedOrders` 보존 기간, 뉴스 점수 규칙(현재 신호에서 제외), KRX 호가 단위표(현재는 400 응답의 안내로 한 번 보정).

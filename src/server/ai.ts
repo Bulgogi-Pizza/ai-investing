@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { Firestore, Timestamp } from '@google-cloud/firestore';
+import { FieldValue, Firestore, Timestamp } from '@google-cloud/firestore';
 import { aiBlockedByBudget } from './budget-guard.js';
 import {
   AiProviderError,
@@ -50,6 +50,8 @@ export type AiResult =
     };
 export interface AiQuota {
   consume(day: string): Promise<boolean>;
+  /** Adds a finished call's tokens (features with a token budget; others ignore it). */
+  record?(day: string, tokens: number): Promise<void>;
 }
 /**
  * Daily call limits per feature. The original shared limit of 25 stays with the explanation
@@ -61,8 +63,16 @@ export type AiFeature = 'explanation' | 'morning' | 'calendar';
 export const AI_FEATURE_LIMITS: Readonly<Record<AiFeature, number>> = {
   explanation: 25,
   morning: 4,
-  // Calendar enrichment: up to 10 events per call; a first backfill of ~120 events needs ~12 calls.
-  calendar: 20,
+  // Calendar enrichment is limited by tokens (AI_FEATURE_TOKEN_LIMITS), not by calls.
+  calendar: Number.POSITIVE_INFINITY,
+};
+/**
+ * Daily token budgets (prompt + output, KST day). A call is allowed while the day's recorded total
+ * is below the budget, so the last call can overshoot by one call's size (calendar: at most about
+ * 20k tokens). Calendar: 200k tokens = about 30 calls of 10 events (user decision, 2026-10-21).
+ */
+export const AI_FEATURE_TOKEN_LIMITS: Readonly<Partial<Record<AiFeature, number>>> = {
+  calendar: 200_000,
 };
 /** `aiUsage/{day}` is the explanation counter (as before); other features use `aiUsage/{day}_{feature}`. */
 export const aiUsageDocumentId = (day: string, feature: AiFeature) =>
@@ -70,15 +80,25 @@ export const aiUsageDocumentId = (day: string, feature: AiFeature) =>
 export class MemoryAiQuota implements AiQuota {
   private day = '';
   private count = 0;
+  private tokens = 0;
   constructor(private feature: AiFeature = 'explanation') {}
-  async consume(day: string) {
+  private roll(day: string) {
     if (day !== this.day) {
       this.day = day;
       this.count = 0;
+      this.tokens = 0;
     }
+  }
+  async consume(day: string) {
+    this.roll(day);
     if (this.count >= AI_FEATURE_LIMITS[this.feature]) return false;
+    if (this.tokens >= (AI_FEATURE_TOKEN_LIMITS[this.feature] ?? Infinity)) return false;
     this.count++;
     return true;
+  }
+  async record(day: string, tokens: number) {
+    this.roll(day);
+    if (Number.isSafeInteger(tokens) && tokens > 0) this.tokens += tokens;
   }
 }
 export class FirestoreAiQuota implements AiQuota {
@@ -91,17 +111,28 @@ export class FirestoreAiQuota implements AiQuota {
       throw new Error('Invalid quota day');
     const ref = this.db.collection('aiUsage').doc(aiUsageDocumentId(day, this.feature));
     const limit = AI_FEATURE_LIMITS[this.feature];
+    const tokenLimit = AI_FEATURE_TOKEN_LIMITS[this.feature] ?? Infinity;
     return this.db.runTransaction(async (tx) => {
       const data = (await tx.get(ref)).data();
       const count = data?.count ?? 0;
+      const tokens = data?.tokens ?? 0;
       if (!Number.isSafeInteger(count) || count < 0) throw new Error('Invalid quota state');
-      if (count >= limit) return false;
-      tx.set(ref, {
-        count: count + 1,
-        ttlAt: Timestamp.fromMillis(Date.parse(day) + 2 * 86400000),
-      });
+      if (!Number.isSafeInteger(tokens) || tokens < 0) throw new Error('Invalid quota state');
+      if (count >= limit || tokens >= tokenLimit) return false;
+      tx.set(ref, { count: count + 1, tokens, ttlAt: this.ttl(day) });
       return true;
     });
+  }
+  async record(day: string, tokens: number) {
+    if (!(this.feature in AI_FEATURE_TOKEN_LIMITS)) return;
+    if (!Number.isSafeInteger(tokens) || tokens <= 0) return;
+    await this.db
+      .collection('aiUsage')
+      .doc(aiUsageDocumentId(day, this.feature))
+      .set({ tokens: FieldValue.increment(tokens), ttlAt: this.ttl(day) }, { merge: true });
+  }
+  private ttl(day: string) {
+    return Timestamp.fromMillis(Date.parse(day) + 2 * 86400000);
   }
 }
 const hash = (value: string) => createHash('sha256').update(value).digest('hex');

@@ -1,4 +1,4 @@
-import { AI_FEATURE_LIMITS, type AiQuota } from './ai.js';
+import { AI_FEATURE_TOKEN_LIMITS, type AiQuota } from './ai.js';
 import { aiBlockedByBudget } from './budget-guard.js';
 import {
   canonical,
@@ -366,6 +366,8 @@ export class ProviderEnrichAi implements EnrichAi {
     );
     operation.catch(() => undefined);
     const { json, usage, fallback } = await Promise.race([operation, timeout]);
+    // Charge the day's token budget with what the call actually used (best effort).
+    await this.quota.record?.(kstDay(this.clock()), usage.total).catch(() => undefined);
     // Validate against what was actually sent.
     return {
       ...validateEnrichment(json, sent),
@@ -374,7 +376,7 @@ export class ProviderEnrichAi implements EnrichAi {
     };
   }
 }
-export const CALENDAR_AI_DAILY_LIMIT = AI_FEATURE_LIMITS.calendar;
+export const CALENDAR_AI_DAILY_TOKENS = AI_FEATURE_TOKEN_LIMITS.calendar;
 
 // ---------------------------------------------------------------------------
 // Deterministic cleanup.

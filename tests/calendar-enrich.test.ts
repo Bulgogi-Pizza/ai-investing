@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { MemoryAiQuota, type AiQuota } from '../src/server/ai';
+import { AI_FEATURE_TOKEN_LIMITS, MemoryAiQuota, type AiQuota } from '../src/server/ai';
 import { ClaudeVertexProvider, type ClaudeMessagesClient } from '../src/server/ai-provider';
 import {
   ENRICH_BATCH_SIZE,
@@ -325,6 +325,21 @@ describe('ProviderEnrichAi', () => {
     expect(body.output_config.format.schema.additionalProperties).toBe(false);
     expect(JSON.stringify(body.output_config.format.schema)).not.toContain('maxItems');
     expect(body.messages[0].content).not.toMatch(/https?:|12345678901|@/);
+  });
+  it('캘린더 일일 한도는 토큰 기준 20만이고, 끝난 호출의 실제 토큰을 기록한다', async () => {
+    expect(AI_FEATURE_TOKEN_LIMITS.calendar).toBe(200_000);
+    const quota = new MemoryAiQuota('calendar');
+    const ai = enrichAi(claude((sent) => sent.map((entry) => item(entry.ref))).client, quota);
+    await ai.enrich([minimalInput()]);
+    // Each fake call reports 1,500 tokens (1,000 in + 500 out).
+    await quota.record(TODAY, 200_000 - 1_500 - 1);
+    await expect(ai.enrich([minimalInput()])).resolves.toBeDefined(); // 199,999 < 200,000
+    await expect(ai.enrich([minimalInput()])).rejects.toMatchObject({ code: 'AI_QUOTA_EXCEEDED' });
+    // The next KST day starts from zero; other features keep call limits and ignore tokens.
+    expect(await quota.consume('2026-10-28')).toBe(true);
+    const morning = new MemoryAiQuota('morning');
+    await morning.record(TODAY, 10_000_000);
+    expect(await morning.consume(TODAY)).toBe(true);
   });
   it('일일 한도(기능별 calendar)·공급자 429·거절은 고정 코드로 던진다', async () => {
     const exhausted = enrichAi(claude(() => []).client, { consume: async () => false });
