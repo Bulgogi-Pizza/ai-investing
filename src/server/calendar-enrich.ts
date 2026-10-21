@@ -151,7 +151,7 @@ export const ENRICH_SYSTEM =
   'titleKo: titleIsKorean이 false이면 자연스러운 한국어 제목(기관명은 널리 쓰이는 표기, 모르면 원문 유지), true이면 빈 문자열. ' +
   'headline: 이 발표가 무엇을 결정했거나 보여 줬는지 한국어 한 문장, 60자 이내. 제목과 knownFacts에 있는 내용만 쓴다. ' +
   'facts: 제목이나 knownFacts에 숫자가 있을 때만 label, value, note로 적는다. 숫자는 입력에 있는 그대로만 쓰고 계산하거나 추정한 숫자는 쓰지 마라. 없으면 빈 배열, note가 없으면 빈 문자열. ' +
-  'impact: 이 발표가 영향을 줄 수 있는 자산별 한 줄(effect 60자 이내, 최대 4개). 경로와 방향을 "상승 압력", "하락 압력", "부담", "완화"처럼 쓴다. 가격 목표, 매수·매도 의견, 자산 비중 제안, 확률은 쓰지 마라. 숫자는 입력에 있는 것만 쓴다. 인가·제재·인사 같은 행정 발표여서 직접적인 시장 영향이 없어 보이면 빈 배열로 둔다. reactionSmall이 true일 때만 "직접적인 시장 영향은 작음"이라고 쓸 수 있다. ' +
+  'impact: 이 발표가 영향을 줄 수 있는 자산별 한 줄(effect 60자 이내, 최대 4개). 경로와 방향을 "상승 압력", "하락 압력", "부담", "완화"처럼 쓴다. reaction의 수치는 따로 표시되므로 impact에 되풀이하지 마라. 가격 목표, 매수·매도 의견, 자산 비중 제안, 확률은 쓰지 마라. 숫자는 입력에 있는 것만 쓴다. 인가·제재·인사 같은 행정 발표여서 직접적인 시장 영향이 없어 보이면 빈 배열로 둔다. reactionSmall이 true일 때만 "직접적인 시장 영향은 작음"이라고 쓸 수 있다. ' +
   'explainer: 일반 독자에게 어려운 개념(예: 할인율, 스트레스 테스트, 토큰화, 정책금리 경로)이 핵심일 때만 한국어 최대 2문장으로 풀어 쓰고, 그렇지 않으면 빈 문자열. ' +
   'JSON 스키마의 필드만 출력하라.';
 
@@ -228,6 +228,8 @@ export function validateEnrichment(
     seen.add(entry.ref);
     const input = byRef.get(entry.ref)!;
     const allowed = allowedNumbers(input);
+    // Impact is the mechanism, not a replay of the measured move (the reaction is shown separately).
+    const impactAllowed = allowedNumbers({ ...input, reaction: [] });
     const item: EnrichItem = { ref: entry.ref };
     // title: Korean sources keep their own title; a translation may only reuse the title's numbers.
     if (!input.titleIsKorean) {
@@ -270,8 +272,8 @@ export function validateEnrichment(
           raw.asset.length >= 1 &&
           raw.asset.length <= 30 &&
           !unsafeMorningText(raw.asset) &&
-          numbersAllowed(raw.asset, allowed) &&
-          korean(raw.effect, 60, allowed) &&
+          numbersAllowed(raw.asset, impactAllowed) &&
+          korean(raw.effect, 60, impactAllowed) &&
           (DIRECTION.test(raw.effect) || SMALL_IMPACT.test(raw.effect)) &&
           (!SMALL_IMPACT.test(raw.effect) || input.reactionSmall)
         )
@@ -448,10 +450,17 @@ export function applyEnrichment(
   return next;
 }
 
+const dayNumber = (date: string) => Date.parse(`${date}T00:00:00Z`) / 86_400_000;
+
 // ---------------------------------------------------------------------------
 // The run (shared by the calendar-enrich job and the morning job).
 // ---------------------------------------------------------------------------
-export type PolicyFacts = (event: EconomicEvent) => Promise<EnrichFact[]>;
+/**
+ * Official figures for an event. null = the release has official figures that are not published
+ * yet: AI waits (at most FACTS_WAIT_DAYS after the event) so the outcome is written with them.
+ */
+export type PolicyFacts = (event: EconomicEvent) => Promise<EnrichFact[] | null>;
+const FACTS_WAIT_DAYS = 7;
 export type EnrichDeps = {
   /** Wrap with PreservingCalendarRepository: writes never erase stored fields. */
   calendar: CalendarRepository;
@@ -588,11 +597,17 @@ export async function enrichCalendar(
     for (let start = 0; start < chosen.length; start += ENRICH_BATCH_SIZE) {
       const batch = chosen.slice(start, start + ENRICH_BATCH_SIZE);
       const prepared = [];
-      for (const [index, event] of batch.entries()) {
+      for (const event of batch) {
         let knownFacts: EnrichFact[] = [];
         if (deps.policyFacts) {
           try {
-            knownFacts = await deps.policyFacts(event);
+            const facts = await deps.policyFacts(event);
+            if (facts === null) {
+              if (dayNumber(todayKst) - dayNumber(event.date) <= FACTS_WAIT_DAYS) {
+                code('AI_DEFERRED_FACTS_PENDING');
+                continue;
+              }
+            } else knownFacts = facts;
           } catch {
             code('POLICY_FACTS_FAILED');
           }
@@ -600,7 +615,7 @@ export async function enrichCalendar(
         const rows = event.reaction ?? [];
         const sourceTitle = sourceTitleOf(event);
         const input: EnrichInput = {
-          ref: String.fromCharCode(65 + index),
+          ref: String.fromCharCode(65 + prepared.length),
           country: event.country,
           date: event.date,
           title: sourceTitle,
@@ -613,6 +628,7 @@ export async function enrichCalendar(
         };
         prepared.push({ event, input });
       }
+      if (!prepared.length) continue;
       report.aiCalls++;
       let result: EnrichBatch;
       try {

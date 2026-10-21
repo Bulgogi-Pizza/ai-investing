@@ -45,7 +45,14 @@ describe('지표 카탈로그', () => {
     const ecos = Object.fromEntries(
       indicatorCatalog.flatMap((entry) =>
         entry.source === 'ecos'
-          ? [[entry.id, `${entry.statCode}/${entry.itemCode}/${entry.cycle}`]]
+          ? [
+              [
+                entry.id,
+                [entry.statCode, entry.itemCode, entry.itemCode2, entry.cycle]
+                  .filter(Boolean)
+                  .join('/'),
+              ],
+            ]
           : [],
       ),
     );
@@ -53,6 +60,15 @@ describe('지표 카탈로그', () => {
       'kr-base-rate': '722Y001/0101000/D',
       'kr-cpi': '901Y009/0/M',
       'kr-usdkrw': '731Y001/0000001/D',
+      'kr-ppi': '404Y014/*AA/M',
+      'kr-export-price': '402Y014/*AA/W/M',
+      'kr-import-price': '401Y015/*AA/W/M',
+      'kr-ccsi': '511Y002/FME/99988/M',
+      'kr-esi': '513Y001/E1000/M',
+      'kr-current-account': '301Y017/SA000/M',
+      'kr-fx-reserves': '732Y001/99/M',
+      'kr-m2': '161Y005/BBHS00/M',
+      'kr-loan-rate': '121Y006/BECBLA01/M',
     });
   });
 

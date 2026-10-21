@@ -21,6 +21,7 @@ import {
   type CalendarEnrichRunRepository,
 } from '../server/calendar-enrich-runs.js';
 import { policyFactsProvider, type PolicySource } from '../server/calendar-policy.js';
+import { releaseFactsProvider } from '../server/calendar-release-facts.js';
 import { FirestoreCalendarRepository, type CalendarRepository } from '../server/calendar.js';
 import { ecosFromEnvironment, fredFromEnvironment } from '../server/macro/index.js';
 import { addDays } from '../server/macro/shared.js';
@@ -162,16 +163,25 @@ export function enrichmentCollaborators(
       ? (tossFromEnvironment(true) as ReactionToss | undefined)
       : overrides.toss;
   const fred = fredFromEnvironment(env) as PolicySource | undefined;
-  const ecos = ecosFromEnvironment(env) as PolicySource | undefined;
+  const ecosAdapter = ecosFromEnvironment(env);
+  const ecos = ecosAdapter as PolicySource | undefined;
+  const policy =
+    fred || ecos
+      ? policyFactsProvider({ fred, ecos, today: () => kstDate(new Date()) })
+      : undefined;
+  const release = ecosAdapter ? releaseFactsProvider(ecosAdapter) : undefined;
   return {
     reaction: toss ? new ReactionCalculator(toss, { paceMs: PACE_MS }) : undefined,
     ai: ai
       ? new ProviderEnrichAi(createAiProvider(ai), new FirestoreAiQuota(db, 'calendar'))
       : undefined,
-    policyFacts:
-      fred || ecos
-        ? policyFactsProvider({ fred, ecos, today: () => kstDate(new Date()) })
-        : undefined,
+    policyFacts: policy
+      ? async (event) => {
+          const official = await policy(event);
+          const figures = release ? await release(event) : [];
+          return figures === null ? null : [...official, ...figures].slice(0, 8);
+        }
+      : undefined,
   };
 }
 
