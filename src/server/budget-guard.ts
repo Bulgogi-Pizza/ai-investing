@@ -40,6 +40,10 @@ export type BudgetState = {
   emergencyStopApplied?: boolean;
   /** The budget-stop Telegram message was claimed for the current stop (at most once). */
   stopNotified?: boolean;
+  /** Owner user id of the last manual release (audit; stored in the same write as the release). */
+  releasedBy?: string;
+  /** When the last valid budget notification was accepted: a dead pipeline shows up as an old value. */
+  lastMessageAt?: string;
   updatedAt: string;
 };
 export interface BudgetRepository {
@@ -113,6 +117,8 @@ function parseState(data: unknown): BudgetState {
       ? { emergencyStopApplied: d.emergencyStopApplied }
       : {}),
     ...(typeof d.stopNotified === 'boolean' ? { stopNotified: d.stopNotified } : {}),
+    ...(text(d.releasedBy) ? { releasedBy: text(d.releasedBy) } : {}),
+    ...(text(d.lastMessageAt) ? { lastMessageAt: text(d.lastMessageAt) } : {}),
     updatedAt: text(d.updatedAt) ?? '',
   };
 }
@@ -184,8 +190,11 @@ export type BudgetPushConfig = {
   serviceAccount: string;
   /** Cost / budget ratio from which the one warning per interval is sent. */
   warningRatio: number;
+  /** Only notifications of the budget with this display name count. */
+  displayName: string;
 };
 export const DEFAULT_WARNING_RATIO = 0.6667;
+export const DEFAULT_BUDGET_DISPLAY_NAME = 'ai-investing-monthly';
 const serviceAccountPattern =
   /^[a-z][a-z0-9-]{4,28}[a-z0-9]@[a-z][a-z0-9-]{4,28}[a-z0-9]\.iam\.gserviceaccount\.com$/;
 export function budgetPushConfigFromEnvironment(
@@ -205,7 +214,18 @@ export function budgetPushConfigFromEnvironment(
     env.BUDGET_WARNING_RATIO && Number.isFinite(raw) && raw > 0 && raw < 1
       ? raw
       : DEFAULT_WARNING_RATIO;
-  return { audience, serviceAccount, warningRatio };
+  const name = env.BUDGET_DISPLAY_NAME;
+  const displayName =
+    name && /^[A-Za-z0-9 ._-]{1,100}$/.test(name) ? name : DEFAULT_BUDGET_DISPLAY_NAME;
+  return { audience, serviceAccount, warningRatio, displayName };
+}
+/**
+ * True when the push identity is half set or malformed: the feature would silently stay off. The
+ * caller logs a fixed warning (no values).
+ */
+export function budgetPushMisconfigured(env: NodeJS.ProcessEnv = process.env): boolean {
+  const any = Boolean(env.BUDGET_PUSH_AUDIENCE || env.BUDGET_PUSH_SERVICE_ACCOUNT);
+  return any && budgetPushConfigFromEnvironment(env) === undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -267,7 +287,11 @@ export type BudgetUpdate = {
  * budgetDisplayName, costAmount, costIntervalStart, budgetAmount, budgetAmountType, currencyCode and
  * optionally alertThresholdExceeded). Anything else is malformed.
  */
-export function parseBudgetMessage(body: unknown, now: number = Date.now()): BudgetUpdate | null {
+export function parseBudgetMessage(
+  body: unknown,
+  now: number = Date.now(),
+  displayName: string = DEFAULT_BUDGET_DISPLAY_NAME,
+): BudgetUpdate | null {
   if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
   const message = (body as { message?: unknown }).message;
   if (!message || typeof message !== 'object' || Array.isArray(message)) return null;
@@ -290,9 +314,10 @@ export function parseBudgetMessage(body: unknown, now: number = Date.now()): Bud
   if (typeof p.costIntervalStart !== 'string' || p.costIntervalStart.length > 40) return null;
   const started = Date.parse(p.costIntervalStart);
   // A billing interval cannot start in the future: a far-future value would make every real notification "stale".
-  if (!Number.isFinite(started) || started > now + 3 * 86_400_000) return null;
+  if (!Number.isFinite(started) || started > now + 86_400_000) return null;
   if (p.budgetAmountType !== undefined && typeof p.budgetAmountType !== 'string') return null;
-  if (p.budgetDisplayName !== undefined && typeof p.budgetDisplayName !== 'string') return null;
+  // Only our own budget counts: another budget pointed at the topic must not stop or resume the app.
+  if (p.budgetDisplayName !== displayName) return null;
   const threshold = p.alertThresholdExceeded;
   if (threshold !== undefined && (!finite(threshold) || threshold < 0 || threshold > 100))
     return null;
@@ -309,7 +334,15 @@ export function parseBudgetMessage(body: unknown, now: number = Date.now()): Bud
 // Service: threshold logic and side effects.
 // ---------------------------------------------------------------------------
 export type BudgetHandleResult = {
-  action: 'stale' | 'stopped' | 'already-stopped' | 'suppressed' | 'warned' | 'resumed' | 'none';
+  action:
+    | 'stale'
+    | 'future'
+    | 'stopped'
+    | 'already-stopped'
+    | 'suppressed'
+    | 'warned'
+    | 'resumed'
+    | 'none';
 };
 export type BudgetServiceOptions = {
   repository: BudgetRepository;
@@ -361,8 +394,18 @@ export class BudgetService {
       action: BudgetHandleResult['action'];
       finalize: boolean;
     }>((current) => {
+      // A billing interval that has not started yet never changes anything (it could only be a bogus or
+      // crafted message: it must not resume the stop or make real notifications look stale).
+      if (Date.parse(update.intervalStart) > this.now().getTime())
+        return {
+          ...(current ? { next: { ...current, lastMessageAt: at } } : {}),
+          result: { action: 'future', finalize: false },
+        };
       if (current && update.intervalStart < current.intervalStart)
-        return { result: { action: 'stale', finalize: false } };
+        return {
+          next: { ...current, lastMessageAt: at },
+          result: { action: 'stale', finalize: false },
+        };
       const newInterval = !current || update.intervalStart > current.intervalStart;
       const next: BudgetState = {
         stopped: current?.stopped ?? false,
@@ -385,6 +428,8 @@ export class BudgetService {
           ? { emergencyStopApplied: current.emergencyStopApplied }
           : {}),
         ...(current?.stopNotified !== undefined ? { stopNotified: current.stopNotified } : {}),
+        ...(current?.releasedBy ? { releasedBy: current.releasedBy } : {}),
+        lastMessageAt: at,
         updatedAt: at,
       };
       let action: BudgetHandleResult['action'] = 'none';
@@ -433,9 +478,21 @@ export class BudgetService {
     });
     if (claimed) await this.send({ kind: 'budget-stop' });
   }
-  /** Owner release: clears the automatic stop for this interval; the emergency stop is untouched. */
-  async release(): Promise<{ released: boolean; state: BudgetState | null }> {
+  /**
+   * Owner release: clears the automatic stop for this interval; the emergency stop is untouched. The
+   * history entry is written first and a failure aborts the release (nothing changed), so a release
+   * never happens without its audit trail. `releasedBy` is stored in the same write as the release.
+   */
+  async release(ownerId: string): Promise<{ released: boolean; state: BudgetState | null }> {
     const at = this.now().toISOString();
+    const before = await this.options.repository.get();
+    if (!before?.stopped) return { released: false, state: before };
+    await this.options.algorithms.recordEvent({
+      id: this.newId(),
+      at,
+      kind: 'budget-stop-released',
+      changes: [{ field: 'budgetStop', from: 'true', to: 'false' }],
+    });
     const released = await this.options.repository.update((current) => {
       if (!current?.stopped) return { result: false };
       return {
@@ -445,24 +502,13 @@ export class BudgetService {
           reason: null,
           releasedAt: at,
           releasedIntervalStart: current.intervalStart,
+          releasedBy: ownerId,
           updatedAt: at,
         },
         result: true,
       };
     });
     this.options.guard?.invalidate();
-    if (released) {
-      try {
-        await this.options.algorithms.recordEvent({
-          id: this.newId(),
-          at,
-          kind: 'budget-stop-released',
-          changes: [{ field: 'budgetStop', from: 'true', to: 'false' }],
-        });
-      } catch {
-        // History is best effort here: the release itself is already stored.
-      }
-    }
     return { released, state: await this.options.repository.get() };
   }
   notifyReleased() {
@@ -521,7 +567,7 @@ export function createBudgetWebhookRouter(options: {
     },
     express.json({ limit: '16kb', type: 'application/json' }),
     async (req: Request, res: Response) => {
-      const update = parseBudgetMessage(req.body);
+      const update = parseBudgetMessage(req.body, Date.now(), options.config!.displayName);
       if (!update) return fail(res, 400, 'INVALID_MESSAGE', '메시지 형식이 올바르지 않습니다.');
       try {
         await options.service.handle(update);
@@ -546,6 +592,7 @@ const publicState = (state: BudgetState | null) => ({
     state?.warnedIntervalStart !== undefined && state.warnedIntervalStart === state.intervalStart,
   stoppedAt: state?.stoppedAt ?? null,
   releasedAt: state?.releasedAt ?? null,
+  lastMessageAt: state?.lastMessageAt ?? null,
   updatedAt: state?.updatedAt || null,
 });
 
@@ -577,7 +624,7 @@ export function createBudgetRouter(options: {
   router.post('/api/ops/budget/release', async (_req, res) => {
     let result: Awaited<ReturnType<BudgetService['release']>>;
     try {
-      result = await options.service.release();
+      result = await options.service.release(String(res.locals.user.id));
     } catch {
       return fail(res, 503, 'BUDGET_UNAVAILABLE', '월 예산 정지를 해제하지 못했습니다.');
     }

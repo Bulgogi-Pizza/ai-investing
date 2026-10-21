@@ -43,3 +43,8 @@
 .budget-message {
   margin: 0 0 14px;
 }
+.budget-status {
+  margin: 0 0 14px;
+  font-size: 11px;
+  color: #6f7586;
+}

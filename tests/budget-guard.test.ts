@@ -19,6 +19,7 @@ import {
   aiBlockedByBudget,
   authorizePush,
   budgetPushConfigFromEnvironment,
+  budgetPushMisconfigured,
   installBudgetGuard,
   isBudgetStopped,
   parseBudgetMessage,
@@ -36,7 +37,12 @@ import { gateJob } from '../src/jobs/budget-gate';
 const origin = 'https://invest.example.test';
 const audience = 'https://service.example.test';
 const serviceAccount = 'investing-budget-push@fixture-project.iam.gserviceaccount.com';
-const config: BudgetPushConfig = { audience, serviceAccount, warningRatio: 2 / 3 };
+const config: BudgetPushConfig = {
+  audience,
+  serviceAccount,
+  warningRatio: 2 / 3,
+  displayName: 'ai-investing-monthly',
+};
 const password = 'Test-only lengthy password';
 const telegramToken = '123456789:AAHdqTcvCH1vGWJxfSeofSAs0K5PALDsaw';
 const jwt = `${'a'.repeat(20)}.${'b'.repeat(20)}.${'c'.repeat(20)}`;
@@ -125,6 +131,11 @@ describe('budget notification parsing', () => {
       body({ alertThresholdExceeded: -1 }),
       body({ budgetAmountType: 3 }),
       body({ budgetDisplayName: {} }),
+      // Only our own budget counts: another name, or none at all, is refused.
+      body({ budgetDisplayName: 'someone-elses-budget' }),
+      body({ budgetDisplayName: undefined }),
+      // More than a day ahead is never a real billing interval.
+      body({ costIntervalStart: new Date(Date.now() + 2 * 86_400_000).toISOString() }),
     ];
     for (const value of bad) expect(parseBudgetMessage(value), JSON.stringify(value)).toBeNull();
   });
@@ -162,6 +173,7 @@ describe('push configuration', () => {
       audience,
       serviceAccount,
       warningRatio: 0.6667,
+      displayName: 'ai-investing-monthly',
     });
     expect(
       budgetPushConfigFromEnvironment({ ...env, BUDGET_WARNING_RATIO: '0.5' })?.warningRatio,
@@ -170,6 +182,40 @@ describe('push configuration', () => {
       expect(
         budgetPushConfigFromEnvironment({ ...env, BUDGET_WARNING_RATIO: bad })?.warningRatio,
       ).toBe(0.6667);
+  });
+});
+
+describe('push configuration problems', () => {
+  it('flags a half-set or malformed identity so startup can warn (no values involved)', () => {
+    expect(budgetPushMisconfigured({})).toBe(false);
+    expect(
+      budgetPushMisconfigured({
+        BUDGET_PUSH_AUDIENCE: audience,
+        BUDGET_PUSH_SERVICE_ACCOUNT: serviceAccount,
+      }),
+    ).toBe(false);
+    expect(budgetPushMisconfigured({ BUDGET_PUSH_AUDIENCE: audience })).toBe(true);
+    expect(budgetPushMisconfigured({ BUDGET_PUSH_SERVICE_ACCOUNT: serviceAccount })).toBe(true);
+    expect(
+      budgetPushMisconfigured({
+        BUDGET_PUSH_AUDIENCE: 'http://x.example',
+        BUDGET_PUSH_SERVICE_ACCOUNT: serviceAccount,
+      }),
+    ).toBe(true);
+  });
+  it('the budget display name defaults to the Terraform one and can be overridden', () => {
+    const env = { BUDGET_PUSH_AUDIENCE: audience, BUDGET_PUSH_SERVICE_ACCOUNT: serviceAccount };
+    expect(budgetPushConfigFromEnvironment(env)?.displayName).toBe('ai-investing-monthly');
+    expect(
+      budgetPushConfigFromEnvironment({ ...env, BUDGET_DISPLAY_NAME: 'my-budget' })?.displayName,
+    ).toBe('my-budget');
+    expect(
+      budgetPushConfigFromEnvironment({ ...env, BUDGET_DISPLAY_NAME: 'bad<name>' })?.displayName,
+    ).toBe('ai-investing-monthly');
+  });
+  it('the message must carry the configured display name', () => {
+    expect(parseBudgetMessage(body(), Date.now(), 'ai-investing-monthly')).not.toBeNull();
+    expect(parseBudgetMessage(body(), Date.now(), 'other-name')).toBeNull();
   });
 });
 
@@ -225,7 +271,7 @@ describe('budget service', () => {
     repository = new MemoryBudgetRepository();
     algorithms = new MemoryAlgorithmRepository();
     events = [];
-    clock = Date.parse('2026-10-21T01:00:00Z');
+    clock = Date.parse('2026-11-02T01:00:00Z');
     let id = 0;
     service = new BudgetService({
       repository,
@@ -258,7 +304,7 @@ describe('budget service', () => {
     expect(kinds()).toEqual(['budget-warning', 'budget-warning']);
     // A threshold notification at the warning level counts too.
     await service.handle(
-      update({ intervalStart: '2026-12-01T07:00:00.000Z', thresholdExceeded: 0.9 }),
+      update({ intervalStart: '2026-11-02T00:00:00.000Z', thresholdExceeded: 0.9 }),
     );
     expect(kinds()).toHaveLength(3);
   });
@@ -368,11 +414,11 @@ describe('budget service', () => {
 
   describe('owner release', () => {
     it('does nothing when nothing is stopped', async () => {
-      expect((await service.release()).released).toBe(false);
+      expect((await service.release('owner-1')).released).toBe(false);
     });
     it('clears the flag for this interval only, records history, keeps the emergency stop', async () => {
       await service.handle(update({ costAmount: 30000 }));
-      const result = await service.release();
+      const result = await service.release('owner-1');
       expect(result.released).toBe(true);
       expect(result.state).toMatchObject({ stopped: false, releasedIntervalStart: OCT });
       expect((await algorithms.getControl()).emergencyStop).toBe(true);
@@ -385,6 +431,53 @@ describe('budget service', () => {
       expect((await service.handle(update({ intervalStart: NOV, costAmount: 31000 }))).action).toBe(
         'stopped',
       );
+    });
+    it('stores who released in the same write', async () => {
+      await service.handle(update({ costAmount: 30000 }));
+      const result = await service.release('owner-1');
+      expect(result.state).toMatchObject({ releasedBy: 'owner-1', stopped: false });
+      expect(await repository.get()).toMatchObject({ releasedBy: 'owner-1' });
+    });
+    it('a failing history write aborts the release: still stopped, error raised', async () => {
+      await service.handle(update({ costAmount: 30000 }));
+      algorithms.recordEvent = async () => {
+        throw new Error('history down');
+      };
+      await expect(service.release('owner-1')).rejects.toThrow();
+      expect(await repository.get()).toMatchObject({ stopped: true });
+      expect((await repository.get())?.releasedBy).toBeUndefined();
+    });
+  });
+
+  describe('crafted and bookkeeping messages', () => {
+    it('a billing interval that has not started yet changes nothing, even with zero cost', async () => {
+      await service.handle(update({ costAmount: 30000 }));
+      const crafted = new Date(clock + 12 * 3_600_000).toISOString();
+      expect((await service.handle(update({ intervalStart: crafted, costAmount: 0 }))).action).toBe(
+        'future',
+      );
+      expect(await repository.get()).toMatchObject({ stopped: true, intervalStart: OCT });
+      expect(kinds()).toEqual(['budget-stop']);
+      // Nothing is stored for a first-ever message of that kind either.
+      const fresh = new MemoryBudgetRepository();
+      const other = new BudgetService({
+        repository: fresh,
+        algorithms,
+        now: () => new Date(clock),
+      });
+      await other.handle(update({ intervalStart: crafted, costAmount: 30000 }));
+      expect(await fresh.get()).toBeNull();
+      expect((await algorithms.getControl()).emergencyStop).toBe(true);
+    });
+    it('records when the last valid notification arrived, also for stale and ignored ones', async () => {
+      await service.handle(update({ costAmount: 5000 }));
+      expect((await repository.get())?.lastMessageAt).toBe(new Date(clock).toISOString());
+      clock += 60_000;
+      await service.handle(update({ intervalStart: '2026-09-01T07:00:00.000Z' }));
+      expect((await repository.get())?.lastMessageAt).toBe(new Date(clock).toISOString());
+      clock += 60_000;
+      await service.handle(update({ intervalStart: new Date(clock + 3_600_000).toISOString() }));
+      expect((await repository.get())?.lastMessageAt).toBe(new Date(clock).toISOString());
     });
   });
 });
@@ -560,14 +653,18 @@ describe('job gate', () => {
     expect(await gateJob(guardOf('stopped'), log, { failClosed: false })).toBe('ok');
     expect(await aiBlockedByBudget()).toBe(true);
   });
-  it('every job entry calls the gate; only the live job fails closed', () => {
+  it('every job entry gates at the start; the live job applies the flag after reconciling', () => {
     const jobs: [string, boolean][] = [
       ['daily-snapshot', false],
       ['morning-calendar', false],
       ['algo-paper', false],
-      ['algo-live', true],
       ['order-access-check', false],
     ];
+    // The live job reconciles first and applies the flag itself (docs/operations/budget.md).
+    const live = readFileSync('src/jobs/algo-live.ts', 'utf8');
+    expect(live).toContain('installJobBudgetGuard(db)');
+    expect(live).toContain('budget: () => budgetGuard.status()');
+    expect(live).not.toContain('budgetJobGate(');
     for (const [name, closed] of jobs) {
       const source = readFileSync(`src/jobs/${name}.ts`, 'utf8');
       expect(source, name).toContain(`budgetJobGate(db, log, { failClosed: ${closed} })`);
@@ -691,6 +788,22 @@ describe('HTTP: webhook and owner API', () => {
       expect((await request(app).get('/api/internal/budget-alert')).status).toBe(401);
       expect((await request(app).get('/api/ops/budget')).status).toBe(401);
       expect((await request(app).post('/api/ops/budget/release').send({})).status).toBe(403);
+    });
+    it('path case and trailing-slash variants without a token are 401, never a state change', async () => {
+      const app = appWith();
+      for (const path of [
+        '/api/internal/budget-alert/',
+        '/API/INTERNAL/BUDGET-ALERT',
+        '/Api/Internal/Budget-Alert/',
+        '/api/internal/budget-alert?x=1',
+      ]) {
+        const response = await request(app)
+          .post(path)
+          .send(body({ costAmount: 99999 }));
+        expect(response.status, path).toBe(401);
+      }
+      expect(await budgetRepository.get()).toBeNull();
+      expect(telegram).not.toHaveBeenCalled();
     });
     it('rejects a missing, invalid or mismatching token with one plain 401 and no side effect', async () => {
       const cases: (VerifiedToken | null | Error)[] = [
@@ -851,8 +964,16 @@ describe('Terraform budget stop (static checks)', () => {
   it('gives the push service account no project roles; only the Pub/Sub agent may mint its token', () => {
     expect(budget).not.toMatch(/google_project_iam_(member|binding)"[^{]*\{[^}]*budget_push/);
     expect(budget).toMatch(
-      /resource "google_service_account_iam_member" "pubsub_token_creator"[\s\S]*service_account_id\s*=\s*google_service_account\.budget_push\.name[\s\S]*roles\/iam\.serviceAccountTokenCreator[\s\S]*gcp-sa-pubsub\.iam\.gserviceaccount\.com/,
+      /resource "google_service_account_iam_member" "pubsub_token_creator"[\s\S]*service_account_id\s*=\s*google_service_account\.budget_push\.name[\s\S]*roles\/iam\.serviceAccountTokenCreator[\s\S]*member\s*=\s*google_project_service_identity\.pubsub\.member/,
     );
+    // The service agent identity exists before the binding, and the API is enabled first.
+    expect(budget).toMatch(
+      /resource "google_project_service_identity" "pubsub"[\s\S]*?provider\s*=\s*google-beta[\s\S]*?service\s*=\s*"pubsub\.googleapis\.com"[\s\S]*?depends_on\s*=\s*\[google_project_service\.api\]/,
+    );
+    expect(budget).toMatch(
+      /resource "google_pubsub_subscription" "budget_push"[\s\S]*depends_on\s*=\s*\[google_project_service\.api, google_service_account_iam_member\.pubsub_token_creator\]/,
+    );
+    expect(main).toContain('hashicorp/google-beta');
     expect(budget).not.toContain('roles/owner');
     expect(budget).not.toContain('roles/editor');
   });

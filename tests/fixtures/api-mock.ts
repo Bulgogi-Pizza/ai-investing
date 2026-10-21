@@ -279,6 +279,7 @@ export async function mockApi(page: Page, options: MockOptions = {}) {
           warned: state.budget === 'warned',
           stoppedAt: stopped ? '2026-10-20T01:00:00Z' : null,
           releasedAt: null,
+          lastMessageAt: '2026-10-20T00:30:00Z',
           updatedAt: null,
         },
         emergencyStop: true,

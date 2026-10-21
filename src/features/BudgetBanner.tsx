@@ -11,6 +11,7 @@ export type BudgetView = {
   stopped: boolean;
   warned: boolean;
   stoppedAt: string | null;
+  lastMessageAt: string | null;
   emergencyStop: boolean;
   enabled: boolean;
 };
@@ -29,6 +30,7 @@ export function parseBudget(body: unknown): BudgetView {
     stopped: budget.stopped,
     warned: budget.warned,
     stoppedAt: typeof budget.stoppedAt === 'string' ? budget.stoppedAt : null,
+    lastMessageAt: typeof budget.lastMessageAt === 'string' ? budget.lastMessageAt : null,
     emergencyStop: body.emergencyStop,
     enabled: body.enabled,
   };
@@ -109,6 +111,13 @@ export default function BudgetBanner() {
             <small>한도(3만 원)에 도달하면 예약 작업·AI·실전 주문이 자동으로 멈춥니다.</small>
           </div>
         </section>
+      )}
+      {budget && (
+        <p className="budget-status" data-testid="budget-status">
+          {budget.enabled
+            ? `월 예산 감시 연결됨 · 마지막 예산 알림 수신: ${budget.lastMessageAt ? `${formatKst(budget.lastMessageAt)} KST` : '아직 없음'}`
+            : '월 예산 자동 중지가 꺼져 있습니다(설정이 필요합니다). 마지막 예산 알림 수신: 없음'}
+        </p>
       )}
       {message && (
         <p

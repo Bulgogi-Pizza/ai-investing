@@ -36,11 +36,19 @@ resource "google_service_account" "budget_push" {
   depends_on   = [google_project_service.api]
 }
 
+# Creates the Pub/Sub service agent (service-<project number>@gcp-sa-pubsub...) if it does not exist yet,
+# so the binding below cannot fail on a missing identity. The provider documents the resource as beta.
+resource "google_project_service_identity" "pubsub" {
+  provider   = google-beta
+  service    = "pubsub.googleapis.com"
+  depends_on = [google_project_service.api]
+}
+
 # The Pub/Sub service agent mints the OIDC token for this one service account (and no other).
 resource "google_service_account_iam_member" "pubsub_token_creator" {
   service_account_id = google_service_account.budget_push.name
   role               = "roles/iam.serviceAccountTokenCreator"
-  member             = "serviceAccount:service-${data.google_project.current.number}@gcp-sa-pubsub.iam.gserviceaccount.com"
+  member             = google_project_service_identity.pubsub.member
 }
 
 resource "google_pubsub_subscription" "budget_push" {
@@ -62,5 +70,5 @@ resource "google_pubsub_subscription" "budget_push" {
       audience              = var.service_url
     }
   }
-  depends_on = [google_service_account_iam_member.pubsub_token_creator]
+  depends_on = [google_project_service.api, google_service_account_iam_member.pubsub_token_creator]
 }

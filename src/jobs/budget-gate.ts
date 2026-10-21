@@ -13,7 +13,8 @@ import type { JobLogger, JobOutcome } from './runner.js';
  *
  * - `failClosed: false` (snapshot, morning, paper, access check): an unreadable flag lets the job
  *   run. These jobs are cheap and a missed snapshot is data that cannot be recovered later.
- * - `failClosed: true` (live trading): an unreadable flag stops the job (exit 1, so it is visible).
+ * - `failClosed: true`: an unreadable flag stops the job (exit 1, so it is visible). The live job does
+ *   not use this exit-early gate: it reconciles open orders first (installJobBudgetGuard below).
  *
  * A skipped job writes no run record on purpose: nothing looks "complete" for that day, so the
  * next scheduled run (after a release or a new billing month) does the work.
@@ -37,6 +38,16 @@ export async function gateJob(
     log.warn('budget-check-failed', { code: 'BUDGET_UNKNOWN' });
   }
   return undefined;
+}
+
+/**
+ * Installs the guard (AI gate) and returns it, for the live job: it must reconcile existing orders
+ * even while the budget is stopped, so it applies the flag itself instead of exiting at the start.
+ */
+export function installJobBudgetGuard(db: Firestore) {
+  const guard = new BudgetGuard(new FirestoreBudgetRepository(db));
+  installBudgetGuard(guard);
+  return guard;
 }
 
 /** The entry-point form: reads opsControl/budget through the job's own Firestore client. */

@@ -4,9 +4,17 @@ terraform {
   backend "gcs" {}
   required_providers {
     google = { source = "hashicorp/google", version = "~> 6.0" }
+    # Only for google_project_service_identity (budget.tf), which the provider documents as beta.
+    google-beta = { source = "hashicorp/google-beta", version = "~> 6.0" }
   }
 }
 provider "google" {
+  project               = var.project_id
+  region                = var.region
+  billing_project       = var.project_id
+  user_project_override = true
+}
+provider "google-beta" {
   project               = var.project_id
   region                = var.region
   billing_project       = var.project_id

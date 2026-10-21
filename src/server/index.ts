@@ -29,6 +29,7 @@ import {
   FirestoreBudgetRepository,
   MemoryBudgetRepository,
   budgetPushConfigFromEnvironment,
+  budgetPushMisconfigured,
   installBudgetGuard,
 } from './budget-guard.js';
 import { FirestoreStore, MemoryStore } from './store.js';
@@ -73,6 +74,8 @@ const tradingStore = production ? new FirestoreTradingStore() : new MemoryTradin
 const budgetRepository = production
   ? new FirestoreBudgetRepository()
   : new MemoryBudgetRepository();
+// Half-set or malformed push identity leaves the webhook off (404) without any other sign.
+if (budgetPushMisconfigured()) console.warn('budget-push-config-invalid');
 const budgetGuard = new BudgetGuard(budgetRepository);
 installBudgetGuard(budgetGuard);
 const app = createApp({

@@ -13,6 +13,9 @@ test.describe('monthly budget banner', () => {
     await expect(page.getByRole('heading', { name: '경제 캘린더', exact: true })).toBeVisible();
     await expect(page.getByTestId('budget-stop')).toHaveCount(0);
     await expect(page.getByTestId('budget-warn')).toHaveCount(0);
+    // The pipeline's last sign of life stays visible to the owner.
+    await expect(page.getByTestId('budget-status')).toContainText('마지막 예산 알림 수신');
+    await expect(page.getByTestId('budget-status')).toContainText('2026. 10. 20.');
   });
 
   test('a stopped budget is announced and can be released after a confirmation', async ({

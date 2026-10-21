@@ -143,6 +143,7 @@ type Scenario = {
   failControl?: boolean;
   notifyThrows?: boolean;
   noPaperHistory?: boolean;
+  budget?: 'running' | 'stopped' | 'unknown';
 };
 function harness(s: Scenario = {}) {
   const market = s.market ?? 'KR';
@@ -224,6 +225,7 @@ function harness(s: Scenario = {}) {
       events.push(event);
     },
     ai: s.ai,
+    ...(s.budget ? { budget: async () => s.budget! } : {}),
     now: () => now,
     sleep: async () => {},
     log: createJobLogger(JOB_NAME, (line) => logs.push(line)),
@@ -1322,5 +1324,103 @@ describe('algo-live job: unreadable control state is a failure, not a quiet skip
     await expect(h.run()).resolves.toBe('failed');
     expect(orderPosts(h.fake)).toHaveLength(0);
     expect(h.events).toContainEqual({ kind: 'job-failure', jobName: 'algo-live' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+describe('algo-live job: monthly budget stop (docs/operations/budget.md)', () => {
+  /** A buy that rests at the broker and has filled since: the books must still catch up. */
+  async function restingFilledBuy(h: ReturnType<typeof harness>) {
+    await seedOrder(
+      h.store,
+      {
+        clientOrderId: 'ai-earlier',
+        algorithmId: ID1,
+        quantity: 20,
+        price: '70000',
+        createdAt: '2026-10-20T01:00:00.000Z',
+      },
+      'accepted',
+    );
+    const [seeded] = await h.store.listOrders({ algorithmId: ID1 });
+    h.fake.orders.push({
+      orderId: seeded.orderId!,
+      clientOrderId: null,
+      symbol: '005930',
+      side: 'BUY',
+      orderType: 'LIMIT',
+      timeInForce: 'DAY',
+      status: 'FILLED',
+      price: '70000',
+      quantity: '20',
+      currency: 'KRW',
+      orderedAt: '2026-10-20T01:00:00.000Z',
+      filledQuantity: '20',
+      averageFilledPrice: '69900',
+    });
+  }
+  const fillNotice = {
+    kind: 'fill',
+    mode: 'live',
+    symbol: '005930',
+    side: 'buy',
+    status: 'filled',
+    algorithmName: '실전 테스트',
+  };
+
+  it('stopped: still reconciles the resting order (ledger + fill notice) but decides and orders nothing', async () => {
+    const h = harness({ budget: 'stopped' });
+    await h.seedPaperRecord();
+    await restingFilledBuy(h);
+    expect(await h.run()).toBe('ok');
+    expect(await h.store.getOrder('ai-earlier')).toMatchObject({
+      status: 'filled',
+      filledQuantity: 20,
+    });
+    expect(h.events).toContainEqual(fillNotice);
+    expect(h.events.map((e) => e.kind)).not.toContain('job-failure');
+    expect(orderPosts(h.fake)).toHaveLength(0);
+    // No decision work at all: no calendar, price or daily-bar read, no run record.
+    expect(h.toss.marketCalendar).not.toHaveBeenCalled();
+    expect(h.toss.prices).not.toHaveBeenCalled();
+    expect(h.toss.dailyCandles).not.toHaveBeenCalled();
+    expect(await h.paper.listRuns('KR', 10)).toEqual([]);
+    expect(await h.store.getJobHeartbeat('KR')).toMatchObject({
+      outcome: 'skipped',
+      code: 'BUDGET_STOPPED',
+    });
+    expect(h.logs.some((line) => line.includes('BUDGET_STOPPED'))).toBe(true);
+  });
+
+  it('unknown: reconciles, raises a job-failure notice, fails the run and still orders nothing', async () => {
+    const h = harness({ budget: 'unknown' });
+    await h.seedPaperRecord();
+    await restingFilledBuy(h);
+    expect(await h.run()).toBe('failed');
+    expect(await h.store.getOrder('ai-earlier')).toMatchObject({ status: 'filled' });
+    expect(h.events).toContainEqual(fillNotice);
+    expect(h.events).toContainEqual({ kind: 'job-failure', jobName: JOB_NAME });
+    expect(orderPosts(h.fake)).toHaveLength(0);
+    expect(h.toss.marketCalendar).not.toHaveBeenCalled();
+    expect(await h.store.getJobHeartbeat('KR')).toMatchObject({
+      outcome: 'failed',
+      code: 'BUDGET_UNKNOWN',
+    });
+  });
+
+  it('a reconcile failure while stopped is logged and never turns into an order', async () => {
+    const h = harness({ budget: 'stopped' });
+    await h.seedPaperRecord();
+    await restingFilledBuy(h);
+    h.fake.orders.length = 0; // the broker no longer knows the order
+    expect(await h.run()).toBe('ok');
+    expect(orderPosts(h.fake)).toHaveLength(0);
+  });
+
+  it('running (or no budget wiring) trades as before', async () => {
+    const h = harness({ budget: 'running' });
+    await h.seedPaperRecord();
+    await h.run();
+    expect(orderPosts(h.fake)).toHaveLength(1);
   });
 });
