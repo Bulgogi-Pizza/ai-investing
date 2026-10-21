@@ -119,7 +119,7 @@ AI 어댑터는 작업 환경변수 `MORNING_AI_ENABLED`가 정확히 `true`일 
 
 ### 기능별 일일 한도
 
-기존 하루 25회 공용 한도를 기능별로 나눴다(`ai.ts`의 `AI_FEATURE_LIMITS`): **explanation 25**(기존 문서 `aiUsage/{KST날짜}` 그대로), **morning 4**(`aiUsage/{KST날짜}_morning`), **calendar 20**(`aiUsage/{KST날짜}_calendar`, 캘린더 보강 호출. 아래 절), 알고리즘 판단은 별도 카운터 `aiUsage/algorithm_{날짜}`(12회). 같은 Firestore 트랜잭션 패턴이고 `ttlAt` TTL을 공유한다. 호출 직전에 차감하고 실패해도 돌려주지 않는다. 아침 작업은 하루 2회(요약·번역)를 쓰므로 4회는 수동 재실행 두 번의 여유다. 한도 소진은 AI 단계만 건너뛰는 알려진 상태(`AI_QUOTA_EXCEEDED`, 실패 아님)이고, 한도 저장소 오류는 호출하지 않는다. 7c(알고리즘 판단)는 `AiFeature`에 항목을 더해 자기 한도를 갖는다.
+기존 하루 25회 공용 한도를 기능별로 나눴다(`ai.ts`의 `AI_FEATURE_LIMITS`): **explanation 25**(기존 문서 `aiUsage/{KST날짜}` 그대로), **morning 4**(`aiUsage/{KST날짜}_morning`), **calendar 하루 20만 토큰**(`aiUsage/{KST날짜}_calendar`의 `tokens`, 캘린더 보강 호출. 아래 절. 2026-10-21 사용자 결정으로 호출 20회 한도를 토큰 한도로 바꿨다. 호출 전에 그날 기록된 토큰이 한도 미만인지 보고, 호출이 끝나면 실제 사용량(입력+출력)을 더한다. 마지막 호출이 한 번 크기(최대 약 2만 토큰)만큼 넘을 수 있다), 알고리즘 판단은 별도 카운터 `aiUsage/algorithm_{날짜}`(12회). 같은 Firestore 트랜잭션 패턴이고 `ttlAt` TTL을 공유한다. 호출 직전에 차감하고 실패해도 돌려주지 않는다. 아침 작업은 하루 2회(요약·번역)를 쓰므로 4회는 수동 재실행 두 번의 여유다. 한도 소진은 AI 단계만 건너뛰는 알려진 상태(`AI_QUOTA_EXCEEDED`, 실패 아님)이고, 한도 저장소 오류는 호출하지 않는다. 7c(알고리즘 판단)는 `AiFeature`에 항목을 더해 자기 한도를 갖는다.
 
 ### 비용 상한 (계산 근거)
 
